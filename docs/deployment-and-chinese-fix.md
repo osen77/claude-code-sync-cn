@@ -212,68 +212,86 @@ Claude Code 在存储对话历史时，会将路径中的非 ASCII 字符（如�
 3. **Pull 时**：尝试匹配本地目录，但 `extract_project_name("-Users-mini-Documents-Projects-----")` 返回 `Projects`
 4. **匹配失败**：`Projects` ≠ `安装环境`
 
+#### 深层问题
+
+经过调试发现，中文项目名匹配失败的根本原因有**两个**：
+
+**问题 1：跨平台路径解析**
+
+- Windows 推送的 JSONL 文件包含 Windows 路径：`C:\Users\OSEN\Downloads\GitHub\安装环境`
+- Mac/Linux 上使用 `std::path::Path::file_name()` 提取项目名时，无法识别 Windows 的 `\` 分隔符
+- 结果：整个 `C:\Users\...\安装环境` 被当作一个文件名，无法提取出 `安装环境`
+
+**问题 2：JSONL 文件扫描逻辑缺陷**
+
+- 目录中可能有多个 JSONL 文件（对话文件、文件历史快照等）
+- 如果第一个扫描到的文件是快照文件（没有 `cwd` 字段），原代码会直接 `break`
+- 结果：跳过其他包含有效 `cwd` 的文件，匹配失败
+
 ### 修复方案
 
-修改 `src/sync/discovery.rs` 中的 `find_local_project_by_name()` 函数，增加基于 JSONL 内部 `cwd` 字段的匹配逻辑：
+需要修改 **2 个文件** 来彻底解决问题：
+
+#### 修复 1：`src/parser.rs` - 支持跨平台路径解析
+
+修改 `project_name()` 函数，同时支持 Unix 和 Windows 路径分隔符：
 
 ```rust
-/// Find a local Claude project directory that matches the given project name.
+/// Get the project name from the first entry's `cwd` path
 ///
-/// First tries to match by extracting project name from encoded directory name.
-/// If that fails (e.g., for non-ASCII project names like Chinese characters),
-/// falls back to reading a JSONL file from each directory and extracting the
-/// project name from the `cwd` field.
-pub fn find_local_project_by_name(claude_projects_dir: &Path, project_name: &str) -> Option<PathBuf> {
-    let entries: Vec<_> = std::fs::read_dir(claude_projects_dir)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_dir())
-        .collect();
-
-    // First pass: try matching by encoded directory name
-    let matches: Vec<PathBuf> = entries
+/// This function handles both Unix and Windows paths to support
+/// cross-platform sync (e.g., pulling Windows paths on Mac/Linux).
+pub fn project_name(&self) -> Option<&str> {
+    self.entries
         .iter()
-        .filter(|e| {
-            e.file_name()
-                .to_str()
-                .map(|name| extract_project_name(name) == project_name)
-                .unwrap_or(false)
+        .find_map(|e| e.cwd.as_ref())
+        .and_then(|cwd| {
+            // Split by both / and \ to handle cross-platform paths
+            // Take the last non-empty component
+            cwd.split(&['/', '\\'])
+                .filter(|s| !s.is_empty())
+                .last()
         })
-        .map(|e| e.path())
-        .collect();
+}
+```
 
-    // Return only if exactly one match to avoid ambiguity
-    if matches.len() == 1 {
-        return Some(matches.into_iter().next().unwrap());
-    }
+#### 修复 2：`src/sync/discovery.rs` - 改进 JSONL 扫描逻辑
 
-    // Second pass: read JSONL files to get real project name from cwd field
-    // This handles non-ASCII project names (e.g., Chinese) that get encoded as dashes
-    for entry in &entries {
-        let dir_path = entry.path();
+修改 `find_local_project_by_name()` 函数的第二遍扫描逻辑：
 
-        // Find first .jsonl file in the directory
-        if let Ok(files) = std::fs::read_dir(&dir_path) {
-            for file_entry in files.filter_map(|f| f.ok()) {
-                let file_path = file_entry.path();
-                if file_path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-                    // Try to parse and get project name from cwd
-                    if let Ok(session) = crate::parser::ConversationSession::from_file(&file_path) {
-                        if let Some(real_name) = session.project_name() {
-                            if real_name == project_name {
-                                return Some(dir_path);
-                            }
+```rust
+// Second pass: read JSONL files to get real project name from cwd field
+// This handles non-ASCII project names (e.g., Chinese) that get encoded as dashes
+for entry in &entries {
+    let dir_path = entry.path();
+
+    // Try to find a .jsonl file with a valid project name in this directory
+    if let Ok(files) = std::fs::read_dir(&dir_path) {
+        for file_entry in files.filter_map(|f| f.ok()) {
+            let file_path = file_entry.path();
+            if file_path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+                // Try to parse and get project name from cwd
+                if let Ok(session) = crate::parser::ConversationSession::from_file(&file_path) {
+                    if let Some(real_name) = session.project_name() {
+                        // Found a valid project name, check if it matches
+                        if real_name == project_name {
+                            return Some(dir_path);
+                        } else {
+                            // Doesn't match, skip rest of this directory
+                            break;
                         }
                     }
-                    break; // Only need to check one file per directory
+                    // If project_name() is None, continue to try next file
                 }
             }
         }
     }
-
-    None
 }
 ```
+
+**关键改动**：
+- ✅ 当 `project_name()` 返回 `None` 时，**继续尝试下一个 JSONL 文件**
+- ✅ 只有在找到有效项目名但不匹配时，才跳过该目录
 
 ### 应用修复
 
@@ -283,6 +301,24 @@ pub fn find_local_project_by_name(claude_projects_dir: &Path, project_name: &str
 cd claude-code-sync
 cargo build --release
 cargo install --path . --force
+```
+
+### 验证修复
+
+测试同步功能：
+
+```bash
+# 查看同步前的状态
+claude-code-sync status
+
+# 执行 pull
+claude-code-sync pull
+
+# 检查是否有"No matching local project found"警告
+# 成功的话应该没有中文项目名的警告
+
+# 查看同步后的状态（本地 sessions 数量应该增加）
+claude-code-sync status
 ```
 
 ---
@@ -321,4 +357,19 @@ cargo install --path . --force
 
 ---
 
-*文档更新日期：2026-02-01*
+## 修复历史
+
+### 2026-02-01 - 完整修复跨平台路径问题
+
+**修复内容：**
+1. `src/parser.rs`: 支持跨平台路径解析（同时识别 `/` 和 `\`）
+2. `src/sync/discovery.rs`: 改进 JSONL 扫描逻辑，支持多文件尝试
+
+**修复效果：**
+- ✅ 支持 Windows ↔ Mac/Linux 跨平台同步中文项目名
+- ✅ 解决文件历史快照导致的扫描中断问题
+- ✅ 完美匹配所有非 ASCII 字符项目名
+
+---
+
+*文档最后更新：2026-02-01*
