@@ -105,20 +105,27 @@ pub fn extract_project_name(encoded_path: &str) -> &str {
         .unwrap_or(encoded_path)
 }
 
-/// Find a local Claude project directory that ends with the given project name.
+/// Find a local Claude project directory that matches the given project name.
 ///
-/// Scans `~/.claude/projects/` for directories whose encoded name ends with
-/// the specified project name. Returns the path if exactly one match is found.
+/// Scans `~/.claude/projects/` for directories that match the specified project name.
+/// First tries to match by extracting project name from encoded directory name.
+/// If that fails (e.g., for non-ASCII project names like Chinese characters),
+/// falls back to reading a JSONL file from each directory and extracting the
+/// project name from the `cwd` field.
 ///
 /// # Returns
 /// - `Some(PathBuf)` if exactly one matching project directory is found
 /// - `None` if no match found or multiple matches (ambiguous)
 pub fn find_local_project_by_name(claude_projects_dir: &Path, project_name: &str) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(claude_projects_dir).ok()?;
-
-    let matches: Vec<PathBuf> = entries
+    let entries: Vec<_> = std::fs::read_dir(claude_projects_dir)
+        .ok()?
         .filter_map(|e| e.ok())
         .filter(|e| e.path().is_dir())
+        .collect();
+
+    // First pass: try matching by encoded directory name
+    let matches: Vec<PathBuf> = entries
+        .iter()
         .filter(|e| {
             e.file_name()
                 .to_str()
@@ -130,10 +137,34 @@ pub fn find_local_project_by_name(claude_projects_dir: &Path, project_name: &str
 
     // Return only if exactly one match to avoid ambiguity
     if matches.len() == 1 {
-        Some(matches.into_iter().next().unwrap())
-    } else {
-        None
+        return Some(matches.into_iter().next().unwrap());
     }
+
+    // Second pass: read JSONL files to get real project name from cwd field
+    // This handles non-ASCII project names (e.g., Chinese) that get encoded as dashes
+    for entry in &entries {
+        let dir_path = entry.path();
+
+        // Find first .jsonl file in the directory
+        if let Ok(files) = std::fs::read_dir(&dir_path) {
+            for file_entry in files.filter_map(|f| f.ok()) {
+                let file_path = file_entry.path();
+                if file_path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+                    // Try to parse and get project name from cwd
+                    if let Ok(session) = crate::parser::ConversationSession::from_file(&file_path) {
+                        if let Some(real_name) = session.project_name() {
+                            if real_name == project_name {
+                                return Some(dir_path);
+                            }
+                        }
+                    }
+                    break; // Only need to check one file per directory
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Get all project directories in Claude's projects folder that would map to the same project name.
