@@ -145,7 +145,7 @@ pub fn find_local_project_by_name(claude_projects_dir: &Path, project_name: &str
     for entry in &entries {
         let dir_path = entry.path();
 
-        // Find first .jsonl file in the directory
+        // Try to find a .jsonl file with a valid project name in this directory
         if let Ok(files) = std::fs::read_dir(&dir_path) {
             for file_entry in files.filter_map(|f| f.ok()) {
                 let file_path = file_entry.path();
@@ -153,12 +153,16 @@ pub fn find_local_project_by_name(claude_projects_dir: &Path, project_name: &str
                     // Try to parse and get project name from cwd
                     if let Ok(session) = crate::parser::ConversationSession::from_file(&file_path) {
                         if let Some(real_name) = session.project_name() {
+                            // Found a valid project name, check if it matches
                             if real_name == project_name {
                                 return Some(dir_path);
+                            } else {
+                                // Doesn't match, skip rest of this directory
+                                break;
                             }
                         }
+                        // If project_name() is None, continue to try next file
                     }
-                    break; // Only need to check one file per directory
                 }
             }
         }

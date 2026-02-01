@@ -210,12 +210,20 @@ impl ConversationSession {
     }
 
     /// Get the project name from the first entry's `cwd` path
+    ///
+    /// This function handles both Unix and Windows paths to support
+    /// cross-platform sync (e.g., pulling Windows paths on Mac/Linux).
     pub fn project_name(&self) -> Option<&str> {
         self.entries
             .iter()
             .find_map(|e| e.cwd.as_ref())
-            .and_then(|cwd| std::path::Path::new(cwd).file_name())
-            .and_then(|name| name.to_str())
+            .and_then(|cwd| {
+                // Split by both / and \ to handle cross-platform paths
+                // Take the last non-empty component
+                cwd.split(&['/', '\\'])
+                    .filter(|s| !s.is_empty())
+                    .last()
+            })
     }
 
     /// Calculate a simple hash of the conversation content
