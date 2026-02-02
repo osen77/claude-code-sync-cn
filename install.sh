@@ -34,7 +34,7 @@ ARCH=$(uname -m)
 case "$OS" in
     darwin)
         OS_NAME="macOS"
-        BINARY_OS="darwin"
+        BINARY_OS="macos"
         ;;
     linux)
         OS_NAME="Linux"
@@ -50,12 +50,12 @@ esac
 
 case "$ARCH" in
     x86_64|amd64)
-        ARCH_NAME="x64"
-        BINARY_ARCH="x64"
+        ARCH_NAME="x86_64"
+        BINARY_ARCH="x86_64"
         ;;
     arm64|aarch64)
-        ARCH_NAME="ARM64"
-        BINARY_ARCH="arm64"
+        ARCH_NAME="aarch64"
+        BINARY_ARCH="aarch64"
         ;;
     *)
         error "不支持的架构: $ARCH"
@@ -65,8 +65,8 @@ esac
 info "检测到系统: ${OS_NAME} (${ARCH_NAME})"
 echo ""
 
-# Construct binary name
-BINARY_NAME="claude-code-sync-${BINARY_OS}-${BINARY_ARCH}"
+# Construct asset name (tar.gz format from release-new.yml)
+ASSET_NAME="claude-code-sync-${BINARY_OS}-${BINARY_ARCH}.tar.gz"
 
 # Get latest version
 info "📦 获取最新版本..."
@@ -105,17 +105,22 @@ if command -v claude-code-sync &> /dev/null; then
 fi
 
 # Download
-DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST_VERSION}/${BINARY_NAME}"
+DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST_VERSION}/${ASSET_NAME}"
 
 info "📥 正在下载..."
 info "   ${DOWNLOAD_URL}"
 echo ""
 
-# Create install directory
+# Create install directory and temp directory
 mkdir -p "$INSTALL_DIR"
+TEMP_DIR=$(mktemp -d)
+trap "rm -rf $TEMP_DIR" EXIT
 
 # Download with progress
-if curl -fSL --progress-bar "$DOWNLOAD_URL" -o "${INSTALL_DIR}/claude-code-sync"; then
+if curl -fSL --progress-bar "$DOWNLOAD_URL" -o "${TEMP_DIR}/${ASSET_NAME}"; then
+    # Extract tar.gz
+    tar -xzf "${TEMP_DIR}/${ASSET_NAME}" -C "${TEMP_DIR}"
+    mv "${TEMP_DIR}/claude-code-sync" "${INSTALL_DIR}/claude-code-sync"
     chmod +x "${INSTALL_DIR}/claude-code-sync"
     success "✓ 下载完成"
 else

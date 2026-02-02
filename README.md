@@ -1,785 +1,524 @@
 # claude-code-sync
 
-[![Unit Tests](https://github.com/perfectra1n/claude-code-sync/actions/workflows/unit-tests.yml/badge.svg)](https://github.com/perfectra1n/claude-code-sync/actions/workflows/unit-tests.yml)
-[![Integration Tests](https://github.com/perfectra1n/claude-code-sync/actions/workflows/integration-tests.yml/badge.svg)](https://github.com/perfectra1n/claude-code-sync/actions/workflows/integration-tests.yml)
-[![Build](https://github.com/perfectra1n/claude-code-sync/actions/workflows/build.yml/badge.svg)](https://github.com/perfectra1n/claude-code-sync/actions/workflows/build.yml)
-[![Documentation](https://github.com/perfectra1n/claude-code-sync/actions/workflows/docs.yml/badge.svg)](https://github.com/perfectra1n/claude-code-sync/actions/workflows/docs.yml)
+[![Release](https://github.com/osen77/claude-code-sync-cn/actions/workflows/release.yml/badge.svg)](https://github.com/osen77/claude-code-sync-cn/actions/workflows/release.yml)
 
-A Rust CLI tool for syncing Claude Code conversation history across machines using git repositories.
+一个用于同步 Claude Code 对话历史的 Rust CLI 工具，支持跨设备备份和版本控制。
 
 ![Demo](demo1.svg)
 
-## Documentation
+## 文档
 
-📚 **[View API Documentation](https://perfectra1n.github.io/claude-code-sync/)** - Complete API reference and code documentation
+📚 **[用户指南](docs/user-guide.md)** - 安装配置、多设备同步、常用命令
 
-To build and view documentation locally:
+📚 **[API 文档](https://perfectra1n.github.io/claude-code-sync/)** - 代码 API 参考
+
+本地构建文档：
 ```bash
-# Build and open documentation in your browser
 cargo doc --open --no-deps --all-features
 ```
 
-## Features
+## 功能特性
 
-| Feature | Description |
-|---------|-------------|
-| **Smart Merge** | Automatically combines non-conflicting conversation changes |
-| **Bidirectional Sync** | Pull and push changes in one command with `sync` |
-| **Interactive Onboarding** | First-time setup wizard guides you through configuration |
-| **Non-Interactive Init** | Config file support for CI/CD and automation |
-| **Smart Conflict Resolution** | Interactive TUI for resolving conflicts with preview |
-| **Selective Sync** | Filter by project, date, or exclude attachments |
-| **Git LFS Support** | Efficiently store large conversation files with Git LFS |
-| **Mercurial Support** | Use Mercurial (hg) as an alternative to Git |
-| **Undo Operations** | Rollback pull/push with automatic snapshots |
-| **Operation History** | Track and review past sync operations |
-| **Branch Management** | Sync to different branches, manage remotes |
-| **Detailed Logging** | Console and file logging with configurable levels |
-| **Conflict Tracking** | Comprehensive conflict reports in JSON/Markdown |
-| **Flexible Configuration** | TOML-based config with CLI overrides |
+| 功能 | 说明 |
+|------|------|
+| **智能合并** | 自动合并非冲突的对话变更 |
+| **双向同步** | `sync` 命令一键完成拉取和推送 |
+| **交互式配置** | 首次运行向导引导完成配置 |
+| **自动更新** | 启动时检查新版本，支持一键更新 |
+| **非交互式初始化** | 支持配置文件，适用于 CI/CD |
+| **智能冲突解决** | 交互式 TUI 预览和解决冲突 |
+| **选择性同步** | 按项目、日期过滤，排除附件 |
+| **Git LFS 支持** | 高效存储大文件 |
+| **Mercurial 支持** | 可选使用 Mercurial 替代 Git |
+| **撤销操作** | 自动快照，支持回滚 pull/push |
+| **操作历史** | 追踪和查看历史同步记录 |
+| **分支管理** | 同步到不同分支，管理远程仓库 |
+| **详细日志** | 控制台和文件日志，可配置级别 |
+| **冲突报告** | JSON/Markdown 格式的冲突报告 |
+| **灵活配置** | 基于 TOML 的配置，支持 CLI 覆盖 |
 
-## Overview
+## 概述
 
-`claude-code-sync` helps you backup and synchronize your Claude Code conversation history by pushing it to a git repository. This enables:
+`claude-code-sync` 将 Claude Code 对话历史同步到 Git 仓库，实现：
 
-- **Backup**: Never lose your Claude Code conversations
-- **Multi-machine sync**: Keep conversation history consistent across multiple computers
-- **Version control**: Track changes to your conversations over time
-- **Conflict resolution**: Automatically handles divergent conversation histories
+- **备份**：永不丢失 Claude Code 对话
+- **多设备同步**：在多台电脑间保持对话历史一致
+- **版本控制**：追踪对话历史的变更
+- **冲突解决**：自动处理不同设备上的历史分歧
 
-## How It Works
+## 工作原理
 
-Claude Code stores conversation history locally in `~/.claude/projects/` as JSONL (JSON Lines) files. Each project has its own directory, and each conversation is a separate `.jsonl` file.
+Claude Code 将对话历史存储在 `~/.claude/projects/` 目录下的 JSONL 文件中。每个项目有独立目录，每个对话是一个 `.jsonl` 文件。
 
-`claude-code-sync`:
-1. Discovers all conversation files in your local Claude Code history
-2. Copies them to a git repository
-3. Commits and optionally pushes to a remote
-4. On pull, merges remote changes with local history
-5. Detects conflicts (same session modified on different machines)
-6. Resolves conflicts by keeping both versions with renamed files
+`claude-code-sync` 的工作流程：
+1. 发现本地 Claude Code 历史中的所有对话文件
+2. 复制到 Git 仓库
+3. 提交并可选推送到远程
+4. 拉取时，合并远程变更到本地历史
+5. 检测冲突（同一会话在不同设备上被修改）
+6. 通过重命名文件保留两个版本来解决冲突
 
-## Installation
+## 安装
 
-### From Source
+### 一键安装（推荐）
 
 ```bash
-git clone https://github.com/perfectra1n/claude-code-sync
+# macOS / Linux
+curl -fsSL https://raw.githubusercontent.com/osen77/claude-code-sync-cn/main/install.sh | bash
+
+# Windows PowerShell
+irm https://raw.githubusercontent.com/osen77/claude-code-sync-cn/main/install.ps1 | iex
+```
+
+安装脚本会自动下载预编译二进制文件并运行配置向导。
+
+### 从源码安装
+
+```bash
+git clone https://github.com/osen77/claude-code-sync-cn
 cd claude-code-sync
-cargo build --release
-cargo install --path .
-claude-code-sync --help
-```
-
-### Using Cargo
-
-```bash
 cargo install --path .
 ```
 
-## Quick Start
+## 快速开始
 
-### First-Time Setup (Interactive Onboarding)
-
-When you run `claude-code-sync` for the first time, an interactive onboarding wizard will guide you through setup:
+### 首次配置（交互式向导）
 
 ```bash
-# Simply run any command - onboarding starts automatically
-claude-code-sync sync
-
-# Or explicitly run onboarding
-claude-code-sync init
+# 运行配置向导
+claude-code-sync setup
 ```
 
-The onboarding wizard will ask you:
-- Whether to use a remote repository or local directory
-- Where to store your sync repository
-- Remote URL (for remote repos) or path (for local)
-- Whether to exclude file attachments (images, PDFs, etc.)
-- How old conversations to sync (e.g., last 30 days)
+向导会引导你：
+- 选择同步模式（多设备/单设备）
+- 输入或创建远程仓库
+- 设置本地备份目录
+- 可选执行首次同步
 
-**Benefits of Interactive Onboarding:**
-- ✅ Step-by-step guidance for first-time users
-- ✅ Validates Git repository URLs and paths
-- ✅ Automatically clones remote repositories
-- ✅ Sets up sensible defaults based on your choices
-- ✅ No need to remember command-line flags
-
-### Manual Initialization (Advanced)
-
-If you prefer to skip onboarding, you can initialize manually:
+### 日常使用
 
 ```bash
-# Create a local sync repository
-claude-code-sync init --repo ~/claude-history-backup
-
-# Or with a remote git repository
-claude-code-sync init --repo ~/claude-history-backup --remote git@github.com:username/claude-history.git
-```
-
-### 2. Sync Your History
-
-```bash
-# Bidirectional sync (pull then push) - RECOMMENDED
+# 双向同步（推荐）
 claude-code-sync sync
 
-# Or manually:
-# Push all conversation history
-claude-code-sync push
-
-# Pull from remote
+# 仅拉取远程更新
 claude-code-sync pull
+
+# 仅推送本地变更
+claude-code-sync push -m "Daily backup"
 ```
 
-### 3. Advanced Usage
+### 检查更新
 
 ```bash
-# Exclude attachments (images, PDFs, etc.) - only sync .jsonl files
-claude-code-sync push --exclude-attachments
+# 检查新版本
+claude-code-sync update --check-only
 
-# Push to specific branch
-claude-code-sync push --branch main
-
-# Sync with custom message and exclude attachments
-claude-code-sync sync --message "Daily backup" --exclude-attachments
+# 更新到最新版本
+claude-code-sync update
 ```
 
-## Commands
+## 命令参考
+
+### `setup`
+
+交互式配置向导，首次使用推荐。
+
+```bash
+claude-code-sync setup
+```
 
 ### `init`
 
-Initialize a new sync repository.
+初始化同步仓库。
 
 ```bash
-claude-code-sync init --repo <path> [--remote <url>]
+claude-code-sync init --repo <路径> [--remote <URL>] [--clone]
 ```
 
-**Options:**
-- `--repo, -r <PATH>`: Path to the git repository for storing history
-- `--remote <URL>`: Optional remote git URL for pushing/pulling
-- `--config <PATH>`: Load configuration from TOML file (for non-interactive init)
+**选项：**
+- `--repo, -r <路径>`：存储历史的 Git 仓库路径
+- `--remote <URL>`：远程 Git URL
+- `--clone`：从远程克隆仓库
+- `--config <路径>`：从 TOML 文件加载配置
 
-**Example:**
+**示例：**
 ```bash
-claude-code-sync init --repo ~/claude-backup --remote git@github.com:user/claude-history.git
+claude-code-sync init --repo ~/claude-backup --remote git@github.com:user/claude-history.git --clone
 ```
 
-#### Non-Interactive Initialization (CI/CD)
+#### 非交互式初始化（CI/CD）
 
-For automation and headless environments, use a config file:
+创建配置文件 `~/.claude-code-sync-init.toml`：
 
-```bash
-# Use explicit config file
-claude-code-sync init --config /path/to/init-config.toml
-
-# Or use default config file locations (checked in order):
-# 1. $CLAUDE_CODE_SYNC_INIT_CONFIG environment variable
-# 2. ~/.claude-code-sync-init.toml
-# 3. <config-dir>/init.toml
-claude-code-sync init
-```
-
-**Example config file (`~/.claude-code-sync-init.toml`):**
 ```toml
 repo_path = "~/claude-history-sync"
 remote_url = "https://github.com/user/repo.git"
 clone = true
 exclude_attachments = true
-enable_lfs = true
-scm_backend = "git"
-sync_subdirectory = "projects"
+use_project_name_only = true
+```
+
+运行：
+```bash
+claude-code-sync init --config ~/.claude-code-sync-init.toml
 ```
 
 ### `sync`
 
-**NEW!** Bidirectional sync (pull remote changes, then push local changes).
+双向同步（先拉取后推送）。
 
 ```bash
-claude-code-sync sync [OPTIONS]
+claude-code-sync sync [选项]
 ```
 
-**Options:**
-- `--message, -m <MSG>`: Custom commit message for push
-- `--branch, -b <BRANCH>`: Branch to sync with (default: current branch)
-- `--exclude-attachments`: Only sync .jsonl files, exclude images/PDFs/etc.
+**选项：**
+- `--message, -m <消息>`：提交信息
+- `--branch, -b <分支>`：同步的分支（默认：当前分支）
+- `--exclude-attachments`：仅同步 .jsonl 文件
 
-**Example:**
+**示例：**
 ```bash
 claude-code-sync sync -m "Daily sync" --exclude-attachments
 ```
 
 ### `push`
 
-Push local Claude Code history to the sync repository.
+推送本地历史到同步仓库。
 
 ```bash
-claude-code-sync push [OPTIONS]
+claude-code-sync push [选项]
 ```
 
-**Options:**
-- `--message, -m <MSG>`: Custom commit message
-- `--push-remote`: Push to remote after committing (default: true)
-- `--branch, -b <BRANCH>`: Branch to push to (default: current branch)
-- `--exclude-attachments`: Only sync .jsonl files, exclude images/PDFs/etc.
-
-**Examples:**
-```bash
-# Basic push
-claude-code-sync push -m "Weekly backup"
-
-# Push to specific branch, excluding attachments
-claude-code-sync push --branch backup --exclude-attachments
-```
+**选项：**
+- `--message, -m <消息>`：提交信息
+- `--push-remote`：提交后推送到远程（默认：true）
+- `--branch, -b <分支>`：推送的分支
+- `--exclude-attachments`：仅同步 .jsonl 文件
 
 ### `pull`
 
-Pull and merge history from the sync repository.
+从同步仓库拉取并合并历史。
 
 ```bash
-claude-code-sync pull [OPTIONS]
+claude-code-sync pull [选项]
 ```
 
-**Options:**
-- `--fetch-remote`: Pull from remote before merging (default: true)
-- `--branch, -b <BRANCH>`: Branch to pull from (default: current branch)
-
-**Example:**
-```bash
-claude-code-sync pull --branch main
-```
+**选项：**
+- `--fetch-remote`：合并前从远程拉取（默认：true）
+- `--branch, -b <分支>`：拉取的分支
 
 ### `status`
 
-Show sync status and information.
+显示同步状态和信息。
 
 ```bash
 claude-code-sync status [--show-conflicts] [--show-files]
 ```
 
-**Options:**
-- `--show-conflicts`: Show detailed conflict information
-- `--show-files`: Show which files would be synced
-
-**Example:**
-```bash
-claude-code-sync status --show-conflicts --show-files
-```
+**选项：**
+- `--show-conflicts`：显示详细冲突信息
+- `--show-files`：显示将要同步的文件
 
 ### `config`
 
-Configure sync filters and settings.
+配置同步过滤器和设置。
 
 ```bash
-claude-code-sync config [OPTIONS] [--show]
+claude-code-sync config [选项] [--show]
 ```
 
-**Options:**
-- `--exclude-older-than <DAYS>`: Exclude projects older than N days
-- `--include-projects <PATTERNS>`: Include only specific project paths (comma-separated)
-- `--exclude-projects <PATTERNS>`: Exclude specific project paths (comma-separated)
-- `--exclude-attachments <true|false>`: Exclude file attachments (images, PDFs, etc.)
-- `--enable-lfs <true|false>`: Enable Git LFS for large files
-- `--lfs-patterns <PATTERNS>`: File patterns to track with LFS (comma-separated, default: `*.jsonl`)
-- `--scm-backend <BACKEND>`: SCM backend to use: `git` or `mercurial` (default: `git`)
-- `--sync-subdirectory <DIR>`: Subdirectory within sync repo for projects (default: `projects`)
-- `--show`: Show current configuration
+**选项：**
+- `--exclude-older-than <天数>`：排除超过 N 天的项目
+- `--include-projects <模式>`：仅包含特定项目（逗号分隔）
+- `--exclude-projects <模式>`：排除特定项目（逗号分隔）
+- `--exclude-attachments <true|false>`：排除附件
+- `--enable-lfs <true|false>`：启用 Git LFS
+- `--scm-backend <后端>`：SCM 后端：`git` 或 `mercurial`
+- `--sync-subdirectory <目录>`：同步仓库中的子目录（默认：`projects`）
+- `--show`：显示当前配置
 
-**Examples:**
+**示例：**
 ```bash
-# Exclude conversations older than 30 days
+# 排除超过 30 天的对话
 claude-code-sync config --exclude-older-than 30
 
-# Include only specific projects
-claude-code-sync config --include-projects "*my-project*,*important-work*"
+# 仅包含特定项目
+claude-code-sync config --include-projects "*my-project*,*important*"
 
-# Exclude test projects
-claude-code-sync config --exclude-projects "*test*,*temp*"
+# 启用 Git LFS
+claude-code-sync config --enable-lfs true
 
-# Permanently exclude attachments from all syncs
-claude-code-sync config --exclude-attachments true
-
-# Enable Git LFS for large files
-claude-code-sync config --enable-lfs true --lfs-patterns "*.jsonl,*.png"
-
-# Use Mercurial instead of Git
-claude-code-sync config --scm-backend mercurial
-
-# Store projects in a custom subdirectory
-claude-code-sync config --sync-subdirectory "claude-history"
-
-# Show current config
+# 显示当前配置
 claude-code-sync config --show
 ```
 
+### `update`
+
+检查并更新到最新版本。
+
+```bash
+claude-code-sync update [--check-only]
+```
+
+**选项：**
+- `--check-only`：仅检查，不执行更新
+
 ### `report`
 
-View conflict reports from previous syncs.
+查看冲突报告。
 
 ```bash
-claude-code-sync report [--format <FORMAT>] [--output <FILE>]
+claude-code-sync report [--format <格式>] [--output <文件>]
 ```
 
-**Options:**
-- `--format, -f <FORMAT>`: Output format: `json`, `markdown`, or `text` (default: markdown)
-- `--output, -o <FILE>`: Output file (default: print to stdout)
-
-**Examples:**
-```bash
-# Print markdown report to console
-claude-code-sync report
-
-# Save JSON report to file
-claude-code-sync report --format json --output conflicts.json
-
-# View as markdown
-claude-code-sync report --format markdown | less
-```
+**选项：**
+- `--format, -f <格式>`：输出格式：`json`、`markdown` 或 `text`
+- `--output, -o <文件>`：输出文件（默认：打印到控制台）
 
 ### `remote`
 
-**NEW!** Manage git remote configuration.
+管理 Git 远程配置。
 
 ```bash
-claude-code-sync remote <COMMAND>
+claude-code-sync remote <命令>
 ```
 
-**Commands:**
-- `show`: Display current remote configuration and sync directory
-- `set`: Set or update remote URL
-- `remove`: Remove a remote
+**命令：**
+- `show`：显示当前远程配置
+- `set`：设置或更新远程 URL
+- `remove`：移除远程
 
-**Options for `set`:**
-- `--name, -n <NAME>`: Remote name (default: origin)
-- `url`: Remote URL (e.g., https://github.com/user/repo.git or git@github.com:user/repo.git)
-
-**Options for `remove`:**
-- `--name, -n <NAME>`: Remote name (default: origin)
-
-**Examples:**
+**示例：**
 ```bash
-# Show current remote and sync directory
+# 显示当前远程
 claude-code-sync remote show
 
-# Set/update remote URL (HTTPS)
-claude-code-sync remote set origin https://github.com/user/claude-history.git
-
-# Set/update remote URL (SSH)
-claude-code-sync remote set origin git@github.com:user/claude-history.git
-
-# Remove remote
-claude-code-sync remote remove origin
+# 设置远程 URL
+claude-code-sync remote set origin https://github.com/user/repo.git
 ```
-
-**Note:** The remote URL must start with `http://`, `https://`, or `git@` for SSH connections.
 
 ### `undo`
 
-**NEW in v0.2.0!** Undo the last sync operation by restoring from automatic snapshots.
+撤销上次同步操作。
 
 ```bash
-claude-code-sync undo <OPERATION>
+claude-code-sync undo <操作>
 ```
 
-**Operations:**
-- `pull`: Undo the last pull operation (restores local files to pre-pull state)
-- `push`: Undo the last push operation (resets git repository to previous commit)
+**操作：**
+- `pull`：撤销上次拉取
+- `push`：撤销上次推送
 
-**Examples:**
-```bash
-# Undo the last pull operation
-claude-code-sync undo pull
-
-# Undo the last push operation
-claude-code-sync undo push
-```
-
-**How it works:**
-- Every pull/push operation automatically creates a snapshot before making changes
-- Snapshots are stored in `~/.claude-code-sync/snapshots/`
-- Undo operations restore files/git state from the snapshot
-- After successful undo, the snapshot is automatically deleted
-- Operation history is updated to reflect the undo
-
-**Note:** You can only undo the most recent operation of each type. Once you run a new pull/push, the previous snapshot is replaced.
+**工作原理：**
+- 每次 pull/push 操作自动创建快照
+- 快照存储在 `~/.claude-code-sync/snapshots/`
+- 撤销后快照自动删除
 
 ### `history`
 
-**NEW in v0.2.0!** View and manage operation history.
+查看和管理操作历史。
 
 ```bash
-claude-code-sync history <COMMAND>
+claude-code-sync history <命令>
 ```
 
-**Commands:**
-- `list`: List recent sync operations
-- `last`: Show detailed information about the last operation
-- `clear`: Clear all operation history
+**命令：**
+- `list`：列出最近的同步操作
+- `last`：显示上次操作的详细信息
+- `clear`：清除所有操作历史
 
-**Options for `list`:**
-- `--limit, -l <N>`: Number of operations to show (default: 10)
-
-**Options for `last`:**
-- `--operation-type, -t <TYPE>`: Filter by operation type (`pull` or `push`)
-
-**Examples:**
+**示例：**
 ```bash
-# List the last 10 operations
+# 列出最近 10 次操作
 claude-code-sync history list
 
-# List the last 20 operations
-claude-code-sync history list --limit 20
-
-# Show details of the last operation (pull or push)
+# 显示上次操作详情
 claude-code-sync history last
 
-# Show details of the last pull operation only
-claude-code-sync history last -t pull
-
-# Show details of the last push operation only
-claude-code-sync history last -t push
-
-# Clear all operation history
+# 清除历史
 claude-code-sync history clear
 ```
 
-**History Information:**
-Each history entry shows:
-- Operation type (PULL or PUSH)
-- Timestamp
-- Branch name
-- Number of conversations affected
-- Statistics (added, modified, conflicts, unchanged)
-- Snapshot availability for undo
+## 冲突解决
 
-**History Storage:**
-- Operation history is stored in `~/.claude-code-sync/operation-history.json`
-- Up to 5 operations are kept (automatically rotated)
-- Each operation includes details about affected conversations
+### 智能合并（默认）
 
-## Conflict Resolution
+检测到冲突时，自动尝试智能合并：
 
-When the same conversation session is modified on different machines, `claude-code-sync` detects this as a conflict.
+- **分析消息 UUID 和父关系**：构建消息树理解对话结构
+- **按时间戳解决编辑冲突**：同一消息被编辑时保留较新版本
+- **保留所有对话分支**：对话分歧时保留所有分支
 
-### Smart Merge (NEW!)
+**智能合并自动处理：**
+- ✅ 非重叠变更（简单合并）
+- ✅ 对话不同部分的消息添加
+- ✅ 对话分支（同一点的多个延续）
+- ✅ 编辑的消息（按时间戳解决）
 
-**Smart merge is now the default conflict resolution strategy!** When conflicts are detected, `claude-code-sync` automatically attempts to intelligently merge both versions by:
+### 交互式冲突解决
 
-- **Analyzing message UUIDs and parent relationships**: Builds a message tree to understand conversation structure
-- **Resolving edited messages by timestamp**: If the same message was edited on both machines, keeps the newer version
-- **Preserving all conversation branches**: When conversations diverge (same parent, different continuations), keeps all branches intact
-- **Handling entries without UUIDs**: Falls back to timestamp-based merging for system events
+在交互式终端中，提供 TUI 界面解决冲突：
 
-**Smart merge automatically handles:**
-- ✅ Non-overlapping changes (simple merge)
-- ✅ Message additions to different parts of the conversation
-- ✅ Conversation branches (multiple continuations from the same point)
-- ✅ Edited messages (resolved by timestamp)
-- ✅ Mixed UUID and non-UUID entries
+- 📋 列出所有冲突
+- 🔍 预览本地和远程版本差异
+- 📊 查看统计：消息数、时间戳、文件大小
+- 🎯 选择解决方式：智能合并、保留本地、保留远程、保留两者
 
-If smart merge fails (e.g., due to corrupted data), the system falls back to interactive or "keep both" resolution.
+### 自动解决（非交互式）
 
-### Interactive Conflict Resolution (New!)
+非交互式环境中，冲突自动解决：
 
-When running in an interactive terminal, `claude-code-sync` now provides a **TUI (Text User Interface)** for resolving conflicts:
+- 本地版本保持不变
+- 远程版本保存为 `-conflict-<时间戳>.jsonl`
 
-```bash
-# Pull with interactive conflict resolution
-claude-code-sync pull
+## 配置文件
 
-# Or sync (pull + push)
-claude-code-sync sync
-```
-
-**Interactive Features:**
-- 📋 **List all conflicts** with session IDs and project paths
-- 🔍 **Preview differences** between local and remote versions
-- 📊 **View statistics**: message counts, timestamps, file sizes
-- 🎯 **Choose resolution per conflict**:
-  - **Smart Merge** (combine both versions - recommended) ✨ NEW
-  - Keep Local (discard remote changes)
-  - Keep Remote (overwrite local file)
-  - Keep Both (save remote with conflict suffix)
-  - View Details (show full comparison)
-
-**Example Interactive Flow:**
-```
-Found 2 conflicts during pull:
-
-! 2 conflicts detected
-  Attempting smart merge...
-  ✓ Smart merged abc-123 (45 local + 52 remote = 90 total, 2 branches)
-  ✓ Smart merged def-456 (30 local + 35 remote = 65 total, 0 branches)
-  ✓ Successfully smart merged 2/2 conflicts
-
-Pull complete!
-```
-
-**Example: Smart Merge Failure with Interactive Fallback:**
-```
-Found 1 conflicts during pull:
-
-! 1 conflicts detected
-  Attempting smart merge...
-  ⚠ Smart merge failed for xyz-789: circular reference detected
-  Falling back to manual resolution...
-  ! 1 conflicts require manual resolution
-
-→ Running in interactive mode for remaining conflicts
-
-Conflict 1 of 1
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Session ID: xyz-789
-Project: my-project
-Local:  45 messages, last modified 2 hours ago (15.2 KB)
-Remote: 52 messages, last modified 1 hour ago (18.5 KB)
-
-How do you want to resolve this conflict?
-❯ Smart Merge (combine both versions - recommended)
-  Keep Local Version (discard remote)
-  Keep Remote Version (overwrite local)
-  Keep Both (save remote with conflict suffix)
-  View Detailed Comparison
-```
-
-### Automatic Resolution (Non-Interactive)
-
-When not in an interactive terminal (CI/CD, scripts), conflicts are automatically resolved:
-
-**Resolution Strategy:**
-- Local version: Kept as-is
-- Remote version: Saved with suffix `-conflict-<timestamp>.jsonl`
-- A detailed conflict report is generated
-
-**Example:**
-
-If session `abc-123.jsonl` conflicts:
-- Local: `~/.claude/projects/my-project/abc-123.jsonl` (unchanged)
-- Remote: `~/.claude/projects/my-project/abc-123-conflict-20250117-143022.jsonl` (saved separately)
-
-You can then manually review both versions and decide which to keep.
-
-## Configuration File
-
-Configuration is stored in `~/.claude-code-sync.toml`:
+配置存储在 `~/.claude-code-sync.toml`：
 
 ```toml
-# Exclude projects older than N days
+# 排除超过 N 天的项目
 exclude_older_than_days = 30
 
-# Include only these project path patterns
+# 仅包含这些项目模式
 include_patterns = ["*my-project*", "*work*"]
 
-# Exclude these project path patterns
+# 排除这些项目模式
 exclude_patterns = ["*test*", "*temp*"]
 
-# Maximum file size in bytes (10MB default)
+# 最大文件大小（字节，默认 10MB）
 max_file_size_bytes = 10485760
 
-# Exclude file attachments (images, PDFs, etc.)
+# 排除附件
 exclude_attachments = false
 
-# Enable Git LFS for large files
+# 启用 Git LFS
 enable_lfs = false
 
-# File patterns to track with LFS
-lfs_patterns = ["*.jsonl"]
-
-# SCM backend: "git" or "mercurial"
+# SCM 后端："git" 或 "mercurial"
 scm_backend = "git"
 
-# Subdirectory within sync repo for projects
+# 同步仓库中的子目录
 sync_subdirectory = "projects"
+
+# 仅使用项目名（多设备模式）
+use_project_name_only = true
 ```
 
-## Sync State
+## 同步状态
 
-Sync state is stored in `~/.claude-code-sync/`:
-- `state.json`: Current sync repository configuration
-- `operation-history.json`: History of sync operations (up to 5 entries)
-- `snapshots/`: Directory containing snapshots for undo operations
-- `latest-conflict-report.json`: Most recent conflict report
+同步状态存储在 `~/.claude-code-sync/`：
+- `state.json`：当前同步仓库配置
+- `operation-history.json`：操作历史（最多 5 条）
+- `snapshots/`：撤销快照目录
+- `latest-conflict-report.json`：最新冲突报告
 
-## Use Cases
+## 使用场景
 
-### Daily Backup Workflow
+### 每日备份
 
 ```bash
-# At the end of each day
+# 每天结束时
 claude-code-sync push -m "Daily backup $(date +%Y-%m-%d)"
 ```
 
-### Multi-Machine Development
+### 多设备开发
 
-**On Machine A:**
+**设备 A：**
 ```bash
-claude-code-sync init --repo ~/claude-backup --remote git@github.com:user/claude-history.git
+claude-code-sync setup
 claude-code-sync push
 ```
 
-**On Machine B:**
+**设备 B：**
 ```bash
-claude-code-sync init --repo ~/claude-backup --remote git@github.com:user/claude-history.git
+claude-code-sync setup  # 选择相同的远程仓库
 claude-code-sync pull
-# Work on Machine B
+# 在设备 B 上工作
 claude-code-sync push
 ```
 
-**Back on Machine A:**
+**回到设备 A：**
 ```bash
-claude-code-sync pull  # Merges Machine B's changes
+claude-code-sync pull  # 合并设备 B 的变更
 ```
 
-### Automated Backup (Cron)
-
-Add to your crontab:
+### 自动化备份（Cron）
 
 ```bash
-# Backup Claude Code history every night at 2 AM
-0 2 * * * /usr/local/bin/claude-code-sync push --message "Automated backup" >> ~/claude-code-sync.log 2>&1
+# 每晚 11 点同步
+0 23 * * * ~/.local/bin/claude-code-sync sync >> ~/claude-code-sync.log 2>&1
 ```
 
-## Architecture
+## 日志
 
-### Module Overview
+### 控制台日志
 
-- **parser.rs**: JSONL conversation file parser
-- **scm/**: SCM abstraction layer supporting multiple backends
-  - **mod.rs**: `Scm` trait and factory functions
-  - **git.rs**: Git backend via CLI commands
-  - **hg.rs**: Mercurial backend via CLI commands
-  - **lfs.rs**: Git LFS support
-- **sync/**: Core sync engine with push/pull logic and snapshot integration
-- **conflict.rs**: Conflict detection and resolution
-- **interactive_conflict.rs**: Interactive TUI for conflict resolution
-- **filter.rs**: Configuration and filtering system
-- **report.rs**: Conflict reporting in JSON/Markdown formats
-- **history/**: Operation history tracking and management
-- **undo/**: Snapshot-based undo functionality for pull/push operations
-- **onboarding.rs**: Interactive first-time setup wizard with config file support
-- **logger.rs**: Enhanced logging system with file and console output
-- **main.rs**: CLI interface (using `clap`)
-
-### File Format
-
-Claude Code stores conversations in JSONL format:
-
-```json
-{"type":"user","uuid":"...","sessionId":"...","timestamp":"...","message":{...}}
-{"type":"assistant","uuid":"...","sessionId":"...","timestamp":"...","message":{...}}
-{"type":"file-history-snapshot","messageId":"...","snapshot":{...}}
-```
-
-Each line is a separate JSON object representing a conversation event.
-
-## Dependencies
-
-- `clap`: CLI argument parsing
-- `serde` + `serde_json`: JSON parsing
-- `toml`: Configuration parsing
-- `anyhow`: Error handling
-- `chrono`: Timestamp handling
-- `walkdir`: Directory traversal
-- `colored`: Terminal colors
-- `dirs`: Cross-platform directory paths
-- `uuid`: Snapshot identification
-- `base64`: Binary file encoding in snapshots
-- `inquire`: Interactive prompts and TUI menus
-- `log`: Logging facade
-- `env_logger`: Console logging implementation
-- `atty`: Terminal detection for interactive mode
-- `rstest`: Parameterized testing (dev dependency)
-
-**Note:** Git/Mercurial operations are performed via CLI commands, not library bindings. This ensures compatibility with git hooks, LFS, and credential helpers.
-
-## Security Considerations
-
-- Conversation history may contain sensitive information
-- Use private git repositories for remote storage
-- Consider encrypting the git repository for additional security
-- SSH keys or access tokens are recommended for git authentication
-
-## Logging
-
-`claude-code-sync` provides comprehensive logging to help you track operations and troubleshoot issues.
-
-### Console Logging
-
-Control console output with the `RUST_LOG` environment variable:
+使用 `RUST_LOG` 环境变量控制：
 
 ```bash
-# Show all debug messages
+# 显示调试信息
 RUST_LOG=debug claude-code-sync sync
 
-# Only show errors
+# 仅显示错误
 RUST_LOG=error claude-code-sync push
 
-# Only show warnings and errors
-RUST_LOG=warn claude-code-sync pull
-
-# Show info, warnings, and errors (default)
-claude-code-sync sync
-
-# Disable console output (file logging continues)
+# 禁用控制台输出
 RUST_LOG=off claude-code-sync status
 ```
 
-**Log Levels:**
-- `trace` - Everything (very verbose)
-- `debug` - Debug information and above
-- `info` - Informational messages, warnings, and errors (default)
-- `warn` - Warnings and errors only
-- `error` - Errors only
-- `off` - No console output
+**日志级别：** `trace` > `debug` > `info` > `warn` > `error` > `off`
 
-### File Logging
+### 文件日志
 
-All operations are automatically logged to a file, regardless of console settings:
+所有操作自动记录到文件：
 
-**Log File Locations:**
-- **Linux**: `~/.config/claude-code-sync/claude-code-sync.log` or `$XDG_CONFIG_HOME/claude-code-sync/claude-code-sync.log`
+- **Linux**: `~/.config/claude-code-sync/claude-code-sync.log`
 - **macOS**: `~/Library/Application Support/claude-code-sync/claude-code-sync.log`
 - **Windows**: `%APPDATA%\claude-code-sync\claude-code-sync.log`
 
-**File Logging Features:**
-- ✅ Captures all log levels (trace to error)
-- ✅ Persists across sessions
-- ✅ Useful for debugging and audit trails
-- ✅ Automatically rotated to prevent excessive disk usage
-
-**Example:**
-```bash
-# Run sync silently, check logs later
-RUST_LOG=off claude-code-sync sync
-
-# View the log file
-cat ~/.config/claude-code-sync/claude-code-sync.log
-```
-
-## Troubleshooting
+## 故障排查
 
 ### "Sync not initialized"
 
-Run `claude-code-sync init` first to set up the sync repository, or let the interactive onboarding guide you.
+运行 `claude-code-sync setup` 或 `claude-code-sync init` 进行初始化。
 
 ### "Failed to push to remote"
 
-Check:
-- Git remote URL is correct
-- SSH keys or credentials are configured
-- Network connectivity
-- Remote repository permissions
+检查：
+- Git 远程 URL 是否正确
+- SSH 密钥或凭据是否配置
+- 网络连接
+- 远程仓库权限
 
-### Conflicts on every pull
+### 每次拉取都有冲突
 
-This may indicate:
-- Clock skew between machines
-- Different filter configurations
-- Same conversations being actively used on multiple machines
+可能原因：
+- 设备间时钟不同步
+- 过滤器配置不同
+- 多台设备同时使用相同对话
 
-## Contributing
+## 安全考虑
 
-Contributions are welcome! Please:
-1. Fork the repository
-2. Create a feature branch
-3. Add tests for new functionality
-4. Submit a pull request
+- 对话历史可能包含敏感信息
+- 建议使用私有 Git 仓库
+- 考虑加密 Git 仓库以增强安全性
+- 推荐使用 SSH 密钥或访问令牌进行 Git 认证
+
+## 相关资源
+
+- **中文仓库**: https://github.com/osen77/claude-code-sync-cn
+- **上游项目**: https://github.com/perfectra1n/claude-code-sync
+- **问题追踪**: https://github.com/osen77/claude-code-sync-cn/issues
+
+## 贡献
+
+欢迎贡献！请：
+1. Fork 仓库
+2. 创建功能分支
+3. 为新功能添加测试
+4. 提交 Pull Request
+
+---
+
+*最后更新: 2026-02-02*
