@@ -241,6 +241,13 @@ enum Commands {
         skip_sync: bool,
     },
 
+    /// Check for updates and update to the latest version
+    Update {
+        /// Check for updates without installing
+        #[arg(long)]
+        check_only: bool,
+    },
+
     /// Clean up old snapshot files
     CleanupSnapshots {
         /// Show what would be deleted without actually deleting
@@ -343,7 +350,28 @@ fn main() -> Result<()> {
 
     log::debug!("claude-code-sync started");
 
+    // Background update check (non-blocking)
+    // Only check if not running update command itself
+    let update_check_handle = std::thread::spawn(|| {
+        if let Some(new_version) = check_for_update_silent() {
+            // Return the version to print after command parsing
+            Some(new_version)
+        } else {
+            None
+        }
+    });
+
     let cli = Cli::parse();
+
+    // Check if this is the update command (skip notification for update command)
+    let is_update_command = matches!(cli.command, Some(Commands::Update { .. }));
+
+    // Print update notification if available (and not running update command)
+    if !is_update_command {
+        if let Ok(Some(new_version)) = update_check_handle.join() {
+            print_update_notification(&new_version);
+        }
+    }
 
     // Check if initialization is needed (before processing any command)
     let needs_onboarding = !is_initialized()?;
@@ -639,6 +667,9 @@ fn main() -> Result<()> {
         },
         Commands::Setup { skip_sync } => {
             handle_setup(skip_sync)?;
+        }
+        Commands::Update { check_only } => {
+            handle_update(check_only)?;
         }
         Commands::CleanupSnapshots {
             dry_run,

@@ -4,121 +4,179 @@
 
 set -e
 
+# Configuration
+REPO="osen77/claude-code-sync-cn"
+INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 BOLD='\033[1m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# Print with color
+# Print functions
 info() { echo -e "${CYAN}$1${NC}"; }
 success() { echo -e "${GREEN}$1${NC}"; }
 warn() { echo -e "${YELLOW}$1${NC}"; }
-error() { echo -e "${RED}$1${NC}"; }
+error() { echo -e "${RED}$1${NC}"; exit 1; }
 
 echo ""
 echo -e "${BOLD}${CYAN}🔧 Claude Code Sync 安装程序${NC}"
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 
-# Detect OS
-OS="$(uname -s)"
-ARCH="$(uname -m)"
+# Detect OS and architecture
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+ARCH=$(uname -m)
 
 case "$OS" in
-    Linux*)
-        PLATFORM="linux"
-        info "检测到系统: Linux ($ARCH)"
+    darwin)
+        OS_NAME="macOS"
+        BINARY_OS="darwin"
         ;;
-    Darwin*)
-        PLATFORM="macos"
-        info "检测到系统: macOS ($ARCH)"
+    linux)
+        OS_NAME="Linux"
+        BINARY_OS="linux"
         ;;
-    MINGW*|MSYS*|CYGWIN*)
-        PLATFORM="windows"
-        info "检测到系统: Windows (Git Bash/WSL)"
+    mingw*|msys*|cygwin*)
+        error "Windows 请使用 PowerShell 安装:\n  irm https://raw.githubusercontent.com/${REPO}/main/install.ps1 | iex"
         ;;
     *)
-        error "❌ 不支持的操作系统: $OS"
-        exit 1
+        error "不支持的操作系统: $OS"
         ;;
 esac
 
+case "$ARCH" in
+    x86_64|amd64)
+        ARCH_NAME="x64"
+        BINARY_ARCH="x64"
+        ;;
+    arm64|aarch64)
+        ARCH_NAME="ARM64"
+        BINARY_ARCH="arm64"
+        ;;
+    *)
+        error "不支持的架构: $ARCH"
+        ;;
+esac
+
+info "检测到系统: ${OS_NAME} (${ARCH_NAME})"
 echo ""
 
-# Check for Rust/Cargo
-check_rust() {
-    if command -v cargo &> /dev/null; then
-        CARGO_VERSION=$(cargo --version)
-        success "✓ 已安装 Rust: $CARGO_VERSION"
-        return 0
-    else
-        return 1
-    fi
-}
+# Construct binary name
+BINARY_NAME="claude-code-sync-${BINARY_OS}-${BINARY_ARCH}"
 
-# Install Rust
-install_rust() {
-    info "📦 正在安装 Rust..."
-    echo ""
+# Get latest version
+info "📦 获取最新版本..."
 
-    if command -v rustup &> /dev/null; then
-        warn "rustup 已存在，尝试更新..."
-        rustup update stable
-    else
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+LATEST_VERSION=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
 
-        # Source cargo env
-        if [ -f "$HOME/.cargo/env" ]; then
-            source "$HOME/.cargo/env"
+if [ -z "$LATEST_VERSION" ]; then
+    error "无法获取最新版本。请检查网络连接或稍后重试。"
+fi
+
+success "   最新版本: ${LATEST_VERSION}"
+echo ""
+
+# Check if already installed
+if command -v claude-code-sync &> /dev/null; then
+    CURRENT_VERSION=$(claude-code-sync --version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+    if [ -n "$CURRENT_VERSION" ]; then
+        info "   当前版本: ${CURRENT_VERSION}"
+
+        # Simple version comparison
+        CURRENT_CLEAN=$(echo "$CURRENT_VERSION" | sed 's/^v//')
+        LATEST_CLEAN=$(echo "$LATEST_VERSION" | sed 's/^v//')
+
+        if [ "$CURRENT_CLEAN" = "$LATEST_CLEAN" ]; then
+            success "✓ 已是最新版本"
+            echo ""
+            read -p "是否重新安装? [y/N] " -n 1 -r
+            echo ""
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                info "已取消安装。"
+                exit 0
+            fi
         fi
+        echo ""
     fi
+fi
 
-    if check_rust; then
-        success "✓ Rust 安装成功"
-    else
-        error "❌ Rust 安装失败，请手动安装: https://rustup.rs"
-        exit 1
-    fi
-}
+# Download
+DOWNLOAD_URL="https://github.com/${REPO}/releases/download/${LATEST_VERSION}/${BINARY_NAME}"
 
-# Check Rust installation
-if ! check_rust; then
-    echo ""
-    warn "⚠️  未检测到 Rust/Cargo"
-    echo ""
-    read -p "是否自动安装 Rust? [Y/n] " -n 1 -r
-    echo ""
+info "📥 正在下载..."
+info "   ${DOWNLOAD_URL}"
+echo ""
 
-    if [[ $REPLY =~ ^[Nn]$ ]]; then
-        info "请先安装 Rust: https://rustup.rs"
-        exit 0
-    fi
+# Create install directory
+mkdir -p "$INSTALL_DIR"
 
-    install_rust
+# Download with progress
+if curl -fSL --progress-bar "$DOWNLOAD_URL" -o "${INSTALL_DIR}/claude-code-sync"; then
+    chmod +x "${INSTALL_DIR}/claude-code-sync"
+    success "✓ 下载完成"
+else
+    error "下载失败。请检查网络连接或稍后重试。"
 fi
 
 echo ""
 
-# Install claude-code-sync
-info "📦 正在安装 claude-code-sync..."
-echo ""
-
-# Try to install from GitHub
-REPO_URL="https://github.com/osen77/claude-code-sync-cn.git"
-
-if cargo install --git "$REPO_URL" --force 2>&1; then
-    success "✓ claude-code-sync 安装成功"
-else
-    error "❌ 安装失败"
+# Add to PATH if needed
+if [[ ":$PATH:" != *":${INSTALL_DIR}:"* ]]; then
+    warn "⚠️  ${INSTALL_DIR} 不在 PATH 中"
     echo ""
-    info "请尝试手动安装:"
-    echo "  git clone $REPO_URL"
-    echo "  cd claude-code-sync-cn"
-    echo "  cargo install --path ."
-    exit 1
+
+    # Detect shell and update config
+    SHELL_NAME=$(basename "$SHELL")
+    case "$SHELL_NAME" in
+        zsh)
+            SHELL_RC="$HOME/.zshrc"
+            ;;
+        bash)
+            if [ -f "$HOME/.bashrc" ]; then
+                SHELL_RC="$HOME/.bashrc"
+            else
+                SHELL_RC="$HOME/.bash_profile"
+            fi
+            ;;
+        *)
+            SHELL_RC="$HOME/.profile"
+            ;;
+    esac
+
+    read -p "是否自动添加到 PATH? [Y/n] " -n 1 -r
+    echo ""
+
+    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+        echo "" >> "$SHELL_RC"
+        echo "# Claude Code Sync" >> "$SHELL_RC"
+        echo "export PATH=\"\$PATH:${INSTALL_DIR}\"" >> "$SHELL_RC"
+        success "✓ 已添加到 ${SHELL_RC}"
+        info "   请运行: source ${SHELL_RC}"
+        info "   或重新打开终端"
+        echo ""
+
+        # Export for current session
+        export PATH="$PATH:${INSTALL_DIR}"
+    else
+        info "请手动添加到 PATH:"
+        echo "   export PATH=\"\$PATH:${INSTALL_DIR}\""
+        echo ""
+    fi
+fi
+
+# Verify installation
+echo ""
+info "验证安装..."
+
+if "${INSTALL_DIR}/claude-code-sync" --version &> /dev/null; then
+    VERSION=$("${INSTALL_DIR}/claude-code-sync" --version 2>/dev/null)
+    success "✓ ${VERSION}"
+else
+    error "安装验证失败"
 fi
 
 echo ""
@@ -127,21 +185,25 @@ success "🎉 安装完成！"
 echo ""
 
 # Check if already configured
-if claude-code-sync status &> /dev/null; then
+if "${INSTALL_DIR}/claude-code-sync" status &> /dev/null 2>&1; then
     success "✓ 已检测到现有配置"
     echo ""
-    read -p "是否重新配置? [y/N] " -n 1 -r
+    info "常用命令:"
+    echo "   claude-code-sync sync   - 双向同步"
+    echo "   claude-code-sync status - 查看状态"
+    echo "   claude-code-sync update - 检查更新"
+else
+    echo ""
+    read -p "是否立即配置? [Y/n] " -n 1 -r
     echo ""
 
-    if [[ ! $REPLY =~ ^[Yy]$ ]]; then
-        info "跳过配置。使用 'claude-code-sync setup' 可随时重新配置。"
-        exit 0
+    if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+        echo ""
+        "${INSTALL_DIR}/claude-code-sync" setup
+    else
+        echo ""
+        info "稍后运行 'claude-code-sync setup' 进行配置"
     fi
 fi
 
 echo ""
-info "🚀 开始配置..."
-echo ""
-
-# Run setup wizard
-claude-code-sync setup

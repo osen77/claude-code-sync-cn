@@ -9,6 +9,7 @@ pub mod history;
 pub mod onboarding;
 pub mod setup;
 pub mod undo;
+pub mod update;
 
 // Re-export all public handler functions for convenient use
 pub use cleanup::handle_cleanup_snapshots;
@@ -17,3 +18,4 @@ pub use history::{handle_history_clear, handle_history_last, handle_history_list
 pub use onboarding::{is_initialized, run_init_from_config, run_onboarding_flow, try_init_from_config};
 pub use setup::handle_setup;
 pub use undo::{handle_undo_pull, handle_undo_push};
+pub use update::{check_for_update_silent, handle_update, print_update_notification};
