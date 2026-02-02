@@ -234,6 +234,13 @@ enum Commands {
         action: HistoryAction,
     },
 
+    /// Interactive setup wizard for first-time configuration
+    Setup {
+        /// Skip the initial sync after setup
+        #[arg(long)]
+        skip_sync: bool,
+    },
+
     /// Clean up old snapshot files
     CleanupSnapshots {
         /// Show what would be deleted without actually deleting
@@ -630,6 +637,9 @@ fn main() -> Result<()> {
                 handle_history_clear()?;
             }
         },
+        Commands::Setup { skip_sync } => {
+            handle_setup(skip_sync)?;
+        }
         Commands::CleanupSnapshots {
             dry_run,
             max_count,
