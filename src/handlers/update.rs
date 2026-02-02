@@ -141,7 +141,7 @@ pub fn check_for_update_silent() -> Option<String> {
 /// Get the asset name for the current platform
 fn get_asset_name() -> Result<String> {
     let os = if cfg!(target_os = "macos") {
-        "darwin"
+        "macos"
     } else if cfg!(target_os = "linux") {
         "linux"
     } else if cfg!(target_os = "windows") {
@@ -151,17 +151,18 @@ fn get_asset_name() -> Result<String> {
     };
 
     let arch = if cfg!(target_arch = "x86_64") {
-        "x64"
+        "x86_64"
     } else if cfg!(target_arch = "aarch64") {
-        "arm64"
+        "aarch64"
     } else {
         return Err(anyhow::anyhow!("Unsupported architecture"));
     };
 
+    // release-new.yml creates .tar.gz for Unix and .zip for Windows
     let name = if cfg!(target_os = "windows") {
-        format!("claude-code-sync-{}-{}.exe", os, arch)
+        format!("claude-code-sync-{}-{}.zip", os, arch)
     } else {
-        format!("claude-code-sync-{}-{}", os, arch)
+        format!("claude-code-sync-{}-{}.tar.gz", os, arch)
     };
 
     Ok(name)
@@ -201,11 +202,63 @@ fn download_and_replace(version: &str) -> Result<()> {
 
     println!("{}", "📥 正在下载...".cyan());
 
-    // Download to temp file
-    let temp_path = current_exe.with_extension("new");
-    download_file(&url, &temp_path)?;
+    // Create temp directory
+    let temp_dir = std::env::temp_dir().join(format!("claude-code-sync-update-{}", version));
+    let _ = fs::remove_dir_all(&temp_dir);
+    fs::create_dir_all(&temp_dir).context("Failed to create temp directory")?;
+
+    let archive_path = temp_dir.join(&asset_name);
+    download_file(&url, &archive_path)?;
 
     println!("{}", "✓ 下载完成".green());
+
+    // Extract archive
+    println!("{}", "📦 正在解压...".cyan());
+
+    #[cfg(not(windows))]
+    {
+        // Extract tar.gz on Unix
+        let status = Command::new("tar")
+            .args(["-xzf", archive_path.to_str().unwrap(), "-C", temp_dir.to_str().unwrap()])
+            .status()
+            .context("Failed to execute tar")?;
+
+        if !status.success() {
+            return Err(anyhow::anyhow!("Failed to extract archive"));
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        // Extract zip on Windows using PowerShell
+        let status = Command::new("powershell")
+            .args([
+                "-Command",
+                &format!(
+                    "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
+                    archive_path.display(),
+                    temp_dir.display()
+                ),
+            ])
+            .status()
+            .context("Failed to execute PowerShell")?;
+
+        if !status.success() {
+            return Err(anyhow::anyhow!("Failed to extract archive"));
+        }
+    }
+
+    // Find the extracted binary
+    let binary_name = if cfg!(windows) {
+        "claude-code-sync.exe"
+    } else {
+        "claude-code-sync"
+    };
+    let new_binary = temp_dir.join(binary_name);
+
+    if !new_binary.exists() {
+        return Err(anyhow::anyhow!("Binary not found in archive"));
+    }
 
     // Replace binary
     println!("{}", "📦 正在更新...".cyan());
@@ -221,8 +274,8 @@ fn download_and_replace(version: &str) -> Result<()> {
         // Rename current to old
         fs::rename(&current_exe, &old_path).context("Failed to rename current executable")?;
 
-        // Rename new to current
-        fs::rename(&temp_path, &current_exe).context("Failed to install new executable")?;
+        // Copy new to current
+        fs::copy(&new_binary, &current_exe).context("Failed to install new executable")?;
 
         println!("{}", "✓ 更新完成".green());
         println!();
@@ -235,7 +288,7 @@ fn download_and_replace(version: &str) -> Result<()> {
     #[cfg(not(windows))]
     {
         // On Unix, we can replace directly
-        fs::rename(&temp_path, &current_exe).context("Failed to install new executable")?;
+        fs::copy(&new_binary, &current_exe).context("Failed to install new executable")?;
 
         // Set executable permission
         #[cfg(unix)]
@@ -247,6 +300,9 @@ fn download_and_replace(version: &str) -> Result<()> {
 
         println!("{}", "✓ 更新完成".green());
     }
+
+    // Cleanup temp directory
+    let _ = fs::remove_dir_all(&temp_dir);
 
     Ok(())
 }
@@ -358,9 +414,11 @@ mod tests {
     #[test]
     fn test_get_asset_name() {
         let name = get_asset_name().unwrap();
-        // Should contain os and arch
-        assert!(name.contains("darwin") || name.contains("linux") || name.contains("windows"));
-        assert!(name.contains("x64") || name.contains("arm64"));
+        // Should contain os and arch (matching release-new.yml naming)
+        assert!(name.contains("macos") || name.contains("linux") || name.contains("windows"));
+        assert!(name.contains("x86_64") || name.contains("aarch64"));
+        // Should have archive extension
+        assert!(name.ends_with(".tar.gz") || name.ends_with(".zip"));
     }
 
     #[test]
