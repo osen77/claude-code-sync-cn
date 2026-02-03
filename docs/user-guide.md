@@ -172,7 +172,7 @@ alias claude='claude-sync'
 ```
 启动时: claude-sync → 自动 pull → 启动 Claude Code
 使用中: 检测新项目 → 自动 pull 该项目历史
-退出时: SessionEnd Hook → 自动 push
+每轮对话结束: Stop Hook → 自动 push
 ```
 
 ### 管理命令
@@ -200,7 +200,7 @@ claude-code-sync wrapper show       # 查看状态
 | Hook | 触发时机 | 功能 |
 |------|----------|------|
 | `SessionStart` | Claude Code 启动时 | 拉取最新历史（IDE 支持） |
-| `SessionEnd` | Claude Code 退出时 | 推送对话历史 |
+| `Stop` | 每轮对话完成后 | 推送对话历史 |
 | `UserPromptSubmit` | 每次发送消息时 | 检测新项目并拉取远程历史 |
 
 ### 调试
