@@ -12,6 +12,7 @@ pub struct HgScm {
     path: PathBuf,
 }
 
+#[allow(dead_code)]
 impl HgScm {
     /// Initialize a new Mercurial repository.
     pub fn init(path: &Path) -> Result<Self> {

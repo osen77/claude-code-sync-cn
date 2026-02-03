@@ -24,6 +24,7 @@ pub enum Backend {
     Mercurial,
 }
 
+#[allow(dead_code)]
 impl Backend {
     /// Check if this backend's binary is available on the system.
     pub fn is_available(&self) -> bool {
@@ -127,6 +128,7 @@ pub fn clone(url: &str, path: &Path) -> Result<Box<dyn Scm>> {
 ///
 /// This is useful for parameterized testing where you want to test
 /// the same operations against different SCM backends.
+#[allow(dead_code)]
 pub fn init_with_backend(path: &Path, backend: Backend) -> Result<Box<dyn Scm>> {
     match backend {
         Backend::Git => Ok(Box::new(GitScm::init(path)?)),

@@ -274,6 +274,41 @@ enum Commands {
         #[arg(short, long, conflicts_with = "verbose")]
         quiet: bool,
     },
+
+    /// Manage Claude Code hooks for automatic sync
+    Hooks {
+        #[command(subcommand)]
+        action: HooksAction,
+    },
+
+    /// Manage wrapper script for automatic pull on startup
+    Wrapper {
+        #[command(subcommand)]
+        action: WrapperAction,
+    },
+
+    /// One-click setup for automatic synchronization
+    Automate {
+        /// Show automation configuration status
+        #[arg(long)]
+        status: bool,
+
+        /// Remove all automation configuration
+        #[arg(long)]
+        uninstall: bool,
+    },
+
+    /// Internal command for UserPromptSubmit hook (new project detection)
+    #[command(hide = true)]
+    HookNewProjectCheck,
+
+    /// Internal command for SessionStart hook (pull on startup)
+    #[command(hide = true)]
+    HookSessionStart,
+
+    /// Internal command for SessionEnd hook (sync on exit)
+    #[command(hide = true)]
+    HookSessionEnd,
 }
 
 #[derive(Subcommand)]
@@ -341,6 +376,34 @@ enum HistoryAction {
 
     /// Clear all operation history
     Clear,
+}
+
+#[derive(Subcommand)]
+enum HooksAction {
+    /// Install SessionEnd and UserPromptSubmit hooks
+    Install,
+
+    /// Remove installed hooks
+    Uninstall,
+
+    /// Show current hooks configuration status
+    Show,
+}
+
+#[derive(Subcommand)]
+enum WrapperAction {
+    /// Create wrapper script (claude-sync)
+    Install {
+        /// Overwrite existing wrapper script
+        #[arg(long)]
+        force: bool,
+    },
+
+    /// Remove wrapper script
+    Uninstall,
+
+    /// Show wrapper script path and status
+    Show,
 }
 
 fn main() -> Result<()> {
@@ -689,6 +752,46 @@ fn main() -> Result<()> {
             };
 
             handle_cleanup_snapshots(dry_run, max_count, max_age_days, interactive, verbosity)?;
+        }
+        Commands::Hooks { action } => match action {
+            HooksAction::Install => {
+                handle_hooks_install()?;
+            }
+            HooksAction::Uninstall => {
+                handle_hooks_uninstall()?;
+            }
+            HooksAction::Show => {
+                handle_hooks_show()?;
+            }
+        },
+        Commands::Wrapper { action } => match action {
+            WrapperAction::Install { force } => {
+                handle_wrapper_install(force)?;
+            }
+            WrapperAction::Uninstall => {
+                handle_wrapper_uninstall()?;
+            }
+            WrapperAction::Show => {
+                handle_wrapper_show()?;
+            }
+        },
+        Commands::Automate { status, uninstall } => {
+            if status {
+                handle_automate_status()?;
+            } else if uninstall {
+                handle_automate_uninstall()?;
+            } else {
+                handle_automate_setup()?;
+            }
+        }
+        Commands::HookNewProjectCheck => {
+            handle_new_project_check()?;
+        }
+        Commands::HookSessionStart => {
+            handle_session_start()?;
+        }
+        Commands::HookSessionEnd => {
+            handle_session_end()?;
         }
     }
 

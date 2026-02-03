@@ -82,6 +82,7 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
 
 /// Check for available updates
 /// Returns Some(new_version) if an update is available, None otherwise
+#[allow(dead_code)]
 pub fn check_for_update() -> Result<Option<String>> {
     let current = current_version();
     let latest = fetch_latest_version()?;

@@ -232,6 +232,107 @@ pub fn find_colliding_projects(
     collisions
 }
 
+/// Result of checking sync repo directory structure consistency
+#[derive(Debug)]
+#[allow(dead_code)]
+pub struct DirectoryStructureCheck {
+    /// Directories using full path format (e.g., -Users-abc-project)
+    pub full_path_dirs: Vec<String>,
+    /// Directories using project name only format (e.g., project)
+    pub project_name_dirs: Vec<String>,
+    /// Whether the structure is consistent with the given config
+    pub is_consistent: bool,
+    /// Warning message if inconsistent
+    pub warning: Option<String>,
+}
+
+/// Check if the sync repo directory structure is consistent with the current config.
+///
+/// This helps detect when the user has switched modes and may have mixed directory formats.
+///
+/// # Arguments
+/// * `sync_repo_projects_dir` - Path to the projects directory in the sync repo
+/// * `use_project_name_only` - The current config setting
+///
+/// # Returns
+/// A `DirectoryStructureCheck` with details about the directory structure
+pub fn check_directory_structure_consistency(
+    sync_repo_projects_dir: &Path,
+    use_project_name_only: bool,
+) -> DirectoryStructureCheck {
+    let mut full_path_dirs = Vec::new();
+    let mut project_name_dirs = Vec::new();
+
+    if let Ok(entries) = std::fs::read_dir(sync_repo_projects_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
+                    // Skip hidden directories
+                    if dir_name.starts_with('.') {
+                        continue;
+                    }
+
+                    // Check if it looks like a full path (starts with - and contains multiple -)
+                    // e.g., -Users-abc-Documents-project
+                    let dash_count = dir_name.matches('-').count();
+                    if dir_name.starts_with('-') && dash_count >= 3 {
+                        full_path_dirs.push(dir_name.to_string());
+                    } else {
+                        project_name_dirs.push(dir_name.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    let has_full_path = !full_path_dirs.is_empty();
+    let has_project_name = !project_name_dirs.is_empty();
+
+    // Determine consistency
+    let (is_consistent, warning) = if has_full_path && has_project_name {
+        // Mixed mode - always inconsistent
+        (
+            false,
+            Some(format!(
+                "检测到混合目录格式：{} 个完整路径格式，{} 个项目名格式。\n\
+                 这可能导致数据重复。建议清理或统一目录格式。",
+                full_path_dirs.len(),
+                project_name_dirs.len()
+            )),
+        )
+    } else if use_project_name_only && has_full_path && !has_project_name {
+        // Config says project-name-only but repo has full paths
+        (
+            false,
+            Some(format!(
+                "配置为「多设备同步」模式，但同步仓库中存在 {} 个完整路径格式的目录。\n\
+                 建议清理这些目录或切换回「单设备备份」模式。",
+                full_path_dirs.len()
+            )),
+        )
+    } else if !use_project_name_only && has_project_name && !has_full_path {
+        // Config says full path but repo has project names only
+        (
+            false,
+            Some(format!(
+                "配置为「单设备备份」模式，但同步仓库中存在 {} 个项目名格式的目录。\n\
+                 建议切换到「多设备同步」模式以保持一致。",
+                project_name_dirs.len()
+            )),
+        )
+    } else {
+        (true, None)
+    };
+
+    DirectoryStructureCheck {
+        full_path_dirs,
+        project_name_dirs,
+        is_consistent,
+        warning,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -9,6 +9,7 @@
 - [快速安装](#快速安装)
 - [多设备同步配置](#多设备同步配置)
 - [日常使用](#日常使用)
+- [自动同步（推荐）](#自动同步推荐)
 - [常用命令示例](#常用命令示例)
 - [高级配置](#高级配置)
 - [故障排查](#故障排查)
@@ -62,6 +63,7 @@ claude-code-sync setup
 2. 输入或创建远程仓库
 3. 设置本地备份目录
 4. 可选执行首次同步
+5. 配置自动同步（推荐）- 启动时自动拉取，退出时自动推送
 
 ### 设备 B（加入同步）
 
@@ -129,6 +131,92 @@ claude-code-sync pull
 
 ---
 
+## 自动同步（推荐）
+
+自动同步可以免去手动执行 `push`/`pull` 的麻烦。
+
+### 配置方式
+
+**方式一：通过 setup 向导（新用户推荐）**
+
+```bash
+claude-code-sync setup
+```
+
+向导最后会询问是否配置自动同步，选择"是"即可一键完成所有配置。
+
+**方式二：单独配置（已完成 setup 的用户）**
+
+```bash
+claude-code-sync automate
+```
+
+此命令会：
+1. 安装 Claude Code Hooks（退出时自动推送）
+2. 创建启动包装脚本（启动时自动拉取）
+
+### 使用方式
+
+配置完成后，使用 `claude-sync` 替代 `claude` 启动 Claude Code：
+
+```bash
+# 使用包装脚本启动（推荐）
+claude-sync
+
+# 或添加别名到 shell 配置文件（~/.bashrc 或 ~/.zshrc）
+alias claude='claude-sync'
+```
+
+### 自动同步流程
+
+```
+启动时: claude-sync → 自动 pull → 启动 Claude Code
+使用中: 检测新项目 → 自动 pull 该项目历史
+退出时: SessionEnd Hook → 自动 push
+```
+
+### 管理命令
+
+```bash
+# 查看自动同步状态
+claude-code-sync automate --status
+
+# 卸载自动同步
+claude-code-sync automate --uninstall
+
+# 单独管理 hooks
+claude-code-sync hooks install    # 安装 hooks
+claude-code-sync hooks uninstall  # 卸载 hooks
+claude-code-sync hooks show       # 查看状态
+
+# 单独管理包装脚本
+claude-code-sync wrapper install    # 创建 claude-sync
+claude-code-sync wrapper uninstall  # 删除 claude-sync
+claude-code-sync wrapper show       # 查看状态
+```
+
+### Hooks 说明
+
+| Hook | 触发时机 | 功能 |
+|------|----------|------|
+| `SessionStart` | Claude Code 启动时 | 拉取最新历史（IDE 支持） |
+| `SessionEnd` | Claude Code 退出时 | 推送对话历史 |
+| `UserPromptSubmit` | 每次发送消息时 | 检测新项目并拉取远程历史 |
+
+### 调试
+
+如果自动同步未生效，检查调试日志：
+
+```bash
+# macOS
+cat ~/Library/Application\ Support/claude-code-sync/hook-debug.log
+
+# Linux
+cat ~/.config/claude-code-sync/hook-debug.log
+```
+
+---
+
 ## 常用命令示例
 
 ### 基本操作
@@ -140,6 +228,9 @@ claude-code-sync pull
 | `claude-code-sync push` | 推送本地更新 |
 | `claude-code-sync status` | 查看同步状态 |
 | `claude-code-sync update` | 检查更新 |
+| `claude-code-sync automate` | 配置自动同步 |
+| `claude-code-sync hooks show` | 查看 hooks 状态 |
+| `claude-code-sync wrapper show` | 查看包装脚本状态 |
 
 ### 配置管理
 
@@ -321,4 +412,4 @@ claude-code-sync update
 
 ---
 
-*最后更新: 2026-02-02*
+*最后更新: 2026-02-03*
