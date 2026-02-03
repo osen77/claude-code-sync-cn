@@ -48,15 +48,16 @@ pub fn fetch_latest_version() -> Result<String> {
     let response = String::from_utf8_lossy(&output.stdout);
 
     // Parse tag_name from JSON response
-    // Simple parsing without serde_json dependency
-    for line in response.lines() {
-        if line.contains("\"tag_name\"") {
-            if let Some(start) = line.find(": \"") {
-                let rest = &line[start + 3..];
-                if let Some(end) = rest.find('"') {
-                    return Ok(rest[..end].to_string());
-                }
-            }
+    // Handle both compact JSON ("tag_name":"v1.0") and pretty JSON ("tag_name": "v1.0")
+    if let Some(pos) = response.find("\"tag_name\"") {
+        let rest = &response[pos + 10..]; // skip "tag_name"
+        // Skip optional whitespace and colon
+        let rest = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+        // Skip opening quote
+        let rest = rest.trim_start_matches('"');
+        // Find closing quote
+        if let Some(end) = rest.find('"') {
+            return Ok(rest[..end].to_string());
         }
     }
 
@@ -118,19 +119,17 @@ pub fn check_for_update_silent() -> Option<String> {
 
     let response = String::from_utf8_lossy(&output.stdout);
 
-    // Parse tag_name
-    for line in response.lines() {
-        if line.contains("\"tag_name\"") {
-            if let Some(start) = line.find(": \"") {
-                let rest = &line[start + 3..];
-                if let Some(end) = rest.find('"') {
-                    let latest = &rest[..end];
-                    let current = current_version();
+    // Parse tag_name - handle both compact and pretty JSON
+    if let Some(pos) = response.find("\"tag_name\"") {
+        let rest = &response[pos + 10..];
+        let rest = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+        let rest = rest.trim_start_matches('"');
+        if let Some(end) = rest.find('"') {
+            let latest = &rest[..end];
+            let current = current_version();
 
-                    if is_newer(latest, current) {
-                        return Some(latest.to_string());
-                    }
-                }
+            if is_newer(latest, current) {
+                return Some(latest.to_string());
             }
         }
     }
