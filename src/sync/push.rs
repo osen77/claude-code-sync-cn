@@ -12,7 +12,10 @@ use crate::history::{
 use crate::interactive_conflict;
 use crate::scm;
 
-use super::discovery::{claude_projects_dir, discover_sessions, find_colliding_projects};
+use super::discovery::{
+    check_directory_structure_consistency, claude_projects_dir, discover_sessions,
+    find_colliding_projects,
+};
 use super::state::SyncState;
 use super::MAX_CONVERSATIONS_TO_DISPLAY;
 
@@ -50,6 +53,45 @@ pub fn push_history(
     }
 
     let claude_dir = claude_projects_dir()?;
+
+    // Check directory structure consistency before pushing
+    let projects_dir = state.sync_repo_path.join(&filter.sync_subdirectory);
+    if projects_dir.exists() {
+        let structure_check =
+            check_directory_structure_consistency(&projects_dir, filter.use_project_name_only);
+
+        if !structure_check.is_consistent {
+            if let Some(warning) = &structure_check.warning {
+                println!();
+                println!("{}", "⚠️  目录结构不一致警告".yellow().bold());
+                println!("{}", "─".repeat(50).dimmed());
+                println!("{}", warning.yellow());
+                println!();
+
+                if interactive && interactive_conflict::is_interactive() {
+                    let proceed = Confirm::new("是否继续推送？")
+                        .with_default(false)
+                        .with_help_message("建议先清理目录结构再继续")
+                        .prompt()
+                        .context("取消确认")?;
+
+                    if !proceed {
+                        println!("\n{}", "推送已取消。".yellow());
+                        println!(
+                            "提示：使用 '{}' 可以切换同步模式",
+                            "claude-code-sync config --use-project-name-only <true|false>".cyan()
+                        );
+                        return Ok(());
+                    }
+                } else if verbosity != VerbosityLevel::Quiet {
+                    println!(
+                        "{}",
+                        "使用 --interactive 选项可以在不一致时选择是否继续".dimmed()
+                    );
+                }
+            }
+        }
+    }
 
     // Get the current branch name for operation record
     let branch_name = branch
@@ -95,7 +137,7 @@ pub fn push_history(
     // ============================================================================
     // COPY SESSIONS AND TRACK CHANGES
     // ============================================================================
-    let projects_dir = state.sync_repo_path.join(&filter.sync_subdirectory);
+    // Note: projects_dir was already defined above for consistency check
     fs::create_dir_all(&projects_dir)?;
 
     // Discover existing sessions in sync repo to determine operation type

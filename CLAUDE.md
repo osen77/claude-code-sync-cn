@@ -41,7 +41,10 @@ claude-code-sync/
 │   │
 │   ├── handlers/            # 命令处理器
 │   │   ├── setup.rs         # 🔑 交互式配置向导
-│   │   └── update.rs        # 🔑 自动更新功能
+│   │   ├── update.rs        # 🔑 自动更新功能
+│   │   ├── automate.rs      # 🔑 一键自动化配置
+│   │   ├── hooks.rs         # Claude Code Hooks 管理
+│   │   └── wrapper.rs       # 启动包装脚本
 │   ├── history/             # 操作历史记录
 │   ├── undo/                # 撤销操作
 │   ├── filter.rs            # 同步过滤器
@@ -124,6 +127,95 @@ cwd.split(&['/', '\\'])
 - `claude-code-sync update` 手动更新
 - `claude-code-sync update --check-only` 仅检查
 - 自动下载并替换当前二进制
+
+### 6. 自动同步 (`handlers/automate.rs`, `hooks.rs`, `wrapper.rs`)
+
+**命令**: `claude-code-sync automate`
+
+**功能**:
+一键配置自动同步，无需手动执行 push/pull 命令。
+
+**组件**:
+
+1. **Hooks** (`hooks.rs`): Claude Code 原生钩子
+   - `SessionStart`: 启动时自动拉取远程历史（IDE 支持）
+   - `SessionEnd`: 退出时自动推送对话历史
+   - `UserPromptSubmit`: 检测新项目并拉取远程历史
+
+2. **Wrapper** (`wrapper.rs`): 启动包装脚本
+   - 创建 `claude-sync` 脚本（替代 `claude` 命令）
+   - 启动前自动执行 `pull`，确保获取最新历史
+   - 支持 Unix (bash) 和 Windows (bat/ps1)
+
+**相关命令**:
+```bash
+# 一键配置
+claude-code-sync automate
+
+# 查看状态
+claude-code-sync automate --status
+
+# 卸载
+claude-code-sync automate --uninstall
+
+# 单独管理 hooks
+claude-code-sync hooks install|uninstall|show
+
+# 单独管理 wrapper
+claude-code-sync wrapper install|uninstall|show
+```
+
+**工作流**:
+```
+┌─────────────────────────────────────────────────────────────┐
+│                     Auto-Sync Workflow                      │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  [启动] claude-sync                                         │
+│     │                                                       │
+│     ├─> Wrapper: claude-code-sync pull (拉取最新)           │
+│     │                                                       │
+│     └─> Claude Code 启动                                    │
+│            │                                                │
+│            ├─> SessionStart Hook: pull (IDE 启动支持)       │
+│            │                                                │
+│            ├─> UserPromptSubmit Hook: 检测新项目            │
+│            │                                                │
+│            └─> SessionEnd Hook: push (退出时推送)           │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**配置文件位置**:
+- Hooks: `~/.claude/settings.json`
+- Wrapper: 与 `claude-code-sync` 同目录下的 `claude-sync`
+
+**调试日志**:
+```bash
+# macOS
+cat ~/Library/Application\ Support/claude-code-sync/hook-debug.log
+```
+
+### 7. 目录结构一致性检查 (`sync/discovery.rs`)
+
+**功能**: 防止同步模式切换导致的目录混乱
+
+**检测逻辑**:
+```rust
+pub fn check_directory_structure_consistency(
+    sync_repo_projects_dir: &Path,
+    use_project_name_only: bool,
+) -> DirectoryStructureCheck
+```
+
+**警告场景**:
+1. 仓库中同时存在完整路径格式 (`-Users-xxx-`) 和项目名格式 (`myproject`)
+2. 当前配置模式与现有目录结构不匹配
+
+**触发位置**:
+- `push.rs`: 推送前检查
+- `filter.rs`: 配置模式变更时
+- `setup.rs`: 设置向导中检测模式变更
 
 ## 开发规范
 

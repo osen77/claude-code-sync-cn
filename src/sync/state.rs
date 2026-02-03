@@ -190,6 +190,7 @@ fn default_version() -> u32 {
     2
 }
 
+#[allow(dead_code)]
 impl MultiRepoState {
     /// Get the active repository configuration
     pub fn active(&self) -> Option<&RepoConfig> {

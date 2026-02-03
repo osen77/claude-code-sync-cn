@@ -1,5 +1,5 @@
 // Module declarations
-mod discovery;
+pub(crate) mod discovery;
 mod init;
 mod pull;
 mod push;

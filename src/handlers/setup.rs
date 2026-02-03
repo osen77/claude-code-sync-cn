@@ -347,6 +347,48 @@ pub fn handle_setup(skip_sync: bool) -> Result<()> {
 
     let use_project_name_only = matches!(sync_mode, SyncMode::MultiDevice);
 
+    // Check if existing config has different mode
+    if let Ok(existing_config) = crate::filter::FilterConfig::load() {
+        if existing_config.use_project_name_only != use_project_name_only {
+            println!();
+            println!("{}", "⚠️  检测到同步模式变更".yellow().bold());
+            println!("{}", "─".repeat(50).dimmed());
+
+            let old_mode = if existing_config.use_project_name_only {
+                "多设备同步"
+            } else {
+                "单设备备份"
+            };
+            let new_mode = if use_project_name_only {
+                "多设备同步"
+            } else {
+                "单设备备份"
+            };
+
+            println!("当前配置: {} → 新选择: {}", old_mode.cyan(), new_mode.green());
+            println!();
+            println!(
+                "{}",
+                "切换模式可能导致同步仓库中出现混合目录格式。".yellow()
+            );
+            println!(
+                "{}",
+                "建议在切换后手动清理旧格式的目录以避免数据重复。".yellow()
+            );
+            println!("{}", "─".repeat(50).dimmed());
+            println!();
+
+            let confirm = Confirm::new("确认切换模式？")
+                .with_default(true)
+                .prompt()
+                .context("取消确认")?;
+
+            if !confirm {
+                return Err(anyhow::anyhow!("用户取消配置"));
+            }
+        }
+    }
+
     println!();
 
     // Step 2: Select repository source
@@ -523,15 +565,65 @@ pub fn handle_setup(skip_sync: bool) -> Result<()> {
         }
     }
 
+    // Step 8: Configure auto-sync (hooks + wrapper)
+    println!();
+    let setup_auto_sync = Confirm::new("是否配置自动同步？")
+        .with_default(true)
+        .with_help_message("启动时自动拉取，退出时自动推送，无需手动执行命令")
+        .prompt()
+        .unwrap_or(false);
+
+    if setup_auto_sync {
+        println!();
+        println!("{}", "🔧 正在配置自动同步...".cyan());
+
+        // Install hooks
+        match crate::handlers::hooks::handle_hooks_install() {
+            Ok(()) => {}
+            Err(e) => {
+                println!("{} {}", "⚠️  Hooks 安装失败:".yellow(), e);
+            }
+        }
+
+        // Install wrapper
+        match crate::handlers::wrapper::handle_wrapper_install(false) {
+            Ok(wrapper_path) => {
+                println!();
+                println!("{}", "✓ 自动同步已配置".green());
+                println!();
+                println!("{}", "使用方式:".cyan());
+                println!(
+                    "   使用 {} 启动 Claude Code（替代 claude 命令）",
+                    "claude-sync".bold()
+                );
+                println!("   或添加别名: alias claude='{}'", wrapper_path.display());
+            }
+            Err(e) => {
+                println!("{} {}", "⚠️  Wrapper 安装失败:".yellow(), e);
+            }
+        }
+    }
+
     println!();
     println!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".green());
     println!("{}", "🎉 配置完成！".green().bold());
     println!();
-    println!("{}", "常用命令:".cyan());
-    println!("   {} - 双向同步", "claude-code-sync sync".bold());
-    println!("   {} - 推送到远程", "claude-code-sync push".bold());
-    println!("   {} - 拉取到本地", "claude-code-sync pull".bold());
-    println!("   {} - 查看状态", "claude-code-sync status".bold());
+
+    if setup_auto_sync {
+        println!("{}", "自动同步已启用，使用 claude-sync 启动即可。".cyan());
+        println!();
+        println!("{}", "管理命令:".cyan());
+        println!("   {} - 查看自动同步状态", "claude-code-sync automate --status".bold());
+        println!("   {} - 卸载自动同步", "claude-code-sync automate --uninstall".bold());
+    } else {
+        println!("{}", "常用命令:".cyan());
+        println!("   {} - 双向同步", "claude-code-sync sync".bold());
+        println!("   {} - 推送到远程", "claude-code-sync push".bold());
+        println!("   {} - 拉取到本地", "claude-code-sync pull".bold());
+        println!("   {} - 查看状态", "claude-code-sync status".bold());
+        println!();
+        println!("{}", "提示: 运行 'claude-code-sync automate' 可配置自动同步".dimmed());
+    }
     println!();
 
     Ok(())

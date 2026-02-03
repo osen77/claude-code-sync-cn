@@ -194,6 +194,7 @@ impl FilterConfig {
     }
 
     /// Get the configured SCM backend.
+    #[allow(dead_code)]
     pub fn backend(&self) -> Result<Backend> {
         match self.scm_backend.to_lowercase().as_str() {
             "git" => Ok(Backend::Git),
@@ -350,6 +351,61 @@ pub fn update_config(
     }
 
     if let Some(project_name_only) = use_project_name_only {
+        // Check if mode is actually changing
+        if config.use_project_name_only != project_name_only {
+            println!();
+            println!("{}", "⚠️  同步模式切换警告".yellow().bold());
+            println!("{}", "─".repeat(50).dimmed());
+
+            if project_name_only {
+                // Switching to multi-device mode
+                println!(
+                    "{}",
+                    "正在从「单设备备份」切换到「多设备同步」模式".yellow()
+                );
+                println!();
+                println!("影响：");
+                println!(
+                    "  {} 新推送的文件将使用项目名格式（如 {}）",
+                    "•".cyan(),
+                    "n8n-workflow/".green()
+                );
+                println!(
+                    "  {} 已有的完整路径格式目录（如 {}）不会自动清理",
+                    "•".cyan(),
+                    "-Users-.../".dimmed()
+                );
+                println!();
+                println!(
+                    "建议：手动清理同步仓库中的完整路径格式目录，避免数据重复。"
+                );
+            } else {
+                // Switching to single-device mode
+                println!(
+                    "{}",
+                    "正在从「多设备同步」切换到「单设备备份」模式".yellow()
+                );
+                println!();
+                println!("影响：");
+                println!(
+                    "  {} 新推送的文件将使用完整路径格式（如 {}）",
+                    "•".cyan(),
+                    "-Users-xxx-project/".dimmed()
+                );
+                println!(
+                    "  {} 已有的项目名格式目录（如 {}）不会自动清理",
+                    "•".cyan(),
+                    "n8n-workflow/".green()
+                );
+                println!();
+                println!(
+                    "注意：此模式不支持跨设备同步（路径不同会被视为不同项目）。"
+                );
+            }
+            println!("{}", "─".repeat(50).dimmed());
+            println!();
+        }
+
         config.use_project_name_only = project_name_only;
         println!(
             "{}",
