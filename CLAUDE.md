@@ -239,6 +239,13 @@ cargo fmt
 cargo doc --open --no-deps
 ```
 
+### 发布
+
+```bash
+# 交互式发布（选择 push/patch/minor/major）
+./scripts/release.sh
+```
+
 ## 调试技巧
 
 ### 启用详细日志
@@ -314,4 +321,4 @@ fn test_skip_snapshot_files() {
 
 ---
 
-*最后更新: 2026-02-02*
+*最后更新: 2026-02-03*

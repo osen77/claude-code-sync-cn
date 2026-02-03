@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -17,6 +18,11 @@ pub(crate) fn claude_projects_dir() -> Result<PathBuf> {
 }
 
 /// Discover all conversation sessions in Claude Code history
+///
+/// When multiple files share the same session ID (e.g., main conversation and agent
+/// subprocess files), this function deduplicates by keeping the one with the most
+/// messages. This prevents agent files from overwriting main conversation files
+/// during merge operations.
 pub(crate) fn discover_sessions(
     base_path: &Path,
     filter: &FilterConfig,
@@ -44,7 +50,36 @@ pub(crate) fn discover_sessions(
         }
     }
 
-    Ok(sessions)
+    // Deduplicate by session_id, keeping the session with the most messages.
+    // This handles cases where agent subprocess files share the same session_id
+    // as the main conversation file - we want to keep the main file (more messages).
+    let mut session_map: HashMap<String, ConversationSession> = HashMap::new();
+    for session in sessions {
+        session_map
+            .entry(session.session_id.clone())
+            .and_modify(|existing| {
+                // Keep the session with more messages
+                if session.message_count() > existing.message_count() {
+                    log::debug!(
+                        "Deduplicating session {}: replacing {} messages with {} messages",
+                        session.session_id,
+                        existing.message_count(),
+                        session.message_count()
+                    );
+                    *existing = session.clone();
+                } else {
+                    log::debug!(
+                        "Deduplicating session {}: keeping {} messages, discarding {} messages",
+                        existing.session_id,
+                        existing.message_count(),
+                        session.message_count()
+                    );
+                }
+            })
+            .or_insert(session);
+    }
+
+    Ok(session_map.into_values().collect())
 }
 
 /// Check for large conversation files and emit warnings
@@ -201,6 +236,7 @@ pub fn find_colliding_projects(
 mod tests {
     use super::*;
     use std::fs;
+    use std::io::Write;
     use tempfile::tempdir;
 
     #[test]
@@ -302,5 +338,88 @@ mod tests {
         assert_eq!(collisions.len(), 1);
         assert!(collisions.contains_key("myapp"));
         assert_eq!(collisions.get("myapp").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_discover_sessions_deduplicates_by_session_id() {
+        let temp_dir = tempdir().unwrap();
+        let projects_dir = temp_dir.path();
+
+        // Create a main conversation file with many messages
+        let main_file = projects_dir.join("session-123.jsonl");
+        let mut file = fs::File::create(&main_file).unwrap();
+        // Write 10 user/assistant message pairs
+        for i in 0..10 {
+            writeln!(
+                file,
+                r#"{{"type":"user","sessionId":"session-123","uuid":"user-{i}","timestamp":"2025-01-01T{i:02}:00:00Z"}}"#,
+            )
+            .unwrap();
+            writeln!(
+                file,
+                r#"{{"type":"assistant","sessionId":"session-123","uuid":"assistant-{i}","parentUuid":"user-{i}","timestamp":"2025-01-01T{i:02}:01:00Z"}}"#,
+            )
+            .unwrap();
+        }
+
+        // Create an agent subprocess file with only 2 messages (same session ID)
+        let agent_file = projects_dir.join("agent-abc.jsonl");
+        let mut file = fs::File::create(&agent_file).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"user","sessionId":"session-123","uuid":"agent-user-1","timestamp":"2025-01-01T00:00:00Z"}}"#,
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant","sessionId":"session-123","uuid":"agent-assistant-1","parentUuid":"agent-user-1","timestamp":"2025-01-01T00:01:00Z"}}"#,
+        )
+        .unwrap();
+
+        // Discover sessions
+        let filter = crate::filter::FilterConfig::default();
+        let sessions = discover_sessions(projects_dir, &filter).unwrap();
+
+        // Should only have 1 session (deduplicated)
+        assert_eq!(sessions.len(), 1, "Should deduplicate to 1 session");
+
+        // The session should have 20 messages (from main file), not 2 (from agent file)
+        let session = &sessions[0];
+        assert_eq!(session.session_id, "session-123");
+        assert_eq!(
+            session.message_count(),
+            20,
+            "Should keep the session with more messages"
+        );
+    }
+
+    #[test]
+    fn test_discover_sessions_no_duplicates() {
+        let temp_dir = tempdir().unwrap();
+        let projects_dir = temp_dir.path();
+
+        // Create two files with different session IDs
+        let file1 = projects_dir.join("session-1.jsonl");
+        let mut file = fs::File::create(&file1).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"user","sessionId":"session-1","uuid":"1","timestamp":"2025-01-01T00:00:00Z"}}"#,
+        )
+        .unwrap();
+
+        let file2 = projects_dir.join("session-2.jsonl");
+        let mut file = fs::File::create(&file2).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"user","sessionId":"session-2","uuid":"2","timestamp":"2025-01-01T00:00:00Z"}}"#,
+        )
+        .unwrap();
+
+        // Discover sessions
+        let filter = crate::filter::FilterConfig::default();
+        let sessions = discover_sessions(projects_dir, &filter).unwrap();
+
+        // Should have 2 sessions (no deduplication needed)
+        assert_eq!(sessions.len(), 2, "Should have 2 distinct sessions");
     }
 }
