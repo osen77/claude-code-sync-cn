@@ -32,14 +32,13 @@ fn get_hooks_config() -> Value {
                 ]
             }
         ],
-        "SessionEnd": [
+        "Stop": [
             {
                 "hooks": [
                     {
                         "type": "command",
-                        "command": "claude-code-sync hook-session-end",
-                        "timeout": 120,
-                        "statusMessage": "Syncing conversation history..."
+                        "command": "claude-code-sync hook-stop",
+                        "timeout": 60
                     }
                 ]
             }
@@ -111,13 +110,7 @@ pub fn handle_hooks_install() -> Result<()> {
         if let Some(existing) = hooks_obj.get_mut(event_name) {
             // Check if our hook already exists
             if let Some(existing_array) = existing.as_array() {
-                let command_pattern = if event_name == "SessionEnd" {
-                    "claude-code-sync sync"
-                } else {
-                    "claude-code-sync hook-new-project-check"
-                };
-
-                if contains_our_hook(existing_array, command_pattern) {
+                if contains_our_hook(existing_array, HOOK_MARKER_COMMENT) {
                     println!(
                         "  {} {} hook already installed",
                         "!".yellow(),
@@ -174,8 +167,8 @@ pub fn handle_hooks_uninstall() -> Result<()> {
     if let Some(hooks_obj) = settings.get_mut("hooks").and_then(|v| v.as_object_mut()) {
         let mut removed_count = 0;
 
-        // Remove our hooks from each event type
-        for event_name in &["SessionEnd", "UserPromptSubmit"] {
+        // Remove our hooks from each event type (including legacy SessionEnd)
+        for event_name in &["SessionStart", "Stop", "SessionEnd", "UserPromptSubmit"] {
             if let Some(hooks_array) = hooks_obj.get_mut(*event_name).and_then(|v| v.as_array_mut())
             {
                 let original_len = hooks_array.len();
@@ -251,12 +244,10 @@ pub fn handle_hooks_show() -> Result<()> {
             }
         }
 
-        // Check SessionEnd
-        if let Some(hooks_array) = hooks_obj.get("SessionEnd").and_then(|v| v.as_array()) {
-            if contains_our_hook(hooks_array, "claude-code-sync hook-session-end")
-                || contains_our_hook(hooks_array, "claude-code-sync sync")
-            {
-                found.push("SessionEnd");
+        // Check Stop
+        if let Some(hooks_array) = hooks_obj.get("Stop").and_then(|v| v.as_array()) {
+            if contains_our_hook(hooks_array, "claude-code-sync hook-stop") {
+                found.push("Stop");
             }
         }
 
@@ -283,7 +274,7 @@ pub fn handle_hooks_show() -> Result<()> {
         for hook in &hooks_installed {
             let description = match *hook {
                 "SessionStart" => "Pull on startup (IDE support)",
-                "SessionEnd" => "Sync on exit",
+                "Stop" => "Push after each response",
                 "UserPromptSubmit" => "New project detection",
                 _ => "",
             };
@@ -369,10 +360,10 @@ pub fn handle_new_project_check() -> Result<()> {
     Ok(())
 }
 
-/// Handle the hook-session-end command
-/// This is called by the SessionEnd hook to sync history
+/// Handle the hook-stop command
+/// This is called by the Stop hook after each AI response to push history
 /// Reads JSON from stdin
-pub fn handle_session_end() -> Result<()> {
+pub fn handle_stop() -> Result<()> {
     use std::io::Write;
 
     // Log hook execution for debugging
@@ -385,7 +376,7 @@ pub fn handle_session_end() -> Result<()> {
             .open(&debug_log)
         {
             let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-            let _ = writeln!(file, "[{}] SessionEnd hook executed", timestamp);
+            let _ = writeln!(file, "[{}] Stop hook executed", timestamp);
         }
     }
 
@@ -393,7 +384,7 @@ pub fn handle_session_end() -> Result<()> {
     let _input: Value = serde_json::from_reader(std::io::stdin())
         .unwrap_or(json!({}));
 
-    // Execute push quietly (pull was done at SessionStart, only push needed at exit)
+    // Execute push quietly after each response
     let push_result = std::process::Command::new("claude-code-sync")
         .args(["push", "--quiet"])
         .stdin(std::process::Stdio::null())
@@ -413,10 +404,10 @@ pub fn handle_session_end() -> Result<()> {
             let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
             match &push_result {
                 Ok(status) => {
-                    let _ = writeln!(file, "[{}] SessionEnd push completed: exit code {}", timestamp, status);
+                    let _ = writeln!(file, "[{}] Stop push completed: exit code {}", timestamp, status);
                 }
                 Err(e) => {
-                    let _ = writeln!(file, "[{}] SessionEnd push failed: {}", timestamp, e);
+                    let _ = writeln!(file, "[{}] Stop push failed: {}", timestamp, e);
                 }
             }
         }
@@ -507,13 +498,10 @@ pub fn are_hooks_installed() -> Result<bool> {
             .map(|arr| contains_our_hook(arr, "claude-code-sync hook-session-start"))
             .unwrap_or(false);
 
-        let has_session_end = hooks_obj
-            .get("SessionEnd")
+        let has_stop = hooks_obj
+            .get("Stop")
             .and_then(|v| v.as_array())
-            .map(|arr| {
-                contains_our_hook(arr, "claude-code-sync hook-session-end")
-                    || contains_our_hook(arr, "claude-code-sync sync")
-            })
+            .map(|arr| contains_our_hook(arr, "claude-code-sync hook-stop"))
             .unwrap_or(false);
 
         let has_prompt_submit = hooks_obj
@@ -522,7 +510,7 @@ pub fn are_hooks_installed() -> Result<bool> {
             .map(|arr| contains_our_hook(arr, "claude-code-sync hook-new-project-check"))
             .unwrap_or(false);
 
-        Ok(has_session_start && has_session_end && has_prompt_submit)
+        Ok(has_session_start && has_stop && has_prompt_submit)
     } else {
         Ok(false)
     }

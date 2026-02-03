@@ -79,7 +79,7 @@ Claude Code 将对话历史存储在 `~/.claude/projects/` 目录下的 JSONL �
 ```
 启动时: claude-sync → 自动 pull → 启动 Claude Code
 使用中: 检测新项目 → 自动 pull 该项目历史
-退出时: SessionEnd Hook → 自动 push
+每轮对话结束: Stop Hook → 自动 push
 ```
 
 ## 安全考虑

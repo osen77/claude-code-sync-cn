@@ -306,9 +306,9 @@ enum Commands {
     #[command(hide = true)]
     HookSessionStart,
 
-    /// Internal command for SessionEnd hook (sync on exit)
+    /// Internal command for Stop hook (push after each response)
     #[command(hide = true)]
-    HookSessionEnd,
+    HookStop,
 }
 
 #[derive(Subcommand)]
@@ -790,8 +790,8 @@ fn main() -> Result<()> {
         Commands::HookSessionStart => {
             handle_session_start()?;
         }
-        Commands::HookSessionEnd => {
-            handle_session_end()?;
+        Commands::HookStop => {
+            handle_stop()?;
         }
     }
 

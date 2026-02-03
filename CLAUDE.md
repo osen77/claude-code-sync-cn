@@ -139,7 +139,7 @@ cwd.split(&['/', '\\'])
 
 1. **Hooks** (`hooks.rs`): Claude Code 原生钩子
    - `SessionStart`: 启动时自动拉取远程历史（IDE 支持）
-   - `SessionEnd`: 退出时自动推送对话历史
+   - `Stop`: 每轮对话完成后自动推送对话历史
    - `UserPromptSubmit`: 检测新项目并拉取远程历史
 
 2. **Wrapper** (`wrapper.rs`): 启动包装脚本
@@ -181,7 +181,7 @@ claude-code-sync wrapper install|uninstall|show
 │            │                                                │
 │            ├─> UserPromptSubmit Hook: 检测新项目            │
 │            │                                                │
-│            └─> SessionEnd Hook: push (退出时推送)           │
+│            └─> Stop Hook: push (每轮对话后推送)             │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
