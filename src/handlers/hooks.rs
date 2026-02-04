@@ -423,13 +423,81 @@ pub fn handle_stop() -> Result<()> {
     Ok(())
 }
 
+/// Debounce interval for SessionStart pull (in seconds)
+/// Extra protection layer to prevent duplicate pulls
+const SESSION_START_DEBOUNCE_SECS: u64 = 300; // 5 minutes
+
+/// Count running Claude Code processes
+/// Uses ps + grep to detect Claude Code native-binary processes
+fn count_claude_processes() -> usize {
+    let output = std::process::Command::new("sh")
+        .args(["-c", "ps aux | grep 'native-binary/claude' | grep -v grep | wc -l"])
+        .output();
+
+    match output {
+        Ok(out) => {
+            String::from_utf8_lossy(&out.stdout)
+                .trim()
+                .parse()
+                .unwrap_or(0)
+        }
+        Err(_) => 0 // If detection fails, assume first start
+    }
+}
+
 /// Handle the hook-session-start command
 /// This is called by the SessionStart hook to pull latest history
 /// Reads JSON from stdin, outputs JSON to stdout
+///
+/// Uses triple-condition detection to only pull on first startup:
+/// 1. Process count = 1 (no other Claude instances)
+/// 2. source = "startup" (not resume/compact)
+/// 3. Debounce not active (extra protection)
 pub fn handle_session_start() -> Result<()> {
     use std::io::Write;
 
-    // Log hook execution for debugging
+    // Read hook input from stdin (required by Claude Code hooks)
+    let input: Value = serde_json::from_reader(std::io::stdin())
+        .unwrap_or(json!({}));
+
+    // Extract source field
+    let source = input
+        .get("source")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+
+    // Count Claude Code processes
+    let process_count = count_claude_processes();
+    let is_first_instance = process_count <= 1;
+    let is_startup = source == "startup";
+
+    // Get timestamp file path for debouncing
+    let timestamp_file = crate::config::ConfigManager::config_dir()
+        .map(|d| d.join("last-session-pull"));
+
+    // Check debounce
+    let debounce_active = if let Ok(ref ts_path) = timestamp_file {
+        if ts_path.exists() {
+            if let Ok(metadata) = std::fs::metadata(ts_path) {
+                if let Ok(modified) = metadata.modified() {
+                    let elapsed = std::time::SystemTime::now()
+                        .duration_since(modified)
+                        .unwrap_or_default();
+                    elapsed.as_secs() < SESSION_START_DEBOUNCE_SECS
+                } else {
+                    false
+                }
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+
+    // Log hook execution with all conditions
     if let Ok(home) = std::env::var("HOME") {
         let debug_log = std::path::PathBuf::from(&home)
             .join("Library/Application Support/claude-code-sync/hook-debug.log");
@@ -439,15 +507,69 @@ pub fn handle_session_start() -> Result<()> {
             .open(&debug_log)
         {
             let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-            let _ = writeln!(file, "[{}] SessionStart hook executed", timestamp);
+            let _ = writeln!(
+                file,
+                "[{}] SessionStart (source: {}, processes: {}, debounce: {})",
+                timestamp, source, process_count, debounce_active
+            );
         }
     }
 
-    // Read hook input from stdin (required by Claude Code hooks)
-    let _input: Value = serde_json::from_reader(std::io::stdin())
-        .unwrap_or(json!({}));
+    // Triple-condition check: first instance + startup + no debounce
+    if !is_first_instance {
+        if let Ok(home) = std::env::var("HOME") {
+            let debug_log = std::path::PathBuf::from(&home)
+                .join("Library/Application Support/claude-code-sync/hook-debug.log");
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&debug_log)
+            {
+                let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                let _ = writeln!(file, "[{}] pull skipped (other instances: {})", timestamp, process_count);
+            }
+        }
+        return Ok(());
+    }
 
-    // Execute pull quietly
+    if !is_startup {
+        if let Ok(home) = std::env::var("HOME") {
+            let debug_log = std::path::PathBuf::from(&home)
+                .join("Library/Application Support/claude-code-sync/hook-debug.log");
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&debug_log)
+            {
+                let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                let _ = writeln!(file, "[{}] pull skipped (source: {} != startup)", timestamp, source);
+            }
+        }
+        return Ok(());
+    }
+
+    if debounce_active {
+        if let Ok(home) = std::env::var("HOME") {
+            let debug_log = std::path::PathBuf::from(&home)
+                .join("Library/Application Support/claude-code-sync/hook-debug.log");
+            if let Ok(mut file) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&debug_log)
+            {
+                let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+                let _ = writeln!(file, "[{}] pull skipped (debounce active)", timestamp);
+            }
+        }
+        return Ok(());
+    }
+
+    // Update timestamp file before pull
+    if let Ok(ref ts_path) = timestamp_file {
+        let _ = std::fs::write(ts_path, "");
+    }
+
+    // Execute pull quietly (first start confirmed)
     let pull_result = std::process::Command::new("claude-code-sync")
         .args(["pull", "--quiet"])
         .stdin(std::process::Stdio::null())
