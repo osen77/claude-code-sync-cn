@@ -413,6 +413,13 @@ pub fn handle_stop() -> Result<()> {
         }
     }
 
+    // Also sync config if enabled
+    if let Ok(filter) = crate::filter::FilterConfig::load() {
+        if filter.config_sync.enabled {
+            let _ = super::config_sync::handle_config_push(&filter.config_sync);
+        }
+    }
+
     Ok(())
 }
 
@@ -473,6 +480,13 @@ pub fn handle_session_start() -> Result<()> {
     // But for SessionStart, we just silently sync - the user will see the history
     if let Err(e) = &pull_result {
         log::debug!("SessionStart pull failed: {}", e);
+    }
+
+    // Auto-apply CLAUDE.md after pull
+    if let Ok(filter) = crate::filter::FilterConfig::load() {
+        if filter.config_sync.enabled && filter.config_sync.auto_apply_claude_md {
+            let _ = super::config_sync::auto_apply_claude_md(&filter.config_sync);
+        }
     }
 
     // Exit successfully - no output needed for SessionStart unless we want to add context

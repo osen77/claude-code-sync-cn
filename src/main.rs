@@ -298,6 +298,12 @@ enum Commands {
         uninstall: bool,
     },
 
+    /// Sync Claude Code configuration files across devices
+    ConfigSync {
+        #[command(subcommand)]
+        action: ConfigSyncAction,
+    },
+
     /// Internal command for UserPromptSubmit hook (new project detection)
     #[command(hide = true)]
     HookNewProjectCheck,
@@ -404,6 +410,28 @@ enum WrapperAction {
 
     /// Show wrapper script path and status
     Show,
+}
+
+#[derive(Subcommand)]
+enum ConfigSyncAction {
+    /// Push local configuration to sync repository
+    Push,
+
+    /// List available device configurations
+    List,
+
+    /// Apply configuration from another device
+    Apply {
+        /// Device name to apply configuration from
+        device: String,
+
+        /// Also apply hooks configuration (check paths!)
+        #[arg(long)]
+        with_hooks: bool,
+    },
+
+    /// Show configuration sync status
+    Status,
 }
 
 fn main() -> Result<()> {
@@ -792,6 +820,23 @@ fn main() -> Result<()> {
         }
         Commands::HookStop => {
             handle_stop()?;
+        }
+        Commands::ConfigSync { action } => {
+            let filter_config = filter::FilterConfig::load()?;
+            match action {
+                ConfigSyncAction::Push => {
+                    handle_config_push(&filter_config.config_sync)?;
+                }
+                ConfigSyncAction::List => {
+                    handle_config_list()?;
+                }
+                ConfigSyncAction::Apply { device, with_hooks } => {
+                    handle_config_apply(&device, with_hooks, &filter_config.config_sync)?;
+                }
+                ConfigSyncAction::Status => {
+                    handle_config_status(&filter_config.config_sync)?;
+                }
+            }
         }
     }
 

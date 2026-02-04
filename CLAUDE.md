@@ -7,7 +7,7 @@
 claude-code-sync 是一个 Rust CLI 工具，用于同步 Claude Code 对话历史到 Git/Mercurial 仓库，支持跨设备备份和同步。
 
 - **语言**: Rust 2021 Edition
-- **核心功能**: 对话历史同步、冲突解决、跨平台路径处理
+- **核心功能**: 对话历史同步、配置同步、冲突解决、跨平台路径处理
 - **支持平台**: Windows、macOS、Linux
 - **版本控制**: Git (主要) / Mercurial (可选)
 
@@ -43,6 +43,8 @@ claude-code-sync/
 │   │   ├── setup.rs         # 🔑 交互式配置向导
 │   │   ├── update.rs        # 🔑 自动更新功能
 │   │   ├── automate.rs      # 🔑 一键自动化配置
+│   │   ├── config_sync.rs   # 🔑 配置文件同步
+│   │   ├── platform_filter.rs # 🔑 CLAUDE.md 平台标签过滤
 │   │   ├── hooks.rs         # Claude Code Hooks 管理
 │   │   └── wrapper.rs       # 启动包装脚本
 │   ├── history/             # 操作历史记录
@@ -216,6 +218,85 @@ pub fn check_directory_structure_consistency(
 - `push.rs`: 推送前检查
 - `filter.rs`: 配置模式变更时
 - `setup.rs`: 设置向导中检测模式变更
+
+### 8. 配置同步 (`handlers/config_sync.rs`, `platform_filter.rs`)
+
+**命令**: `claude-code-sync config-sync`
+
+**功能**:
+跨设备同步 Claude Code 配置文件，支持平台标签过滤。
+
+**子命令**:
+```bash
+# 推送配置到远程
+claude-code-sync config-sync push
+
+# 列出远程设备配置
+claude-code-sync config-sync list
+
+# 应用其他设备配置
+claude-code-sync config-sync apply <device>
+
+# 查看配置同步状态
+claude-code-sync config-sync status
+```
+
+**同步内容**:
+
+| 文件 | 默认同步 | 说明 |
+|------|---------|------|
+| `settings.json` | ✅ | 自动过滤 hooks 字段 |
+| `CLAUDE.md` | ✅ | 支持平台标签过滤 |
+| `installed_skills.json` | ✅ | skills 列表 |
+| `hooks/` | ❌ | 默认禁用（路径兼容问题） |
+
+**平台标签过滤** (`platform_filter.rs`):
+
+CLAUDE.md 支持使用 HTML 注释标记平台特定内容：
+
+```markdown
+<!-- platform:macos -->
+macOS 专用配置
+<!-- end-platform -->
+
+<!-- platform:windows -->
+Windows 专用配置
+<!-- end-platform -->
+```
+
+**关键函数**:
+- `filter_for_platform()`: 过滤其他平台内容，保留目标平台
+- `merge_claude_md()`: 合并配置时保留本地平台块
+- `extract_current_platform_block()`: 提取当前平台的完整块（含标签）
+
+**合并逻辑**:
+```rust
+pub fn merge_claude_md(source: &str, target: &str, platform: Platform) -> String {
+    // 1. 从 source 移除所有平台块（保留通用内容）
+    // 2. 从 target 提取当前平台块（保留标签）
+    // 3. 合并：source 通用内容 + target 平台块
+}
+```
+
+**设备名获取**:
+- macOS: `scutil --get ComputerName`
+- Windows: `COMPUTERNAME` 环境变量
+- Linux: `/etc/hostname`
+- 非 ASCII 字符自动替换为 `-`
+
+**目录结构**:
+```
+sync-repo/
+├── _configs/
+│   ├── MacBook-Pro/
+│   │   ├── settings.json
+│   │   ├── CLAUDE.md
+│   │   └── installed_skills.json
+│   └── Windows-PC/
+│       └── ...
+└── projects/
+    └── ...
+```
 
 ## 开发规范
 
@@ -413,4 +494,4 @@ fn test_skip_snapshot_files() {
 
 ---
 
-*最后更新: 2026-02-03*
+*最后更新: 2026-02-04*

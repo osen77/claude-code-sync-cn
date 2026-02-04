@@ -132,3 +132,9 @@ pub mod sync;
 /// Snapshots enable undoing pull operations (by restoring files) and push operations
 /// (by resetting Git commits). Includes validation and security checks for safe restoration.
 pub mod undo;
+
+/// Command handlers for CLI operations.
+///
+/// Contains handler functions for various CLI commands including setup, hooks,
+/// wrapper scripts, configuration sync, and more.
+pub mod handlers;

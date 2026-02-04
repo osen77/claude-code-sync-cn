@@ -10,6 +10,7 @@
 
 - **自动同步** - 启动时自动拉取，退出时自动推送，无需手动操作
 - **多设备同步** - 在不同电脑间保持对话历史一致
+- **配置同步** - 同步 settings.json、CLAUDE.md 等配置文件，支持跨平台适配
 - **智能合并** - 自动合并非冲突的对话变更
 - **交互式配置** - 首次运行向导引导完成所有配置
 - **自动更新** - 启动时检查新版本，支持一键更新
@@ -60,6 +61,8 @@ claude-sync
 | `claude-code-sync sync` | 双向同步 |
 | `claude-code-sync automate` | 配置自动同步 |
 | `claude-code-sync status` | 查看同步状态 |
+| `claude-code-sync config-sync push` | 推送配置到远程 |
+| `claude-code-sync config-sync apply <device>` | 应用其他设备配置 |
 | `claude-code-sync update` | 更新到最新版本 |
 
 更多命令请参阅 [用户指南](docs/user-guide.md)。
@@ -82,6 +85,36 @@ Claude Code 将对话历史存储在 `~/.claude/projects/` 目录下的 JSONL �
 每轮对话结束: Stop Hook → 自动 push
 ```
 
+## 配置同步
+
+除了对话历史，还支持跨设备同步 Claude Code 配置：
+
+```bash
+# 推送当前配置
+claude-code-sync config-sync push
+
+# 查看可用设备
+claude-code-sync config-sync list
+
+# 应用其他设备配置
+claude-code-sync config-sync apply MacBook-Pro
+```
+
+**同步内容**：
+- `settings.json` - 权限、模型配置（自动过滤 hooks）
+- `CLAUDE.md` - 用户全局指令（支持平台标签过滤）
+- `installed_skills.json` - 已安装的 skills 列表
+
+**平台标签**：CLAUDE.md 支持平台特定内容，跨平台应用时自动过滤
+
+```markdown
+<!-- platform:macos -->
+macOS 专用配置
+<!-- end-platform -->
+```
+
+详见 [用户指南 - 配置同步](docs/user-guide.md#配置同步)。
+
 ## 安全考虑
 
 - 对话历史可能包含敏感信息
@@ -100,4 +133,4 @@ Claude Code 将对话历史存储在 `~/.claude/projects/` 目录下的 JSONL �
 
 ---
 
-*最后更新: 2026-02-03*
+*最后更新: 2026-02-04*

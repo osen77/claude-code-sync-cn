@@ -10,6 +10,7 @@
 - [多设备同步配置](#多设备同步配置)
 - [日常使用](#日常使用)
 - [自动同步（推荐）](#自动同步推荐)
+- [配置同步](#配置同步)
 - [常用命令示例](#常用命令示例)
 - [高级配置](#高级配置)
 - [故障排查](#故障排查)
@@ -217,6 +218,120 @@ cat ~/.config/claude-code-sync/hook-debug.log
 
 ---
 
+## 配置同步
+
+除了对话历史，`claude-code-sync` 还支持同步 Claude Code 配置文件，让你在多个设备间保持一致的使用体验。
+
+### 同步内容
+
+| 文件 | 默认同步 | 说明 |
+|------|---------|------|
+| `settings.json` | ✅ | 权限、模型配置（自动过滤 hooks 字段） |
+| `CLAUDE.md` | ✅ | 用户全局指令（支持平台标签） |
+| `installed_skills.json` | ✅ | 已安装 skills 列表 |
+| `hooks/` | ❌ | 默认不同步（路径兼容问题） |
+
+### 基本命令
+
+```bash
+# 推送当前设备配置到远程
+claude-code-sync config-sync push
+
+# 查看远程所有设备配置
+claude-code-sync config-sync list
+
+# 应用其他设备的配置
+claude-code-sync config-sync apply MacBook-Pro
+
+# 查看配置同步状态
+claude-code-sync config-sync status
+```
+
+### 平台标签
+
+CLAUDE.md 中可能包含平台特定内容。使用平台标签标记后，跨平台应用时会自动过滤。
+
+**标签格式：**
+
+```markdown
+# 通用内容（所有平台共享）
+
+## 通用规范
+- 代码规范...
+
+<!-- platform:macos -->
+## macOS 环境
+- 使用 fnm 管理 node 版本
+- Homebrew 路径: /opt/homebrew/bin
+<!-- end-platform -->
+
+<!-- platform:windows -->
+## Windows 环境
+- 使用 nvm-windows 管理 node 版本
+- 路径分隔符使用反斜杠
+<!-- end-platform -->
+
+<!-- platform:linux -->
+## Linux 环境
+- 使用 nvm 管理 node 版本
+<!-- end-platform -->
+```
+
+**支持的标签：**
+
+| 标签 | 别名 | 平台 |
+|------|------|------|
+| `macos` | `mac`, `darwin` | macOS |
+| `windows` | `win` | Windows |
+| `linux` | - | Linux |
+
+### 应用配置示例
+
+**场景：** 在 Windows 上应用来自 Mac 的配置
+
+```bash
+# 查看可用设备
+claude-code-sync config-sync list
+# 输出: MacBook-Pro, Windows-PC
+
+# 应用 Mac 配置
+claude-code-sync config-sync apply MacBook-Pro
+```
+
+**结果：**
+- `settings.json` 完整应用（hooks 字段自动过滤）
+- `CLAUDE.md` 保留通用内容 + 保留本地 Windows 平台块
+- macOS 平台块内容被过滤
+
+### 设备名称
+
+配置按设备名存储在仓库的 `_configs/<device>/` 目录下。
+
+设备名获取优先级：
+- **macOS**: 系统偏好设置中的「电脑名称」
+- **Windows**: COMPUTERNAME 环境变量
+- **Linux**: /etc/hostname
+
+如果名称包含中文或特殊字符，会自动替换为 `-`。
+
+### 目录结构
+
+```
+sync-repo/
+├── _configs/                    # 配置同步目录
+│   ├── MacBook-Pro/
+│   │   ├── settings.json
+│   │   ├── CLAUDE.md
+│   │   └── installed_skills.json
+│   └── Windows-PC/
+│       └── ...
+│
+└── projects/                    # 对话历史目录
+    └── ...
+```
+
+---
+
 ## 常用命令示例
 
 ### 基本操作
@@ -229,6 +344,10 @@ cat ~/.config/claude-code-sync/hook-debug.log
 | `claude-code-sync status` | 查看同步状态 |
 | `claude-code-sync update` | 检查更新 |
 | `claude-code-sync automate` | 配置自动同步 |
+| `claude-code-sync config-sync push` | 推送配置到远程 |
+| `claude-code-sync config-sync list` | 列出远程设备配置 |
+| `claude-code-sync config-sync apply <device>` | 应用其他设备配置 |
+| `claude-code-sync config-sync status` | 查看配置同步状态 |
 | `claude-code-sync hooks show` | 查看 hooks 状态 |
 | `claude-code-sync wrapper show` | 查看包装脚本状态 |
 
@@ -412,4 +531,4 @@ claude-code-sync update
 
 ---
 
-*最后更新: 2026-02-03*
+*最后更新: 2026-02-04*
