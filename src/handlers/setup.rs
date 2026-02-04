@@ -604,6 +604,49 @@ pub fn handle_setup(skip_sync: bool) -> Result<()> {
         }
     }
 
+    // Step 9: Configure config sync (settings.json, CLAUDE.md, etc.)
+    println!();
+    let sync_config = Confirm::new("是否同步配置文件？")
+        .with_default(true)
+        .with_help_message("同步 settings.json、CLAUDE.md 等配置到远程仓库")
+        .prompt()
+        .unwrap_or(true);
+
+    // Update filter config with config sync settings
+    let mut filter_config = FilterConfig::load().unwrap_or_default();
+    filter_config.config_sync.enabled = sync_config;
+
+    if sync_config {
+        // Let user choose what to sync
+        println!();
+        println!("{}", "选择需要同步的配置项:".cyan());
+
+        filter_config.config_sync.sync_settings = Confirm::new("  同步 settings.json (权限、模型配置)?")
+            .with_default(true)
+            .prompt()
+            .unwrap_or(true);
+
+        filter_config.config_sync.sync_claude_md = Confirm::new("  同步 CLAUDE.md (用户指令)?")
+            .with_default(true)
+            .prompt()
+            .unwrap_or(true);
+
+        filter_config.config_sync.sync_hooks = Confirm::new("  同步 hooks (钩子脚本)?")
+            .with_default(false)
+            .with_help_message("注意: hooks 路径可能不跨平台兼容")
+            .prompt()
+            .unwrap_or(false);
+
+        filter_config.config_sync.sync_skills_list = Confirm::new("  同步 skills/plugins 列表?")
+            .with_default(true)
+            .with_help_message("仅同步列表，需要在每台设备手动安装")
+            .prompt()
+            .unwrap_or(true);
+    }
+
+    filter_config.save().context("保存配置同步设置失败")?;
+    println!("{}", "✓ 配置同步设置已保存".green());
+
     println!();
     println!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".green());
     println!("{}", "🎉 配置完成！".green().bold());

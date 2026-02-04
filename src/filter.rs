@@ -6,6 +6,159 @@ use std::path::{Path, PathBuf};
 
 use crate::scm::Backend;
 
+/// Configuration sync settings stored in FilterConfig
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConfigSyncSettings {
+    /// Enable configuration sync
+    #[serde(default = "default_config_sync_true")]
+    pub enabled: bool,
+
+    /// Sync settings.json
+    #[serde(default = "default_config_sync_true")]
+    pub sync_settings: bool,
+
+    /// Sync CLAUDE.md
+    #[serde(default = "default_config_sync_true")]
+    pub sync_claude_md: bool,
+
+    /// Sync hooks folder
+    #[serde(default)]
+    pub sync_hooks: bool,
+
+    /// Sync plugins/skills list
+    #[serde(default = "default_config_sync_true")]
+    pub sync_skills_list: bool,
+
+    /// Auto-apply CLAUDE.md from the most recently updated device on pull
+    #[serde(default = "default_config_sync_true")]
+    pub auto_apply_claude_md: bool,
+
+    /// Device name (defaults to hostname)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
+}
+
+fn default_config_sync_true() -> bool {
+    true
+}
+
+impl Default for ConfigSyncSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            sync_settings: true,
+            sync_claude_md: true,
+            sync_hooks: false,
+            sync_skills_list: true,
+            auto_apply_claude_md: true,
+            device_name: None,
+        }
+    }
+}
+
+impl ConfigSyncSettings {
+    /// Get the device name (from config or friendly system name)
+    pub fn get_device_name(&self) -> String {
+        if let Some(ref name) = self.device_name {
+            return sanitize_device_name(name);
+        }
+
+        #[cfg(not(test))]
+        {
+            // Try to get friendly computer name
+            if let Some(name) = get_friendly_computer_name() {
+                return sanitize_device_name(&name);
+            }
+
+            // Fallback to hostname
+            if let Ok(name) = hostname::get() {
+                if let Some(name_str) = name.to_str() {
+                    return sanitize_device_name(name_str);
+                }
+            }
+        }
+
+        // Fallback
+        "unknown-device".to_string()
+    }
+}
+
+/// Sanitize device name: replace non-ASCII and special characters with `-`
+fn sanitize_device_name(name: &str) -> String {
+    let sanitized: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    // Remove consecutive dashes and trim
+    let mut result = String::new();
+    let mut last_was_dash = false;
+    for c in sanitized.chars() {
+        if c == '-' {
+            if !last_was_dash && !result.is_empty() {
+                result.push(c);
+                last_was_dash = true;
+            }
+        } else {
+            result.push(c);
+            last_was_dash = false;
+        }
+    }
+
+    // Trim trailing dash
+    result.trim_end_matches('-').to_string()
+}
+
+/// Get friendly computer name from the system
+#[cfg(not(test))]
+fn get_friendly_computer_name() -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        // macOS: use scutil --get ComputerName
+        let output = std::process::Command::new("scutil")
+            .args(["--get", "ComputerName"])
+            .output()
+            .ok()?;
+
+        if output.status.success() {
+            let name = String::from_utf8_lossy(&output.stdout);
+            let name = name.trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Windows: use COMPUTERNAME environment variable (usually friendly name)
+        if let Ok(name) = std::env::var("COMPUTERNAME") {
+            if !name.is_empty() {
+                return Some(name);
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Linux: try /etc/hostname or hostname command
+        if let Ok(name) = std::fs::read_to_string("/etc/hostname") {
+            let name = name.trim();
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+
+    None
+}
+
 /// Filter configuration for syncing Claude Code history
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilterConfig {
@@ -52,8 +205,13 @@ pub struct FilterConfig {
     /// When enabled, stores conversations using only the project directory name
     /// instead of the full encoded path. This enables multi-device compatibility
     /// when usernames or paths differ across machines.
-    #[serde(default)]
+    /// Default: true (multi-device mode)
+    #[serde(default = "default_use_project_name_only")]
     pub use_project_name_only: bool,
+
+    /// Configuration sync settings (settings.json, CLAUDE.md, hooks, etc.)
+    #[serde(default)]
+    pub config_sync: ConfigSyncSettings,
 }
 
 fn default_lfs_patterns() -> Vec<String> {
@@ -72,6 +230,10 @@ fn default_sync_subdirectory() -> String {
     "projects".to_string()
 }
 
+fn default_use_project_name_only() -> bool {
+    true
+}
+
 impl Default for FilterConfig {
     fn default() -> Self {
         FilterConfig {
@@ -84,7 +246,8 @@ impl Default for FilterConfig {
             lfs_patterns: default_lfs_patterns(),
             scm_backend: default_scm_backend(),
             sync_subdirectory: default_sync_subdirectory(),
-            use_project_name_only: false,
+            use_project_name_only: true, // Default to multi-device mode
+            config_sync: ConfigSyncSettings::default(),
         }
     }
 }
@@ -504,6 +667,46 @@ pub fn show_config() -> Result<()> {
             "No (full path mode)".yellow()
         }
     );
+
+    // Show config sync settings
+    println!();
+    println!("{}", "Configuration Sync Settings:".bold());
+    println!(
+        "  {}: {}",
+        "Config sync enabled".cyan(),
+        if config.config_sync.enabled {
+            "Yes".green()
+        } else {
+            "No".yellow()
+        }
+    );
+    if config.config_sync.enabled {
+        println!(
+            "  {}: {}",
+            "Device name".cyan(),
+            config.config_sync.get_device_name().green()
+        );
+        println!(
+            "  {}: {}",
+            "Sync settings.json".cyan(),
+            if config.config_sync.sync_settings { "Yes" } else { "No" }
+        );
+        println!(
+            "  {}: {}",
+            "Sync CLAUDE.md".cyan(),
+            if config.config_sync.sync_claude_md { "Yes" } else { "No" }
+        );
+        println!(
+            "  {}: {}",
+            "Sync hooks".cyan(),
+            if config.config_sync.sync_hooks { "Yes" } else { "No" }
+        );
+        println!(
+            "  {}: {}",
+            "Sync skills list".cyan(),
+            if config.config_sync.sync_skills_list { "Yes" } else { "No" }
+        );
+    }
 
     Ok(())
 }

@@ -623,5 +623,12 @@ pub fn pull_history(
         log::warn!("Failed to cleanup old snapshots: {}", e);
     }
 
+    // Auto-apply CLAUDE.md if enabled
+    if filter.config_sync.enabled && filter.config_sync.auto_apply_claude_md {
+        if let Err(e) = crate::handlers::config_sync::auto_apply_claude_md(&filter.config_sync) {
+            log::debug!("Failed to auto-apply CLAUDE.md: {}", e);
+        }
+    }
+
     Ok(())
 }
