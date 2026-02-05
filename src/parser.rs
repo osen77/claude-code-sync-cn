@@ -226,6 +226,56 @@ impl ConversationSession {
             })
     }
 
+    /// Get the session title (first real user message content)
+    ///
+    /// Claude Code uses the first user message as the session title.
+    /// This extracts the text content from user entries, skipping
+    /// system-generated content like `<ide_opened_file>` tags and "Warmup" messages.
+    pub fn title(&self) -> Option<String> {
+        // Iterate through all user entries to find the first real user message
+        for entry in self.entries.iter().filter(|e| e.entry_type == "user") {
+            if let Some(msg) = entry.message.as_ref() {
+                if let Some(content) = msg.get("content") {
+                    // content can be a string or an array of content blocks
+                    if let Some(s) = content.as_str() {
+                        // Skip if it's system content, continue to next user entry
+                        if !Self::is_system_content(s) {
+                            return Some(s.to_string());
+                        }
+                    } else if let Some(arr) = content.as_array() {
+                        // Handle structured content like [{"type": "text", "text": "..."}]
+                        // Find the first text that is not system-generated content
+                        if let Some(text) = arr
+                            .iter()
+                            .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
+                            .find(|text| !Self::is_system_content(text))
+                        {
+                            return Some(text.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Check if the content is system-generated (should be skipped for title)
+    fn is_system_content(text: &str) -> bool {
+        let trimmed = text.trim();
+        // Skip IDE file open notifications
+        trimmed.starts_with("<ide_opened_file>")
+            || trimmed.starts_with("<ide_selection>")
+            // Skip warmup/system messages
+            || trimmed.to_lowercase() == "warmup"
+            // Skip empty content
+            || trimmed.is_empty()
+    }
+
+    /// Get the first timestamp from the conversation (creation time)
+    pub fn first_timestamp(&self) -> Option<String> {
+        self.entries.iter().filter_map(|e| e.timestamp.clone()).next()
+    }
+
     /// Calculate a simple hash of the conversation content
     pub fn content_hash(&self) -> String {
         use std::collections::hash_map::DefaultHasher;

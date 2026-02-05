@@ -315,6 +315,16 @@ enum Commands {
     /// Internal command for Stop hook (push after each response)
     #[command(hide = true)]
     HookStop,
+
+    /// Manage Claude Code conversation sessions
+    Session {
+        #[command(subcommand)]
+        action: Option<SessionAction>,
+
+        /// Filter by project name (skip project selection)
+        #[arg(short, long, global = true)]
+        project: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -434,6 +444,45 @@ enum ConfigSyncAction {
     Status,
 }
 
+#[derive(Subcommand)]
+enum SessionAction {
+    /// List all sessions (non-interactive output)
+    List {
+        /// Filter by project name
+        #[arg(short, long)]
+        project: Option<String>,
+
+        /// Show session IDs
+        #[arg(long)]
+        show_ids: bool,
+    },
+
+    /// Show session details
+    Show {
+        /// Session ID
+        session_id: String,
+    },
+
+    /// Rename session (change title)
+    Rename {
+        /// Session ID
+        session_id: String,
+
+        /// New title
+        title: String,
+    },
+
+    /// Delete session
+    Delete {
+        /// Session ID
+        session_id: String,
+
+        /// Skip confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
+}
+
 fn main() -> Result<()> {
     // Initialize logging (rotate log if needed, then set up logger)
     logger::rotate_log_if_needed().ok(); // Ignore errors during log rotation
@@ -495,16 +544,23 @@ fn main() -> Result<()> {
         }
     };
 
-    // Check if this is an Init or Config command (skip auto-onboarding for these)
+    // Check if this is a command that should skip auto-onboarding
     let is_init_command = matches!(command, Commands::Init { .. });
     let is_config_command = matches!(command, Commands::Config { .. });
+    let is_session_command = matches!(command, Commands::Session { .. });
 
-    // Run onboarding if needed (but not for Init or Config commands - they handle their own setup)
-    if needs_onboarding && !is_init_command && !is_config_command {
+    // Run onboarding if needed (skip for Init, Config, and Session commands)
+    // Session is a local-only feature that doesn't require sync repo configuration
+    if needs_onboarding && !is_init_command && !is_config_command && !is_session_command {
         log::info!("Running onboarding flow - first time setup detected");
 
         // Try non-interactive init first (from config file)
-        let initialized = try_init_from_config().unwrap_or(false);
+        let mut initialized = try_init_from_config().unwrap_or(false);
+
+        // If no config file, try to recover existing repo
+        if !initialized {
+            initialized = handlers::onboarding::try_recover_existing_repo().unwrap_or(false);
+        }
 
         if !initialized {
             // Fall back to interactive onboarding
@@ -835,6 +891,28 @@ fn main() -> Result<()> {
                 }
                 ConfigSyncAction::Status => {
                     handle_config_status(&filter_config.config_sync)?;
+                }
+            }
+        }
+        Commands::Session { action, project } => {
+            match action {
+                None => {
+                    // Interactive mode
+                    handle_session_interactive(project.as_deref())?;
+                }
+                Some(SessionAction::List { project: list_project, show_ids }) => {
+                    // Use subcommand project filter if provided, otherwise use global
+                    let filter = list_project.as_deref().or(project.as_deref());
+                    handle_session_list(filter, show_ids)?;
+                }
+                Some(SessionAction::Show { session_id }) => {
+                    handle_session_show(&session_id)?;
+                }
+                Some(SessionAction::Rename { session_id, title }) => {
+                    handle_session_rename(&session_id, &title)?;
+                }
+                Some(SessionAction::Delete { session_id, force }) => {
+                    handle_session_delete(&session_id, force)?;
                 }
             }
         }

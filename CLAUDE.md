@@ -45,6 +45,7 @@ claude-code-sync/
 │   │   ├── automate.rs      # 🔑 一键自动化配置
 │   │   ├── config_sync.rs   # 🔑 配置文件同步
 │   │   ├── platform_filter.rs # 🔑 CLAUDE.md 平台标签过滤
+│   │   ├── session.rs       # 🔑 会话管理（查看/重命名/删除）
 │   │   ├── hooks.rs         # Claude Code Hooks 管理
 │   │   └── wrapper.rs       # 启动包装脚本
 │   ├── history/             # 操作历史记录
@@ -140,7 +141,7 @@ cwd.split(&['/', '\\'])
 **组件**:
 
 1. **Hooks** (`hooks.rs`): Claude Code 原生钩子
-   - `SessionStart`: 启动时自动拉取远程历史（IDE 支持）
+   - `SessionStart`: **首次启动**时自动拉取远程历史（三重条件检测：进程数=1 + source=startup + 5分钟防抖）
    - `Stop`: 每轮对话完成后自动推送对话历史
    - `UserPromptSubmit`: 检测新项目并拉取远程历史
 
@@ -296,6 +297,92 @@ sync-repo/
 │       └── ...
 └── projects/
     └── ...
+```
+
+### 9. 会话管理 (`handlers/session.rs`)
+
+**命令**: `claude-code-sync session`
+
+**功能**:
+交互式管理 Claude Code 对话会话，支持查看、重命名、删除操作。
+
+**交互模式**（推荐）:
+```bash
+# 进入交互式界面
+claude-code-sync session
+
+# 指定项目（跳过项目选择）
+claude-code-sync session --project my-project
+```
+
+**非交互模式**（脚本友好）:
+```bash
+# 列出所有项目的会话
+claude-code-sync session list
+
+# 列出特定项目的会话
+claude-code-sync session list --project my-project
+
+# 显示会话 ID
+claude-code-sync session list --show-ids
+
+# 查看会话详情
+claude-code-sync session show <session-id>
+
+# 重命名会话
+claude-code-sync session rename <session-id> "新标题"
+
+# 删除会话
+claude-code-sync session delete <session-id>
+claude-code-sync session delete <session-id> --force  # 跳过确认
+```
+
+**交互式导航层级**:
+```
+项目列表 → 会话列表 → 操作菜单（详情/重命名/删除）
+    ↑____________↩︎ 返回上一级
+```
+
+**核心数据结构**:
+```rust
+/// 项目摘要
+pub struct ProjectSummary {
+    pub name: String,           // 从 cwd 提取的真实项目名
+    pub dir_path: PathBuf,      // ~/.claude/projects/<encoded-path>
+    pub session_count: usize,
+    pub last_activity: Option<String>,
+}
+
+/// 会话摘要
+pub struct SessionSummary {
+    pub session_id: String,
+    pub title: String,          // 第一条真实用户消息
+    pub project_name: String,
+    pub file_path: PathBuf,
+    pub message_count: usize,
+    pub last_activity: Option<String>,
+    pub file_size: u64,
+}
+```
+
+**关键函数**:
+- `detect_current_project()`: 检测当前目录对应的 Claude 项目
+- `scan_all_projects()`: 扫描 `~/.claude/projects/` 获取所有项目
+- `scan_project_sessions()`: 扫描项目目录获取会话列表
+- `handle_session_interactive()`: 主交互循环（状态机模式）
+
+**会话标题提取** (`parser.rs`):
+
+会话标题为第一条真实用户消息，自动过滤系统内容：
+- `<ide_opened_file>` 标签
+- `<ide_selection>` 标签
+- `Warmup` 消息
+
+```rust
+pub fn title(&self) -> Option<String> {
+    // 遍历所有 user 类型的 entry
+    // 跳过系统生成的内容，返回第一条真实用户消息
+}
 ```
 
 ## 开发规范
@@ -494,4 +581,4 @@ fn test_skip_snapshot_files() {
 
 ---
 
-*最后更新: 2026-02-04*
+*最后更新: 2026-02-05*
