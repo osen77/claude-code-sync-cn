@@ -145,3 +145,124 @@ pub fn try_init_from_config() -> Result<bool> {
         None => Ok(false),
     }
 }
+
+/// Try to recover an existing repository when state.json is missing.
+///
+/// This scans common locations where users might have a sync repository:
+/// - Default location: ~/.../claude-code-sync/repo
+/// - Home directory patterns: ~/claude-*, ~/.*claude*, etc.
+///
+/// Returns Ok(true) if recovery was successful, Ok(false) if no repo found.
+pub fn try_recover_existing_repo() -> Result<bool> {
+    use crate::sync::{MultiRepoState, RepoConfig};
+    use std::collections::HashMap;
+
+    // Collect candidate paths to check
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+
+    // 1. Default repo location
+    if let Ok(default_repo) = config::ConfigManager::default_repo_dir() {
+        candidates.push(default_repo);
+    }
+
+    // 2. Scan home directory for common patterns
+    if let Some(home) = dirs::home_dir() {
+        // Common naming patterns for sync repos
+        let patterns = [
+            "claude-history-backup",
+            "claude-code-sync-repo",
+            "claude-sync",
+            "claude-backup",
+            ".claude-sync",
+        ];
+
+        for pattern in &patterns {
+            let path = home.join(pattern);
+            if !candidates.contains(&path) {
+                candidates.push(path);
+            }
+        }
+
+        // Also check Documents folder
+        let docs = home.join("Documents");
+        if docs.exists() {
+            for pattern in &patterns {
+                let path = docs.join(pattern);
+                if !candidates.contains(&path) {
+                    candidates.push(path);
+                }
+            }
+        }
+    }
+
+    // Check each candidate
+    for repo_path in candidates {
+        if !repo_path.exists() {
+            continue;
+        }
+
+        // Must be a git/hg repo with a projects subdirectory
+        if !scm::is_repo(&repo_path) {
+            continue;
+        }
+
+        let projects_dir = repo_path.join("projects");
+        if !projects_dir.exists() || !projects_dir.is_dir() {
+            continue;
+        }
+
+        // Found a valid repo! Try to recover
+        log::info!("Found existing sync repo at: {}", repo_path.display());
+
+        let (has_remote, remote_url) = match scm::open(&repo_path) {
+            Ok(repo) => {
+                let has_remote = repo.has_remote("origin");
+                let remote_url = if has_remote {
+                    repo.get_remote_url("origin").ok()
+                } else {
+                    None
+                };
+                (has_remote, remote_url)
+            }
+            Err(_) => (false, None),
+        };
+
+        println!(
+            "{} Found existing sync repository at: {}",
+            "!".yellow(),
+            repo_path.display()
+        );
+        if let Some(ref url) = remote_url {
+            println!("  Remote: {}", url.cyan());
+        }
+        println!("  Recovering configuration...");
+
+        // Create and save the recovered state
+        let repo_config = RepoConfig {
+            name: "default".to_string(),
+            sync_repo_path: repo_path,
+            has_remote,
+            is_cloned_repo: has_remote, // Assume cloned if has remote
+            remote_url,
+            description: Some("Recovered from existing repository".to_string()),
+        };
+
+        let mut repos = HashMap::new();
+        repos.insert("default".to_string(), repo_config);
+
+        let state = MultiRepoState {
+            version: 2,
+            active_repo: "default".to_string(),
+            repos,
+        };
+
+        state.save().context("Failed to save recovered state")?;
+
+        println!("{}", "✓ Configuration recovered successfully!".green());
+        println!();
+
+        return Ok(true);
+    }
+
+    Ok(false)
+}

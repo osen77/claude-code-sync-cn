@@ -11,6 +11,7 @@
 - [日常使用](#日常使用)
 - [自动同步（推荐）](#自动同步推荐)
 - [配置同步](#配置同步)
+- [会话管理](#会话管理)
 - [常用命令示例](#常用命令示例)
 - [高级配置](#高级配置)
 - [故障排查](#故障排查)
@@ -200,9 +201,16 @@ claude-code-sync wrapper show       # 查看状态
 
 | Hook | 触发时机 | 功能 |
 |------|----------|------|
-| `SessionStart` | Claude Code 启动时 | 拉取最新历史（IDE 支持） |
+| `SessionStart` | Claude Code 首次启动时 | 拉取最新历史（三重条件检测） |
 | `Stop` | 每轮对话完成后 | 推送对话历史 |
 | `UserPromptSubmit` | 每次发送消息时 | 检测新项目并拉取远程历史 |
+
+> **SessionStart 三重条件检测**：只有同时满足以下条件才会执行 pull：
+> 1. 进程数 = 1（没有其他 Claude 实例）
+> 2. source = "startup"（不是 resume/compact）
+> 3. 5分钟内未触发过（防抖保护）
+>
+> 这确保了 `/new`、新窗口、对话压缩等场景不会重复拉取。详见 [Hooks 避坑指南](claude-code-hooks-guide.md)。
 
 ### 调试
 
@@ -332,6 +340,79 @@ sync-repo/
 
 ---
 
+## 会话管理
+
+`claude-code-sync` 提供交互式会话管理功能，可以查看、重命名和删除 Claude Code 对话会话。
+
+### 交互模式（推荐）
+
+```bash
+# 进入交互式界面
+claude-code-sync session
+```
+
+**在项目目录中运行：**
+- 自动识别当前目录对应的项目
+- 直接显示该项目的会话列表
+
+**在非项目目录中运行：**
+- 显示所有项目列表供选择
+- 选择项目后进入该项目的会话列表
+
+**导航操作：**
+- 选择会话 → 进入操作菜单（详情/重命名/删除）
+- 选择「← 切换到其他项目」→ 返回项目列表
+- 选择「✕ 退出」→ 退出程序
+- 操作完成后可返回上一级继续操作
+
+### 非交互模式
+
+```bash
+# 列出所有项目和会话数量
+claude-code-sync session list
+
+# 列出特定项目的会话
+claude-code-sync session list --project my-project
+
+# 显示完整会话 ID
+claude-code-sync session list --show-ids
+
+# 查看会话详情
+claude-code-sync session show <session-id>
+
+# 重命名会话
+claude-code-sync session rename <session-id> "新的标题"
+
+# 删除会话（需确认）
+claude-code-sync session delete <session-id>
+
+# 强制删除（跳过确认）
+claude-code-sync session delete <session-id> --force
+```
+
+### 会话标题
+
+会话标题取自第一条真实的用户消息。以下内容会被自动过滤：
+- IDE 自动发送的 `<ide_opened_file>` 标签
+- IDE 自动发送的 `<ide_selection>` 标签
+- 系统预热消息 `Warmup`
+
+### 示例输出
+
+```
+📂 检测到当前项目: my-project
+找到 5 个会话
+
+> 1. 帮我实现用户认证功能...          12条消息  今天
+  2. 修复登录页面的样式问题...         8条消息  昨天
+  3. 重构数据库连接池...              25条消息  3天前
+  ─────────────────────────────────────────────────
+  ← 切换到其他项目
+  ✕ 退出
+```
+
+---
+
 ## 常用命令示例
 
 ### 基本操作
@@ -344,6 +425,11 @@ sync-repo/
 | `claude-code-sync status` | 查看同步状态 |
 | `claude-code-sync update` | 检查更新 |
 | `claude-code-sync automate` | 配置自动同步 |
+| `claude-code-sync session` | 交互式会话管理 |
+| `claude-code-sync session list` | 列出所有会话 |
+| `claude-code-sync session show <id>` | 查看会话详情 |
+| `claude-code-sync session rename <id> <title>` | 重命名会话 |
+| `claude-code-sync session delete <id>` | 删除会话 |
 | `claude-code-sync config-sync push` | 推送配置到远程 |
 | `claude-code-sync config-sync list` | 列出远程设备配置 |
 | `claude-code-sync config-sync apply <device>` | 应用其他设备配置 |
@@ -531,4 +617,4 @@ claude-code-sync update
 
 ---
 
-*最后更新: 2026-02-04*
+*最后更新: 2026-02-05*

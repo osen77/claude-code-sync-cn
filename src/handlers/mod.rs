@@ -11,6 +11,7 @@ pub mod history;
 pub mod hooks;
 pub mod onboarding;
 pub mod platform_filter;
+pub mod session;
 pub mod setup;
 pub mod undo;
 pub mod update;
@@ -29,3 +30,7 @@ pub use setup::handle_setup;
 pub use undo::{handle_undo_pull, handle_undo_push};
 pub use update::{check_for_update_silent, handle_update, print_update_notification};
 pub use wrapper::{handle_wrapper_install, handle_wrapper_show, handle_wrapper_uninstall};
+pub use session::{
+    handle_session_interactive, handle_session_list, handle_session_show,
+    handle_session_rename, handle_session_delete,
+};
