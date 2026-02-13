@@ -21,47 +21,78 @@ pub fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-/// Fetch the latest version from GitHub API
-pub fn fetch_latest_version() -> Result<String> {
-    let url = format!("https://api.github.com/repos/{}/releases/latest", GITHUB_REPO);
+/// Parse tag_name from GitHub API JSON response
+fn parse_tag_name(response: &str) -> Option<String> {
+    // Handle both compact JSON ("tag_name":"v1.0") and pretty JSON ("tag_name": "v1.0")
+    let pos = response.find("\"tag_name\"")?;
+    let rest = &response[pos + 10..]; // skip "tag_name"
+    // Skip optional whitespace and colon
+    let rest = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
+    // Skip opening quote
+    let rest = rest.trim_start_matches('"');
+    // Find closing quote
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
 
-    // Use curl command to avoid adding heavy dependencies
+/// Fetch release info using gh CLI (authenticated, 5000 req/hr limit)
+fn fetch_with_gh(api_path: &str) -> Option<String> {
+    let output = Command::new("gh")
+        .args(["api", api_path])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    Some(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Fetch release info using curl (unauthenticated, 60 req/hr limit)
+fn fetch_with_curl(url: &str, timeout: u64) -> Option<String> {
     let output = Command::new("curl")
         .args([
             "-fsSL",
             "--max-time",
-            &REQUEST_TIMEOUT_SECS.to_string(),
+            &timeout.to_string(),
             "-H",
             "Accept: application/vnd.github.v3+json",
             "-H",
             "User-Agent: claude-code-sync",
-            &url,
+            url,
         ])
         .output()
-        .context("Failed to execute curl")?;
+        .ok()?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(anyhow::anyhow!("Failed to fetch release info: {}", stderr));
+        return None;
     }
 
-    let response = String::from_utf8_lossy(&output.stdout);
+    Some(String::from_utf8_lossy(&output.stdout).to_string())
+}
 
-    // Parse tag_name from JSON response
-    // Handle both compact JSON ("tag_name":"v1.0") and pretty JSON ("tag_name": "v1.0")
-    if let Some(pos) = response.find("\"tag_name\"") {
-        let rest = &response[pos + 10..]; // skip "tag_name"
-        // Skip optional whitespace and colon
-        let rest = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
-        // Skip opening quote
-        let rest = rest.trim_start_matches('"');
-        // Find closing quote
-        if let Some(end) = rest.find('"') {
-            return Ok(rest[..end].to_string());
-        }
-    }
+/// Fetch the latest version from GitHub API
+///
+/// Prefers `gh` CLI (authenticated) to avoid rate limiting,
+/// falls back to `curl` (unauthenticated, 60 req/hr).
+pub fn fetch_latest_version() -> Result<String> {
+    let api_path = format!("repos/{}/releases/latest", GITHUB_REPO);
+    let url = format!("https://api.github.com/{}", api_path);
 
-    Err(anyhow::anyhow!("Could not parse version from response"))
+    // Try gh CLI first (authenticated, higher rate limit)
+    let response = fetch_with_gh(&api_path)
+        // Fallback to curl
+        .or_else(|| fetch_with_curl(&url, REQUEST_TIMEOUT_SECS))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Failed to fetch release info. GitHub API rate limit may be exceeded.\n\
+                 Install gh CLI (https://cli.github.com) and run 'gh auth login' to avoid this."
+            )
+        })?;
+
+    parse_tag_name(&response)
+        .ok_or_else(|| anyhow::anyhow!("Could not parse version from response"))
 }
 
 /// Compare version strings (v0.1.2 vs v0.1.1)
@@ -97,45 +128,21 @@ pub fn check_for_update() -> Result<Option<String>> {
 /// Check for updates silently (for startup check)
 /// Swallows errors to avoid disrupting normal operation
 pub fn check_for_update_silent() -> Option<String> {
-    // Set a shorter timeout for background check
-    let url = format!("https://api.github.com/repos/{}/releases/latest", GITHUB_REPO);
+    let api_path = format!("repos/{}/releases/latest", GITHUB_REPO);
+    let url = format!("https://api.github.com/{}", api_path);
 
-    let output = Command::new("curl")
-        .args([
-            "-fsSL",
-            "--max-time",
-            "5", // Shorter timeout for background check
-            "-H",
-            "Accept: application/vnd.github.v3+json",
-            "-H",
-            "User-Agent: claude-code-sync",
-            &url,
-        ])
-        .output()
-        .ok()?;
+    // Try gh CLI first, fallback to curl with shorter timeout
+    let response = fetch_with_gh(&api_path)
+        .or_else(|| fetch_with_curl(&url, 5))?;
 
-    if !output.status.success() {
-        return None;
+    let latest = parse_tag_name(&response)?;
+    let current = current_version();
+
+    if is_newer(&latest, current) {
+        Some(latest)
+    } else {
+        None
     }
-
-    let response = String::from_utf8_lossy(&output.stdout);
-
-    // Parse tag_name - handle both compact and pretty JSON
-    if let Some(pos) = response.find("\"tag_name\"") {
-        let rest = &response[pos + 10..];
-        let rest = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
-        let rest = rest.trim_start_matches('"');
-        if let Some(end) = rest.find('"') {
-            let latest = &rest[..end];
-            let current = current_version();
-
-            if is_newer(latest, current) {
-                return Some(latest.to_string());
-            }
-        }
-    }
-
-    None
 }
 
 /// Get the asset name for the current platform
