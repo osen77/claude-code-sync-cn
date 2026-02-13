@@ -4,7 +4,7 @@
 
 一个用于同步 Claude Code 对话历史的 Rust CLI 工具，支持跨设备备份和自动同步。
 
-![Demo](demo1.svg)
+![Demo](image1.png)
 
 ## 功能特性
 
