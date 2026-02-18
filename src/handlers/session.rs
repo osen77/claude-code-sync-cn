@@ -153,6 +153,7 @@ enum ProjectMenuChoice {
 /// Menu choice for session selection
 enum SessionMenuChoice {
     Select(SessionSummary),
+    Search,
     SwitchProject,
     Exit,
 }
@@ -396,20 +397,25 @@ fn show_session_menu(
         return Ok(SessionMenuChoice::SwitchProject);
     }
 
-    let mut options: Vec<String> = sessions
-        .iter()
-        .map(|s| {
-            format!(
-                "{:<40} {:>3} msgs  {}",
-                s.display_title(40),
-                s.message_count,
-                s.relative_time()
-            )
-        })
-        .collect();
+    let search_option = "Search sessions...".to_string();
+    let switch_option = "Switch project".to_string();
+    let exit_option = "Exit".to_string();
 
-    options.push("Switch project".to_string());
-    options.push("Exit".to_string());
+    let mut options: Vec<String> = Vec::with_capacity(sessions.len() + 3);
+    options.push(search_option.clone());
+
+    for (i, s) in sessions.iter().enumerate() {
+        options.push(format!(
+            "[{:>2}] {:<40} {:>3} msgs  {}",
+            i + 1,
+            s.display_title(40),
+            s.message_count,
+            s.relative_time()
+        ));
+    }
+
+    options.push(switch_option.clone());
+    options.push(exit_option.clone());
 
     let selection = Select::new("Select a session:", options.clone())
         .with_help_message("Use arrow keys to navigate, Enter to select")
@@ -417,13 +423,17 @@ fn show_session_menu(
 
     match selection {
         Ok(selected) => {
-            if selected == "Exit" {
+            if selected == exit_option {
                 Ok(SessionMenuChoice::Exit)
-            } else if selected == "Switch project" {
+            } else if selected == switch_option {
                 Ok(SessionMenuChoice::SwitchProject)
+            } else if selected == search_option {
+                Ok(SessionMenuChoice::Search)
             } else if let Some(idx) = options.iter().position(|o| o == &selected) {
-                if idx < sessions.len() {
-                    Ok(SessionMenuChoice::Select(sessions[idx].clone()))
+                // offset by 1 for the search option
+                let session_idx = idx - 1;
+                if session_idx < sessions.len() {
+                    Ok(SessionMenuChoice::Select(sessions[session_idx].clone()))
                 } else {
                     Ok(SessionMenuChoice::SwitchProject)
                 }
@@ -432,6 +442,147 @@ fn show_session_menu(
             }
         }
         Err(_) => Ok(SessionMenuChoice::Exit),
+    }
+}
+
+/// Search sessions by keyword in user messages
+fn search_sessions(sessions: &[SessionSummary], keyword: &str) -> Vec<(SessionSummary, Vec<String>)> {
+    let keyword_lower = keyword.to_lowercase();
+    let mut results = Vec::new();
+
+    for session in sessions {
+        if let Ok(conv) = ConversationSession::from_file(&session.file_path) {
+            let mut matched_snippets = Vec::new();
+            for entry in conv.entries.iter().filter(|e| e.entry_type == "user") {
+                if let Some(msg) = entry.message.as_ref() {
+                    if let Some(text) = ConversationSession::extract_user_text(msg) {
+                        if text.to_lowercase().contains(&keyword_lower) {
+                            // Extract a snippet around the match
+                            let snippet = extract_match_snippet(&text, &keyword_lower, 60);
+                            matched_snippets.push(snippet);
+                        }
+                    }
+                }
+            }
+            if !matched_snippets.is_empty() {
+                results.push((session.clone(), matched_snippets));
+            }
+        }
+    }
+
+    results
+}
+
+/// Extract a snippet around the first keyword match
+fn extract_match_snippet(text: &str, keyword_lower: &str, max_len: usize) -> String {
+    let text_lower = text.to_lowercase();
+    let text_chars: Vec<char> = text.chars().collect();
+    let lower_chars: Vec<char> = text_lower.chars().collect();
+
+    // Find match position in char indices
+    let keyword_chars: Vec<char> = keyword_lower.chars().collect();
+    let match_pos = lower_chars
+        .windows(keyword_chars.len())
+        .position(|w| w == keyword_chars.as_slice())
+        .unwrap_or(0);
+
+    let total = text_chars.len();
+    if total <= max_len {
+        return text.replace('\n', " ");
+    }
+
+    // Center the snippet around the match
+    let half = max_len / 2;
+    let start = match_pos.saturating_sub(half);
+    let end = (start + max_len).min(total);
+    let start = if end == total { end.saturating_sub(max_len) } else { start };
+
+    let snippet: String = text_chars[start..end].iter().collect();
+    let snippet = snippet.replace('\n', " ");
+
+    let prefix = if start > 0 { "..." } else { "" };
+    let suffix = if end < total { "..." } else { "" };
+    format!("{}{}{}", prefix, snippet, suffix)
+}
+
+/// Show search results and let user select
+fn show_search_results(
+    results: &[(SessionSummary, Vec<String>)],
+    keyword: &str,
+) -> Result<SessionMenuChoice> {
+    println!();
+    println!(
+        "{} Found {} sessions matching \"{}\"",
+        "Search:".cyan().bold(),
+        results.len(),
+        keyword
+    );
+    println!();
+
+    if results.is_empty() {
+        println!("{}", "No matching sessions found.".yellow());
+        // Wait for user input
+        let _ = Text::new("Press Enter to continue...")
+            .with_help_message("")
+            .prompt();
+        return Ok(SessionMenuChoice::SwitchProject);
+    }
+
+    // Display results with snippets
+    for (i, (session, snippets)) in results.iter().enumerate() {
+        println!(
+            "{} {} ({} msgs, {})",
+            format!("[{:>2}]", i + 1).cyan(),
+            session.display_title(50).bold(),
+            session.message_count,
+            session.relative_time()
+        );
+        // Show first 2 matched snippets
+        for snippet in snippets.iter().take(2) {
+            println!("     {}", snippet.dimmed());
+        }
+        if snippets.len() > 2 {
+            println!(
+                "     {}",
+                format!("... and {} more matches", snippets.len() - 2).dimmed()
+            );
+        }
+    }
+    println!();
+
+    let back_option = "Back to session list".to_string();
+    let mut options: Vec<String> = results
+        .iter()
+        .enumerate()
+        .map(|(i, (s, _))| {
+            format!(
+                "[{:>2}] {}",
+                i + 1,
+                s.display_title(50),
+            )
+        })
+        .collect();
+    options.push(back_option.clone());
+
+    let selection = Select::new("Select a session:", options.clone())
+        .with_help_message("Use arrow keys to navigate, Enter to select")
+        .prompt();
+
+    match selection {
+        Ok(selected) => {
+            if selected == back_option {
+                Ok(SessionMenuChoice::SwitchProject) // reuse to go back
+            } else if let Some(idx) = options.iter().position(|o| o == &selected) {
+                if idx < results.len() {
+                    Ok(SessionMenuChoice::Select(results[idx].0.clone()))
+                } else {
+                    Ok(SessionMenuChoice::SwitchProject)
+                }
+            } else {
+                Ok(SessionMenuChoice::SwitchProject)
+            }
+        }
+        Err(_) => Ok(SessionMenuChoice::SwitchProject),
     }
 }
 
@@ -467,7 +618,7 @@ fn show_action_menu(session: &SessionSummary) -> Result<ActionChoice> {
     }
 }
 
-/// Show session details
+/// Show session details with all user messages
 fn show_session_details(session: &SessionSummary) -> Result<()> {
     println!();
     println!("{}", "=".repeat(60).cyan());
@@ -509,6 +660,39 @@ fn show_session_details(session: &SessionSummary) -> Result<()> {
         "File Path:".bold(),
         session.file_path.display()
     );
+
+    // Show all user messages
+    println!();
+    println!("{}", "-".repeat(60).cyan());
+    println!("{}", "User Messages".cyan().bold());
+    println!("{}", "-".repeat(60).cyan());
+
+    if let Ok(conv) = ConversationSession::from_file(&session.file_path) {
+        let mut msg_index = 0;
+        for entry in conv.entries.iter().filter(|e| e.entry_type == "user") {
+            if let Some(msg) = entry.message.as_ref() {
+                if let Some(text) = ConversationSession::extract_user_text(msg) {
+                    msg_index += 1;
+                    println!();
+                    let time_str = entry
+                        .timestamp
+                        .as_ref()
+                        .map(|t| format_relative_time(t))
+                        .unwrap_or_default();
+                    println!(
+                        "{} {}",
+                        format!("[{}]", msg_index).cyan(),
+                        time_str.dimmed()
+                    );
+                    println!("{}", text);
+                }
+            }
+        }
+        if msg_index == 0 {
+            println!();
+            println!("{}", "(No user messages found)".dimmed());
+        }
+    }
 
     println!();
     println!("{}", "=".repeat(60).cyan());
@@ -676,6 +860,42 @@ pub fn handle_session_interactive(project_filter: Option<&str>) -> Result<()> {
                         }
                     }
                 }
+                SessionMenuChoice::Search => {
+                    let keyword = Text::new("Search keyword:")
+                        .with_help_message("Search in user messages across all sessions")
+                        .prompt();
+
+                    if let Ok(keyword) = keyword {
+                        let keyword = keyword.trim().to_string();
+                        if !keyword.is_empty() {
+                            let results = search_sessions(&sessions, &keyword);
+                            match show_search_results(&results, &keyword)? {
+                                SessionMenuChoice::Select(session) => {
+                                    let mut session = session;
+                                    loop {
+                                        match show_action_menu(&session)? {
+                                            ActionChoice::ViewDetails => {
+                                                show_session_details(&session)?;
+                                            }
+                                            ActionChoice::Rename => {
+                                                rename_session_interactive(&mut session)?;
+                                            }
+                                            ActionChoice::Delete => {
+                                                if delete_session_interactive(&session)? {
+                                                    break;
+                                                }
+                                            }
+                                            ActionChoice::Back => {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {} // Back to session list
+                            }
+                        }
+                    }
+                }
                 SessionMenuChoice::SwitchProject => {
                     current_project = None;
                 }
@@ -739,10 +959,11 @@ pub fn handle_session_list(project_filter: Option<&str>, show_ids: bool) -> Resu
 
         let sessions = scan_project_sessions(project)?;
 
-        for session in sessions {
+        for (i, session) in sessions.iter().enumerate() {
             if show_ids {
                 println!(
-                    "{} | {} | {} msgs | {}",
+                    "[{:>2}] {} | {} | {} msgs | {}",
+                    i + 1,
                     session.session_id.dimmed(),
                     session.display_title(40),
                     session.message_count,
@@ -750,7 +971,8 @@ pub fn handle_session_list(project_filter: Option<&str>, show_ids: bool) -> Resu
                 );
             } else {
                 println!(
-                    "{} | {} msgs | {}",
+                    "[{:>2}] {} | {} msgs | {}",
+                    i + 1,
                     session.display_title(50),
                     session.message_count,
                     session.relative_time()
