@@ -265,10 +265,38 @@ impl ConversationSession {
         // Skip IDE file open notifications
         trimmed.starts_with("<ide_opened_file>")
             || trimmed.starts_with("<ide_selection>")
+            // Skip system injected tags
+            || trimmed.starts_with("<task-notification>")
+            || trimmed.starts_with("<local-command-caveat>")
+            || trimmed.starts_with("<command-name>")
+            || trimmed.starts_with("<local-command-stdout>")
             // Skip warmup/system messages
             || trimmed.to_lowercase() == "warmup"
             // Skip empty content
             || trimmed.is_empty()
+    }
+
+    /// Extract text content from a message Value, filtering out system-generated content
+    pub fn extract_user_text(message: &Value) -> Option<String> {
+        let content = message.get("content")?;
+        if let Some(s) = content.as_str() {
+            if Self::is_system_content(s) {
+                return None;
+            }
+            return Some(s.to_string());
+        }
+        if let Some(arr) = content.as_array() {
+            let texts: Vec<&str> = arr
+                .iter()
+                .filter_map(|item| item.get("text").and_then(|t| t.as_str()))
+                .filter(|text| !Self::is_system_content(text))
+                .collect();
+            if texts.is_empty() {
+                return None;
+            }
+            return Some(texts.join("\n"));
+        }
+        None
     }
 
     /// Get the first timestamp from the conversation (creation time)
