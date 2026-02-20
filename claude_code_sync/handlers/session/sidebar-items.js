@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["delete_session","detect_current_project","handle_session_delete","handle_session_interactive","handle_session_list","handle_session_rename","handle_session_show","rename_session","scan_all_projects","scan_project_sessions"],"struct":["ProjectSummary","SessionSummary"]};
