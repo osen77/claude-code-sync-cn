@@ -51,10 +51,11 @@ fn device_config_dir(sync_repo: &Path, device_name: &str) -> PathBuf {
     configs_dir(sync_repo).join(device_name)
 }
 
-/// Push configuration to sync repository
-pub fn handle_config_push(settings: &ConfigSyncSettings) -> Result<()> {
+/// Push configuration to sync repository (only copy files, no commit/push)
+/// Returns the list of synced files
+pub fn push_config_files(settings: &ConfigSyncSettings) -> Result<Vec<String>> {
     let device_name = settings.get_device_name();
-    log::info!("Pushing configuration for device: {}", device_name);
+    log::info!("Pushing configuration files for device: {}", device_name);
 
     let sync_state = SyncState::load()?;
     let sync_repo = sync_state.sync_repo_path.clone();
@@ -145,8 +146,19 @@ pub fn handle_config_push(settings: &ConfigSyncSettings) -> Result<()> {
     let info_json = serde_json::to_string_pretty(&sync_info)?;
     fs::write(target_dir.join(".sync-info.json"), info_json)?;
 
+    Ok(synced_files)
+}
+
+/// Push configuration to sync repository (with commit and push)
+pub fn handle_config_push(settings: &ConfigSyncSettings) -> Result<()> {
+    let device_name = settings.get_device_name();
+
+    let synced_files = push_config_files(settings)?;
+
     // Commit and push
     if !synced_files.is_empty() {
+        let sync_state = SyncState::load()?;
+        let sync_repo = sync_state.sync_repo_path.clone();
         let message = format!("Sync config from {}", device_name);
         let repo = scm::open(&sync_repo)?;
 

@@ -227,9 +227,14 @@ pub fn check_directory_structure_consistency(
 **功能**:
 跨设备同步 Claude Code 配置文件，支持平台标签过滤。
 
+**自动同步**:
+- 默认情况下，`push` 命令会自动同步设备配置（`push_with_config = true`）
+- 使用 `--no-config` 参数可以跳过配置同步：`claude-code-sync push --no-config`
+- 配置项位于 `~/.claude/filter.toml` 的 `[config_sync]` 部分
+
 **子命令**:
 ```bash
-# 推送配置到远程
+# 推送配置到远程（手动）
 claude-code-sync config-sync push
 
 # 列出远程设备配置
