@@ -25,6 +25,7 @@ pub fn push_history(
     push_remote: bool,
     branch: Option<&str>,
     exclude_attachments: bool,
+    sync_config: bool,
     interactive: bool,
     verbosity: crate::VerbosityLevel,
 ) -> Result<()> {
@@ -281,6 +282,42 @@ pub fn push_history(
         if !confirm {
             println!("\n{}", "Push cancelled.".yellow());
             return Ok(());
+        }
+    }
+
+    // ============================================================================
+    // SYNC DEVICE CONFIGURATION (if enabled)
+    // ============================================================================
+    if sync_config && filter.config_sync.enabled && filter.config_sync.push_with_config {
+        if verbosity != VerbosityLevel::Quiet {
+            println!();
+            println!("  {} device configuration...", "Syncing".cyan());
+        }
+
+        // Use config_sync handler to push configuration files (no commit)
+        match crate::handlers::config_sync::push_config_files(&filter.config_sync) {
+            Ok(synced_files) => {
+                if !synced_files.is_empty() {
+                    if verbosity != VerbosityLevel::Quiet {
+                        println!("  {} Device configuration synced:", "✓".green());
+                        for file in &synced_files {
+                            println!("    - {}", file.dimmed());
+                        }
+                    }
+                } else if verbosity == VerbosityLevel::Verbose {
+                    println!("  {} No configuration files to sync", "ℹ".dimmed());
+                }
+            }
+            Err(e) => {
+                log::warn!("Failed to sync device configuration: {}", e);
+                if verbosity != VerbosityLevel::Quiet {
+                    println!(
+                        "  {} Failed to sync device configuration: {}",
+                        "⚠".yellow(),
+                        e
+                    );
+                }
+            }
         }
     }
 

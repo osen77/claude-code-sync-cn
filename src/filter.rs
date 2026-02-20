@@ -33,6 +33,10 @@ pub struct ConfigSyncSettings {
     #[serde(default = "default_config_sync_true")]
     pub auto_apply_claude_md: bool,
 
+    /// Push device config automatically when running push command
+    #[serde(default = "default_config_sync_true")]
+    pub push_with_config: bool,
+
     /// Device name (defaults to hostname)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub device_name: Option<String>,
@@ -51,6 +55,7 @@ impl Default for ConfigSyncSettings {
             sync_hooks: false,
             sync_skills_list: true,
             auto_apply_claude_md: true,
+            push_with_config: true,
             device_name: None,
         }
     }
@@ -685,6 +690,15 @@ pub fn show_config() -> Result<()> {
             "  {}: {}",
             "Device name".cyan(),
             config.config_sync.get_device_name().green()
+        );
+        println!(
+            "  {}: {}",
+            "Push with config".cyan(),
+            if config.config_sync.push_with_config {
+                "Yes (auto-sync on push)".green()
+            } else {
+                "No (manual only)".dimmed()
+            }
         );
         println!(
             "  {}: {}",

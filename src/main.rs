@@ -72,6 +72,10 @@ enum Commands {
         #[arg(long)]
         exclude_attachments: bool,
 
+        /// Do not sync device configuration (settings.json, CLAUDE.md, etc.)
+        #[arg(long)]
+        no_config: bool,
+
         /// Interactive mode - preview changes and confirm before pushing
         #[arg(short, long)]
         interactive: bool,
@@ -644,6 +648,7 @@ fn main() -> Result<()> {
             push_remote,
             branch,
             exclude_attachments,
+            no_config,
             interactive,
             verbose,
             quiet,
@@ -662,6 +667,7 @@ fn main() -> Result<()> {
                 push_remote,
                 branch.as_deref(),
                 exclude_attachments,
+                !no_config, // sync_config = !no_config
                 interactive,
                 verbosity,
             )?;
