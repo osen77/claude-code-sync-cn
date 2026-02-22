@@ -7,7 +7,7 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
 use inquire::{Confirm, Select, Text};
-use serde_json::{json, Value};
+use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -160,6 +160,7 @@ enum SessionMenuChoice {
 
 /// Menu choice for session actions
 enum ActionChoice {
+    OpenClaude,
     ViewDetails,
     Rename,
     Delete,
@@ -179,7 +180,9 @@ pub fn scan_all_projects() -> Result<Vec<ProjectSummary>> {
     }
 
     let mut projects = Vec::new();
-    let filter = FilterConfig::default();
+    // Use a filter with no file size limit for session listing
+    let mut filter = FilterConfig::default();
+    filter.max_file_size_bytes = u64::MAX;
 
     for entry in fs::read_dir(&claude_dir)? {
         let entry = entry?;
@@ -247,7 +250,9 @@ pub fn scan_all_projects() -> Result<Vec<ProjectSummary>> {
 
 /// Scan sessions for a specific project
 pub fn scan_project_sessions(project: &ProjectSummary) -> Result<Vec<SessionSummary>> {
-    let filter = FilterConfig::default();
+    // Use a filter with no file size limit for session listing
+    let mut filter = FilterConfig::default();
+    filter.max_file_size_bytes = u64::MAX;
     let sessions = discover_sessions(&project.dir_path, &filter)?;
 
     let mut summaries: Vec<SessionSummary> = sessions
@@ -281,42 +286,23 @@ pub fn detect_current_project() -> Result<Option<ProjectSummary>> {
     Ok(projects.into_iter().find(|p| p.name == project_name))
 }
 
-/// Rename a session by modifying the first user message content
-pub fn rename_session(file_path: &Path, new_title: &str) -> Result<()> {
-    let content = fs::read_to_string(file_path)
-        .with_context(|| format!("Failed to read file: {}", file_path.display()))?;
+/// Rename a session by appending a custom-title entry (same as Claude Code official behavior)
+pub fn rename_session(file_path: &Path, session_id: &str, new_title: &str) -> Result<()> {
+    use std::io::Write;
 
-    let mut modified_lines = Vec::new();
-    let mut found_user = false;
+    let entry = json!({
+        "type": "custom-title",
+        "customTitle": new_title,
+        "sessionId": session_id,
+    });
 
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            modified_lines.push(line.to_string());
-            continue;
-        }
+    let mut file = fs::OpenOptions::new()
+        .append(true)
+        .open(file_path)
+        .with_context(|| format!("Failed to open file: {}", file_path.display()))?;
 
-        if !found_user {
-            if let Ok(mut entry) = serde_json::from_str::<Value>(line) {
-                if entry.get("type") == Some(&json!("user")) {
-                    // Modify message.content
-                    if let Some(msg) = entry.get_mut("message") {
-                        msg["content"] = json!(new_title);
-                    }
-                    modified_lines.push(serde_json::to_string(&entry)?);
-                    found_user = true;
-                    continue;
-                }
-            }
-        }
-        modified_lines.push(line.to_string());
-    }
-
-    if !found_user {
-        anyhow::bail!("No user message found in session");
-    }
-
-    fs::write(file_path, modified_lines.join("\n") + "\n")
-        .with_context(|| format!("Failed to write file: {}", file_path.display()))?;
+    writeln!(file, "{}", serde_json::to_string(&entry)?)
+        .with_context(|| format!("Failed to write to file: {}", file_path.display()))?;
 
     Ok(())
 }
@@ -597,6 +583,7 @@ fn show_action_menu(session: &SessionSummary) -> Result<ActionChoice> {
     println!();
 
     let options = vec![
+        "Open in Claude",
         "View details",
         "Rename session",
         "Delete session",
@@ -609,6 +596,7 @@ fn show_action_menu(session: &SessionSummary) -> Result<ActionChoice> {
 
     match selection {
         Ok(selected) => match selected {
+            "Open in Claude" => Ok(ActionChoice::OpenClaude),
             "View details" => Ok(ActionChoice::ViewDetails),
             "Rename session" => Ok(ActionChoice::Rename),
             "Delete session" => Ok(ActionChoice::Delete),
@@ -706,14 +694,61 @@ fn show_session_details(session: &SessionSummary) -> Result<()> {
     Ok(())
 }
 
+/// Open session in Claude Code by executing `claude --resume <session_id>`
+fn open_in_claude(session: &SessionSummary) -> Result<()> {
+    let default_cmd = format!("claude --resume {}", session.session_id);
+
+    println!();
+    let cmd = Text::new("Command to execute:")
+        .with_initial_value(&default_cmd)
+        .with_help_message("Edit the command if needed, press Enter to execute")
+        .prompt();
+
+    match cmd {
+        Ok(cmd) => {
+            let cmd = cmd.trim().to_string();
+            if cmd.is_empty() {
+                println!("{}", "Command is empty, cancelled.".yellow());
+                return Ok(());
+            }
+
+            println!();
+            println!("{} {}", "Executing:".cyan().bold(), cmd);
+            println!();
+
+            // Execute the command via shell
+            let status = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&cmd)
+                .status()
+                .with_context(|| format!("Failed to execute command: {}", cmd))?;
+
+            if !status.success() {
+                println!(
+                    "{} Command exited with code: {}",
+                    "WARNING:".yellow().bold(),
+                    status.code().unwrap_or(-1)
+                );
+            }
+        }
+        Err(_) => {
+            println!("{}", "Cancelled.".yellow());
+        }
+    }
+
+    Ok(())
+}
+
 /// Interactive rename session
 fn rename_session_interactive(session: &mut SessionSummary) -> Result<()> {
     println!();
     println!("{} {}", "Current title:".dimmed(), session.title);
     println!();
 
+    // Use first 20 chars of current title as default value
+    let default_title: String = session.title.chars().take(20).collect();
     let new_title = Text::new("Enter new title:")
-        .with_initial_value(&session.title)
+        .with_initial_value(&default_title)
         .prompt();
 
     match new_title {
@@ -728,7 +763,7 @@ fn rename_session_interactive(session: &mut SessionSummary) -> Result<()> {
                 return Ok(());
             }
 
-            rename_session(&session.file_path, &title)?;
+            rename_session(&session.file_path, &session.session_id, &title)?;
             session.title = title.clone();
 
             println!();
@@ -842,6 +877,10 @@ pub fn handle_session_interactive(project_filter: Option<&str>) -> Result<()> {
                     let mut session = session;
                     loop {
                         match show_action_menu(&session)? {
+                            ActionChoice::OpenClaude => {
+                                open_in_claude(&session)?;
+                                return Ok(());
+                            }
                             ActionChoice::ViewDetails => {
                                 show_session_details(&session)?;
                             }
@@ -874,6 +913,10 @@ pub fn handle_session_interactive(project_filter: Option<&str>) -> Result<()> {
                                     let mut session = session;
                                     loop {
                                         match show_action_menu(&session)? {
+                                            ActionChoice::OpenClaude => {
+                                                open_in_claude(&session)?;
+                                                return Ok(());
+                                            }
                                             ActionChoice::ViewDetails => {
                                                 show_session_details(&session)?;
                                             }
@@ -1008,7 +1051,7 @@ pub fn handle_session_rename(session_id: &str, new_title: &str) -> Result<()> {
         let sessions = scan_project_sessions(project)?;
 
         if let Some(session) = sessions.iter().find(|s| s.session_id == session_id) {
-            rename_session(&session.file_path, new_title)?;
+            rename_session(&session.file_path, session_id, new_title)?;
             println!(
                 "{} Session renamed successfully!",
                 "SUCCESS:".green().bold()

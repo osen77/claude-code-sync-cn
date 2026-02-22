@@ -226,13 +226,27 @@ impl ConversationSession {
             })
     }
 
-    /// Get the session title (first real user message content)
+    /// Get the session title
     ///
-    /// Claude Code uses the first user message as the session title.
-    /// This extracts the text content from user entries, skipping
-    /// system-generated content like `<ide_opened_file>` tags and "Warmup" messages.
+    /// Priority: custom-title entry (from Claude Code rename) > first real user message.
+    /// Skips system-generated content like `<ide_opened_file>` tags and "Warmup" messages.
     pub fn title(&self) -> Option<String> {
-        // Iterate through all user entries to find the first real user message
+        // Priority 1: custom-title entry (set by Claude Code rename)
+        // Use the last one in case of multiple renames
+        if let Some(custom) = self
+            .entries
+            .iter()
+            .rev()
+            .find(|e| e.entry_type == "custom-title")
+            .and_then(|e| e.extra.get("customTitle"))
+            .and_then(|v| v.as_str())
+        {
+            if !custom.is_empty() {
+                return Some(custom.to_string());
+            }
+        }
+
+        // Priority 2: first real user message
         for entry in self.entries.iter().filter(|e| e.entry_type == "user") {
             if let Some(msg) = entry.message.as_ref() {
                 if let Some(content) = msg.get("content") {
@@ -436,5 +450,59 @@ mod tests {
             file_path: "test.jsonl".to_string(),
         };
         assert_eq!(session.project_name(), None);
+    }
+
+    #[test]
+    fn test_title_prefers_custom_title() {
+        let user_entry: ConversationEntry = serde_json::from_str(
+            r#"{"type":"user","uuid":"1","message":{"content":"Hello world"}}"#,
+        )
+        .unwrap();
+        let custom_title_entry: ConversationEntry = serde_json::from_str(
+            r#"{"type":"custom-title","customTitle":"my-custom-title","sessionId":"s1"}"#,
+        )
+        .unwrap();
+        let session = ConversationSession {
+            session_id: "test".to_string(),
+            entries: vec![user_entry, custom_title_entry],
+            file_path: "test.jsonl".to_string(),
+        };
+        assert_eq!(session.title(), Some("my-custom-title".to_string()));
+    }
+
+    #[test]
+    fn test_title_falls_back_to_user_message() {
+        let user_entry: ConversationEntry = serde_json::from_str(
+            r#"{"type":"user","uuid":"1","message":{"content":"Hello world"}}"#,
+        )
+        .unwrap();
+        let session = ConversationSession {
+            session_id: "test".to_string(),
+            entries: vec![user_entry],
+            file_path: "test.jsonl".to_string(),
+        };
+        assert_eq!(session.title(), Some("Hello world".to_string()));
+    }
+
+    #[test]
+    fn test_title_uses_last_custom_title() {
+        let user_entry: ConversationEntry = serde_json::from_str(
+            r#"{"type":"user","uuid":"1","message":{"content":"Hello"}}"#,
+        )
+        .unwrap();
+        let ct1: ConversationEntry = serde_json::from_str(
+            r#"{"type":"custom-title","customTitle":"first-rename","sessionId":"s1"}"#,
+        )
+        .unwrap();
+        let ct2: ConversationEntry = serde_json::from_str(
+            r#"{"type":"custom-title","customTitle":"second-rename","sessionId":"s1"}"#,
+        )
+        .unwrap();
+        let session = ConversationSession {
+            session_id: "test".to_string(),
+            entries: vec![user_entry, ct1, ct2],
+            file_path: "test.jsonl".to_string(),
+        };
+        assert_eq!(session.title(), Some("second-rename".to_string()));
     }
 }
