@@ -226,6 +226,13 @@ impl ConversationSession {
             })
     }
 
+    /// Get the full cwd path from the first entry that has it
+    pub fn cwd(&self) -> Option<&str> {
+        self.entries
+            .iter()
+            .find_map(|e| e.cwd.as_deref())
+    }
+
     /// Get the session title
     ///
     /// Priority: custom-title entry (from Claude Code rename) > first real user message.

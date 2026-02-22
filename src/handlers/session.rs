@@ -154,6 +154,7 @@ enum ProjectMenuChoice {
 enum SessionMenuChoice {
     Select(SessionSummary),
     Search,
+    Cleanup,
     SwitchProject,
     Exit,
 }
@@ -248,24 +249,53 @@ pub fn scan_all_projects() -> Result<Vec<ProjectSummary>> {
     Ok(projects)
 }
 
-/// Scan sessions for a specific project
-pub fn scan_project_sessions(project: &ProjectSummary) -> Result<Vec<SessionSummary>> {
+/// Scan sessions for a specific project, returns (valid_sessions, filtered_count)
+pub fn scan_project_sessions_with_filtered(project: &ProjectSummary) -> Result<(Vec<SessionSummary>, usize)> {
     // Use a filter with no file size limit for session listing
     let mut filter = FilterConfig::default();
     filter.max_file_size_bytes = u64::MAX;
     let sessions = discover_sessions(&project.dir_path, &filter)?;
 
-    let mut summaries: Vec<SessionSummary> = sessions
+    let all_summaries: Vec<SessionSummary> = sessions
         .iter()
         .map(|s| SessionSummary::from_session(s, &project.name, &project.dir_path))
+        .collect();
+
+    let total_count = all_summaries.len();
+
+    let mut valid_summaries: Vec<SessionSummary> = all_summaries
+        .into_iter()
         // Filter out empty sessions (no messages) and sessions without real titles
         .filter(|s| s.message_count > 0 && s.title != "(No title)")
         .collect();
 
     // Sort by last activity (most recent first)
-    summaries.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+    valid_summaries.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
 
-    Ok(summaries)
+    let filtered_count = total_count - valid_summaries.len();
+    Ok((valid_summaries, filtered_count))
+}
+
+/// Scan sessions for a specific project
+pub fn scan_project_sessions(project: &ProjectSummary) -> Result<Vec<SessionSummary>> {
+    let (sessions, _) = scan_project_sessions_with_filtered(project)?;
+    Ok(sessions)
+}
+
+/// Get filtered (invalid) sessions for cleanup
+pub fn get_filtered_sessions(project: &ProjectSummary) -> Result<Vec<SessionSummary>> {
+    let mut filter = FilterConfig::default();
+    filter.max_file_size_bytes = u64::MAX;
+    let sessions = discover_sessions(&project.dir_path, &filter)?;
+
+    let filtered: Vec<SessionSummary> = sessions
+        .iter()
+        .map(|s| SessionSummary::from_session(s, &project.name, &project.dir_path))
+        // Get sessions that would be filtered out
+        .filter(|s| s.message_count == 0 || s.title == "(No title)")
+        .collect();
+
+    Ok(filtered)
 }
 
 /// Detect if current directory corresponds to a Claude project
@@ -368,6 +398,7 @@ fn show_project_menu(projects: &[ProjectSummary]) -> Result<ProjectMenuChoice> {
 fn show_session_menu(
     project: &ProjectSummary,
     sessions: &[SessionSummary],
+    filtered_count: usize,
 ) -> Result<SessionMenuChoice> {
     println!();
     println!(
@@ -384,10 +415,15 @@ fn show_session_menu(
     }
 
     let search_option = "Search sessions...".to_string();
+    let cleanup_option = if filtered_count > 0 {
+        format!("Cleanup [{}]", filtered_count)
+    } else {
+        "Cleanup [0]".to_string()
+    };
     let switch_option = "Switch project".to_string();
     let exit_option = "Exit".to_string();
 
-    let mut options: Vec<String> = Vec::with_capacity(sessions.len() + 3);
+    let mut options: Vec<String> = Vec::with_capacity(sessions.len() + 4);
     options.push(search_option.clone());
 
     for (i, s) in sessions.iter().enumerate() {
@@ -400,6 +436,7 @@ fn show_session_menu(
         ));
     }
 
+    options.push(cleanup_option.clone());
     options.push(switch_option.clone());
     options.push(exit_option.clone());
 
@@ -415,6 +452,8 @@ fn show_session_menu(
                 Ok(SessionMenuChoice::SwitchProject)
             } else if selected == search_option {
                 Ok(SessionMenuChoice::Search)
+            } else if selected == cleanup_option {
+                Ok(SessionMenuChoice::Cleanup)
             } else if let Some(idx) = options.iter().position(|o| o == &selected) {
                 // offset by 1 for the search option
                 let session_idx = idx - 1;
@@ -696,7 +735,18 @@ fn show_session_details(session: &SessionSummary) -> Result<()> {
 
 /// Open session in Claude Code by executing `claude --resume <session_id>`
 fn open_in_claude(session: &SessionSummary) -> Result<()> {
-    let default_cmd = format!("claude --resume {}", session.session_id);
+    // Get project path from session's cwd field
+    let project_path = if let Ok(conv) = ConversationSession::from_file(&session.file_path) {
+        conv.cwd().map(|s| s.to_string())
+    } else {
+        None
+    };
+
+    let default_cmd = if let Some(path) = project_path {
+        format!("cd \"{}\" && claude --resume {}", path, session.session_id)
+    } else {
+        format!("claude --resume {}", session.session_id)
+    };
 
     println!();
     let cmd = Text::new("Command to execute:")
@@ -820,6 +870,89 @@ fn delete_session_interactive(session: &SessionSummary) -> Result<bool> {
     }
 }
 
+/// Interactive cleanup filtered sessions
+fn cleanup_sessions_interactive(project: &ProjectSummary) -> Result<usize> {
+    let filtered_sessions = get_filtered_sessions(project)?;
+
+    if filtered_sessions.is_empty() {
+        println!();
+        println!("{}", "No filtered sessions to clean up.".yellow());
+        println!();
+        return Ok(0);
+    }
+
+    println!();
+    println!(
+        "{} Found {} filtered sessions (empty or no title):",
+        "Cleanup:".cyan().bold(),
+        filtered_sessions.len()
+    );
+    println!();
+
+    for (i, session) in filtered_sessions.iter().enumerate() {
+        let size_kb = session.file_size as f64 / 1024.0;
+        println!(
+            "  [{:>2}] {} | {} msgs | {:.1} KB",
+            i + 1,
+            session.display_title(40).dimmed(),
+            session.message_count,
+            size_kb
+        );
+    }
+
+    let total_size: u64 = filtered_sessions.iter().map(|s| s.file_size).sum();
+    println!();
+    println!(
+        "  Total: {} files, {:.2} KB",
+        filtered_sessions.len(),
+        total_size as f64 / 1024.0
+    );
+    println!();
+    println!("{}", "This action cannot be undone!".red().bold());
+    println!();
+
+    let confirm = Confirm::new(&format!(
+        "Delete all {} filtered sessions?",
+        filtered_sessions.len()
+    ))
+    .with_default(false)
+    .prompt();
+
+    match confirm {
+        Ok(true) => {
+            let mut deleted_count = 0;
+            for session in &filtered_sessions {
+                if let Err(e) = delete_session(&session.file_path) {
+                    println!(
+                        "{} Failed to delete {}: {}",
+                        "ERROR:".red().bold(),
+                        session.file_path.display(),
+                        e
+                    );
+                } else {
+                    deleted_count += 1;
+                }
+            }
+            println!();
+            println!(
+                "{} Deleted {} sessions!",
+                "SUCCESS:".green().bold(),
+                deleted_count
+            );
+            println!();
+            Ok(deleted_count)
+        }
+        Ok(false) => {
+            println!("{}", "Cleanup cancelled.".yellow());
+            Ok(0)
+        }
+        Err(_) => {
+            println!("{}", "Cleanup cancelled.".yellow());
+            Ok(0)
+        }
+    }
+}
+
 // ============================================================================
 // Main Entry Point
 // ============================================================================
@@ -869,9 +1002,9 @@ pub fn handle_session_interactive(project_filter: Option<&str>) -> Result<()> {
     loop {
         if let Some(ref project) = current_project {
             // Show sessions for this project
-            let sessions = scan_project_sessions(project)?;
+            let (sessions, filtered_count) = scan_project_sessions_with_filtered(project)?;
 
-            match show_session_menu(project, &sessions)? {
+            match show_session_menu(project, &sessions, filtered_count)? {
                 SessionMenuChoice::Select(session) => {
                     // Enter session action loop
                     let mut session = session;
@@ -938,6 +1071,10 @@ pub fn handle_session_interactive(project_filter: Option<&str>) -> Result<()> {
                             }
                         }
                     }
+                }
+                SessionMenuChoice::Cleanup => {
+                    cleanup_sessions_interactive(project)?;
+                    // Continue to refresh the session list
                 }
                 SessionMenuChoice::SwitchProject => {
                     current_project = None;
