@@ -322,6 +322,159 @@ pub fn push_history(
     }
 
     // ============================================================================
+    // REMOVE LOCALLY DELETED SESSIONS FROM SYNC REPO
+    // ============================================================================
+    // Compare sync repo files against local files to detect deletions.
+    // Only remove files from sync repo project dirs that have a corresponding
+    // local project dir — this prevents deleting sessions pushed by other devices.
+    let mut deleted_from_repo = 0;
+
+    {
+        // Build a set of local session file names grouped by project dir name
+        // (the encoded directory name under ~/.claude/projects/)
+        let mut local_files_by_project: HashMap<String, std::collections::HashSet<String>> =
+            HashMap::new();
+
+        if let Ok(entries) = fs::read_dir(&claude_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let local_project_dir = entry.path();
+                if !local_project_dir.is_dir() {
+                    continue;
+                }
+                let dir_name = local_project_dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if dir_name.starts_with('.') {
+                    continue;
+                }
+
+                let mut file_names = std::collections::HashSet::new();
+                if let Ok(files) = fs::read_dir(&local_project_dir) {
+                    for file in files.filter_map(|f| f.ok()) {
+                        if let Some(name) = file.file_name().to_str() {
+                            if name.ends_with(".jsonl") {
+                                file_names.insert(name.to_string());
+                            }
+                        }
+                    }
+                }
+                local_files_by_project.insert(dir_name, file_names);
+            }
+        }
+
+        // Now scan sync repo project dirs and find files to remove.
+        // For use_project_name_only mode, we need to map project names back to
+        // local project dirs. We use the already-discovered sessions to build this mapping.
+        if filter.use_project_name_only {
+            // Build mapping: project_name -> set of local file names (union of all matching dirs)
+            let mut local_files_by_name: HashMap<String, std::collections::HashSet<String>> =
+                HashMap::new();
+            // Track which project names have a local dir present
+            let mut project_name_has_local: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+
+            for session in &sessions {
+                if let Some(pname) = session.project_name() {
+                    project_name_has_local.insert(pname.to_string());
+                    let fname = Path::new(&session.file_path)
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default()
+                        .to_string();
+                    local_files_by_name
+                        .entry(pname.to_string())
+                        .or_default()
+                        .insert(fname);
+                }
+            }
+            // Scan sync repo
+            if let Ok(entries) = fs::read_dir(&projects_dir) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let sync_project_dir = entry.path();
+                    if !sync_project_dir.is_dir() {
+                        continue;
+                    }
+                    let project_name = sync_project_dir
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default()
+                        .to_string();
+
+                    // Only process projects that exist locally
+                    if !project_name_has_local.contains(&project_name) {
+                        continue;
+                    }
+
+                    let local_files = local_files_by_name
+                        .get(&project_name)
+                        .cloned()
+                        .unwrap_or_default();
+
+                    if let Ok(files) = fs::read_dir(&sync_project_dir) {
+                        for file in files.filter_map(|f| f.ok()) {
+                            let fname = file.file_name().to_string_lossy().to_string();
+                            if fname.ends_with(".jsonl") && !local_files.contains(&fname) {
+                                let file_path = file.path();
+                                if let Err(e) = fs::remove_file(&file_path) {
+                                    log::warn!("Failed to remove deleted session: {}", e);
+                                } else {
+                                    deleted_from_repo += 1;
+                                    log::debug!("Removed deleted session: {}", file_path.display());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // Full-path mode: sync repo dir names match local dir names exactly
+            if let Ok(entries) = fs::read_dir(&projects_dir) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let sync_project_dir = entry.path();
+                    if !sync_project_dir.is_dir() {
+                        continue;
+                    }
+                    let dir_name = sync_project_dir
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default()
+                        .to_string();
+
+                    // Only process dirs that exist locally
+                    let Some(local_files) = local_files_by_project.get(&dir_name) else {
+                        continue;
+                    };
+
+                    if let Ok(files) = fs::read_dir(&sync_project_dir) {
+                        for file in files.filter_map(|f| f.ok()) {
+                            let fname = file.file_name().to_string_lossy().to_string();
+                            if fname.ends_with(".jsonl") && !local_files.contains(&fname) {
+                                let file_path = file.path();
+                                if let Err(e) = fs::remove_file(&file_path) {
+                                    log::warn!("Failed to remove deleted session: {}", e);
+                                } else {
+                                    deleted_from_repo += 1;
+                                    log::debug!("Removed deleted session: {}", file_path.display());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if deleted_from_repo > 0 && verbosity != VerbosityLevel::Quiet {
+            println!(
+                "  {} Removed {} deleted sessions from sync repo",
+                "✓".green(),
+                deleted_from_repo
+            );
+        }
+    }
+
+    // ============================================================================
     // COMMIT AND PUSH CHANGES
     // ============================================================================
     repo.stage_all()?;
@@ -408,12 +561,22 @@ pub fn push_history(
     println!("\n{}", "=== Push Summary ===".bold().cyan());
 
     // Show operation statistics
-    let stats_msg = format!(
-        "  {} Added    {} Modified    {} Unchanged",
-        format!("{added_count}").green(),
-        format!("{modified_count}").cyan(),
-        format!("{unchanged_count}").dimmed(),
-    );
+    let stats_msg = if deleted_from_repo > 0 {
+        format!(
+            "  {} Added    {} Modified    {} Deleted    {} Unchanged",
+            format!("{added_count}").green(),
+            format!("{modified_count}").cyan(),
+            format!("{deleted_from_repo}").red(),
+            format!("{unchanged_count}").dimmed(),
+        )
+    } else {
+        format!(
+            "  {} Added    {} Modified    {} Unchanged",
+            format!("{added_count}").green(),
+            format!("{modified_count}").cyan(),
+            format!("{unchanged_count}").dimmed(),
+        )
+    };
     println!("{stats_msg}");
     println!();
 
