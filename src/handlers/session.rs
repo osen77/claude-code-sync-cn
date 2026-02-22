@@ -220,7 +220,7 @@ pub fn scan_all_projects() -> Result<Vec<ProjectSummary>> {
         // Count only valid sessions (with messages and real titles)
         let valid_session_count = sessions
             .iter()
-            .filter(|s| s.message_count() > 0 && s.title().is_some())
+            .filter(|s| is_valid_session(s))
             .count();
 
         // Skip projects with no valid sessions
@@ -249,6 +249,16 @@ pub fn scan_all_projects() -> Result<Vec<ProjectSummary>> {
     Ok(projects)
 }
 
+/// Check if a ConversationSession is valid (has messages and a real title)
+fn is_valid_session(session: &ConversationSession) -> bool {
+    session.message_count() > 0 && session.title().is_some()
+}
+
+/// Check if a SessionSummary is valid (has messages and a real title)
+fn is_valid_session_summary(summary: &SessionSummary) -> bool {
+    summary.message_count > 0 && summary.title != "(No title)"
+}
+
 /// Scan sessions for a specific project, returns (valid_sessions, filtered_count)
 pub fn scan_project_sessions_with_filtered(project: &ProjectSummary) -> Result<(Vec<SessionSummary>, usize)> {
     // Use a filter with no file size limit for session listing
@@ -265,8 +275,7 @@ pub fn scan_project_sessions_with_filtered(project: &ProjectSummary) -> Result<(
 
     let mut valid_summaries: Vec<SessionSummary> = all_summaries
         .into_iter()
-        // Filter out empty sessions (no messages) and sessions without real titles
-        .filter(|s| s.message_count > 0 && s.title != "(No title)")
+        .filter(|s| is_valid_session_summary(s))
         .collect();
 
     // Sort by last activity (most recent first)
@@ -291,8 +300,7 @@ pub fn get_filtered_sessions(project: &ProjectSummary) -> Result<Vec<SessionSumm
     let filtered: Vec<SessionSummary> = sessions
         .iter()
         .map(|s| SessionSummary::from_session(s, &project.name, &project.dir_path))
-        // Get sessions that would be filtered out
-        .filter(|s| s.message_count == 0 || s.title == "(No title)")
+        .filter(|s| !is_valid_session_summary(s))
         .collect();
 
     Ok(filtered)
