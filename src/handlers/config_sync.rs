@@ -574,6 +574,15 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 
 /// Find the most recently updated device config (excluding current device)
 pub fn find_latest_device_config(sync_repo: &Path, current_device: &str) -> Option<String> {
+    find_latest_device_config_with_time(sync_repo, current_device).map(|(name, _)| name)
+}
+
+/// Find the most recently synced device config (excluding current device),
+/// returning both device name and its sync timestamp.
+fn find_latest_device_config_with_time(
+    sync_repo: &Path,
+    current_device: &str,
+) -> Option<(String, chrono::DateTime<chrono::Utc>)> {
     let configs = configs_dir(sync_repo);
     if !configs.exists() {
         return None;
@@ -610,11 +619,25 @@ pub fn find_latest_device_config(sync_repo: &Path, current_device: &str) -> Opti
         }
     }
 
-    latest.map(|(name, _)| name)
+    latest
+}
+
+/// Get the sync timestamp of a specific device from its .sync-info.json.
+fn get_device_sync_time(
+    sync_repo: &Path,
+    device: &str,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let info_path = device_config_dir(sync_repo, device).join(".sync-info.json");
+    let content = fs::read_to_string(&info_path).ok()?;
+    let info: DeviceSyncInfo = serde_json::from_str(&content).ok()?;
+    chrono::DateTime::parse_from_rfc3339(&info.last_sync)
+        .ok()
+        .map(|t| t.with_timezone(&chrono::Utc))
 }
 
 /// Auto-apply CLAUDE.md from the most recently updated device
 /// Only applies CLAUDE.md, not other config files (settings, hooks, skills)
+/// Only applies if the other device's config is newer than the current device's config
 pub fn auto_apply_claude_md(settings: &ConfigSyncSettings) -> Result<()> {
     if !settings.enabled || !settings.auto_apply_claude_md {
         log::debug!("Auto-apply CLAUDE.md is disabled");
@@ -624,14 +647,28 @@ pub fn auto_apply_claude_md(settings: &ConfigSyncSettings) -> Result<()> {
     let sync_state = SyncState::load()?;
     let current_device = settings.get_device_name();
 
-    // Find most recently updated device
-    let latest_device = match find_latest_device_config(&sync_state.sync_repo_path, &current_device) {
-        Some(d) => d,
-        None => {
-            log::debug!("No other device configs found for auto-apply");
+    // Find most recently updated device (with timestamp)
+    let (latest_device, latest_time) =
+        match find_latest_device_config_with_time(&sync_state.sync_repo_path, &current_device) {
+            Some(d) => d,
+            None => {
+                log::debug!("No other device configs found for auto-apply");
+                return Ok(());
+            }
+        };
+
+    // Only apply if the other device's config is newer than current device's
+    if let Some(current_time) = get_device_sync_time(&sync_state.sync_repo_path, &current_device) {
+        if latest_time <= current_time {
+            log::debug!(
+                "Current device config ({}) is newer than {} ({}), skipping auto-apply",
+                current_time,
+                latest_device,
+                latest_time
+            );
             return Ok(());
         }
-    };
+    }
 
     let source_dir = device_config_dir(&sync_state.sync_repo_path, &latest_device);
     let source_claude_md = source_dir.join("CLAUDE.md");
