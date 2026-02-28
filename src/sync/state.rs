@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 
+use crate::BINARY_NAME;
+
 /// Sync state and configuration
 ///
 /// This struct stores the persistent state of the Claude Code sync system.
@@ -62,7 +64,7 @@ impl SyncState {
     /// - The state file contains invalid JSON or cannot be deserialized
     ///
     /// If the sync is not initialized, the error message will instruct the user
-    /// to run `claude-code-sync init` first.
+    /// to run `ccs init` first.
     ///
     /// # Examples
     ///
@@ -88,7 +90,7 @@ impl SyncState {
 
         if !state_path.exists() {
             return Err(anyhow!(
-                "Sync not initialized. Run 'claude-code-sync init' first."
+                "Sync not initialized. Run '{} init' first.", BINARY_NAME
             ));
         }
 
@@ -208,7 +210,7 @@ impl MultiRepoState {
 
         if !state_path.exists() {
             return Err(anyhow!(
-                "Sync not initialized. Run 'claude-code-sync init' first."
+                "Sync not initialized. Run '{} init' first.", BINARY_NAME
             ));
         }
 

@@ -30,7 +30,7 @@ irm https://raw.githubusercontent.com/osen77/claude-code-sync-cn/main/install.ps
 ### 配置
 
 ```bash
-claude-code-sync setup
+ccs setup
 ```
 
 向导会引导你完成所有配置，包括：
@@ -57,13 +57,13 @@ claude-sync
 
 | 命令 | 说明 |
 |------|------|
-| `claude-code-sync setup` | 交互式配置向导 |
-| `claude-code-sync sync` | 双向同步 |
-| `claude-code-sync automate` | 配置自动同步 |
-| `claude-code-sync status` | 查看同步状态 |
-| `claude-code-sync config-sync push` | 推送配置到远程 |
-| `claude-code-sync config-sync apply <device>` | 应用其他设备配置 |
-| `claude-code-sync update` | 更新到最新版本 |
+| `ccs setup` | 交互式配置向导 |
+| `ccs sync` | 双向同步 |
+| `ccs automate` | 配置自动同步 |
+| `ccs status` | 查看同步状态 |
+| `ccs config-sync push` | 推送配置到远程 |
+| `ccs config-sync apply <device>` | 应用其他设备配置 |
+| `ccs update` | 更新到最新版本 |
 
 更多命令请参阅 [用户指南](docs/user-guide.md)。
 
@@ -71,7 +71,7 @@ claude-sync
 
 Claude Code 将对话历史存储在 `~/.claude/projects/` 目录下的 JSONL 文件中。
 
-`claude-code-sync` 的工作流程：
+`ccs` 的工作流程：
 1. 发现本地 Claude Code 历史中的所有对话文件
 2. 复制到 Git 仓库并推送到远程
 3. 拉取时，合并远程变更到本地历史
@@ -91,13 +91,13 @@ Claude Code 将对话历史存储在 `~/.claude/projects/` 目录下的 JSONL �
 
 ```bash
 # 推送当前配置
-claude-code-sync config-sync push
+ccs config-sync push
 
 # 查看可用设备
-claude-code-sync config-sync list
+ccs config-sync list
 
 # 应用其他设备配置
-claude-code-sync config-sync apply MacBook-Pro
+ccs config-sync apply MacBook-Pro
 ```
 
 **同步内容**：

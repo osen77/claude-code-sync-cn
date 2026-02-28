@@ -57,7 +57,7 @@ impl OperationRecord {
     /// Get a summary string for this operation
     ///
     /// This method will be used in future CLI commands to display
-    /// operation history to users (e.g., `claude-code-sync history`).
+    /// operation history to users (e.g., `ccs history`).
     #[allow(dead_code)]
     pub fn summary(&self) -> String {
         format!(

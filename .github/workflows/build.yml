@@ -50,8 +50,8 @@ jobs:
 
       - name: Check binary size
         run: |
-          ls -lh target/debug/claude-code-sync
-          du -h target/debug/claude-code-sync
+          ls -lh target/debug/ccs
+          du -h target/debug/ccs
 
   build-release:
     name: Build Release
@@ -92,14 +92,14 @@ jobs:
 
       - name: Check binary size
         run: |
-          ls -lh target/release/claude-code-sync
-          du -h target/release/claude-code-sync
+          ls -lh target/release/ccs
+          du -h target/release/ccs
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v6
         with:
-          name: claude-code-sync-binary
-          path: target/release/claude-code-sync
+          name: ccs-binary
+          path: target/release/ccs
           retention-days: 7
 
   security-audit:

@@ -13,7 +13,7 @@ use crate::onboarding::{self, InitConfig};
 use crate::scm;
 use crate::sync;
 
-/// Check if claude-code-sync has been initialized
+/// Check if ccs has been initialized
 pub fn is_initialized() -> Result<bool> {
     let state_path = config::ConfigManager::state_file_path()?;
     Ok(state_path.exists())

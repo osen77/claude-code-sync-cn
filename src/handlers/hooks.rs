@@ -8,8 +8,10 @@ use colored::Colorize;
 use serde_json::{json, Value};
 use std::path::PathBuf;
 
-/// Identifier for hooks installed by claude-code-sync
-const HOOK_MARKER_COMMENT: &str = "claude-code-sync";
+use crate::BINARY_NAME;
+
+/// Identifiers for hooks installed by us (old name + new name)
+const HOOK_MARKERS: &[&str] = &["claude-code-sync", "ccs"];
 
 /// Get the path to Claude settings file
 fn claude_settings_path() -> Result<PathBuf> {
@@ -25,7 +27,7 @@ fn get_hooks_config() -> Value {
                 "hooks": [
                     {
                         "type": "command",
-                        "command": "claude-code-sync hook-session-start",
+                        "command": format!("{} hook-session-start", BINARY_NAME),
                         "timeout": 60,
                         "statusMessage": "Syncing conversation history..."
                     }
@@ -37,7 +39,7 @@ fn get_hooks_config() -> Value {
                 "hooks": [
                     {
                         "type": "command",
-                        "command": "claude-code-sync hook-stop",
+                        "command": format!("{} hook-stop", BINARY_NAME),
                         "timeout": 60
                     }
                 ]
@@ -48,7 +50,7 @@ fn get_hooks_config() -> Value {
                 "hooks": [
                     {
                         "type": "command",
-                        "command": "claude-code-sync hook-new-project-check",
+                        "command": format!("{} hook-new-project-check", BINARY_NAME),
                         "timeout": 30
                     }
                 ]
@@ -57,8 +59,8 @@ fn get_hooks_config() -> Value {
     })
 }
 
-/// Check if a hook array contains a claude-code-sync hook
-fn contains_our_hook(hooks_array: &[Value], command_pattern: &str) -> bool {
+/// Check if a hook array contains one of our hooks (matching by subcommand suffix)
+fn contains_our_hook(hooks_array: &[Value], subcommand: &str) -> bool {
     hooks_array.iter().any(|group| {
         group
             .get("hooks")
@@ -67,12 +69,20 @@ fn contains_our_hook(hooks_array: &[Value], command_pattern: &str) -> bool {
                 hooks.iter().any(|hook| {
                     hook.get("command")
                         .and_then(|c| c.as_str())
-                        .map(|cmd| cmd.contains(command_pattern))
+                        .map(|cmd| {
+                            HOOK_MARKERS.iter().any(|marker| cmd.contains(marker))
+                                && cmd.contains(subcommand)
+                        })
                         .unwrap_or(false)
                 })
             })
             .unwrap_or(false)
     })
+}
+
+/// Check if a hook command belongs to us (matches any of HOOK_MARKERS)
+fn is_our_hook_command(cmd: &str) -> bool {
+    HOOK_MARKERS.iter().any(|marker| cmd.contains(marker))
 }
 
 /// Install hooks to ~/.claude/settings.json
@@ -108,9 +118,17 @@ pub fn handle_hooks_install() -> Result<()> {
         let new_hooks_array = new_hooks.as_array().unwrap();
 
         if let Some(existing) = hooks_obj.get_mut(event_name) {
-            // Check if our hook already exists
+            // Extract the subcommand (e.g., "hook-session-start") for precise matching
+            let subcommand = new_hooks_array.first()
+                .and_then(|g| g.get("hooks"))
+                .and_then(|h| h.as_array())
+                .and_then(|hooks| hooks.first())
+                .and_then(|h| h.get("command"))
+                .and_then(|c| c.as_str())
+                .and_then(|cmd| cmd.split_whitespace().nth(1))
+                .unwrap_or("");
             if let Some(existing_array) = existing.as_array() {
-                if contains_our_hook(existing_array, HOOK_MARKER_COMMENT) {
+                if contains_our_hook(existing_array, subcommand) {
                     println!(
                         "  {} {} hook already installed",
                         "!".yellow(),
@@ -182,7 +200,7 @@ pub fn handle_hooks_uninstall() -> Result<()> {
                             hooks.iter().any(|hook| {
                                 hook.get("command")
                                     .and_then(|c| c.as_str())
-                                    .map(|cmd| cmd.contains(HOOK_MARKER_COMMENT))
+                                    .map(is_our_hook_command)
                                     .unwrap_or(false)
                             })
                         })
@@ -202,7 +220,7 @@ pub fn handle_hooks_uninstall() -> Result<()> {
         }
 
         if removed_count == 0 {
-            println!("{}", "No claude-code-sync hooks found to remove.".yellow());
+            println!("{}", format!("No {} hooks found to remove.", BINARY_NAME).yellow());
         } else {
             // Write back
             std::fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
@@ -226,7 +244,7 @@ pub fn handle_hooks_show() -> Result<()> {
     if !settings_path.exists() {
         println!("{}", "No settings file found.".yellow());
         println!();
-        println!("Run '{}' to install hooks.", "claude-code-sync hooks install".cyan());
+        println!("Run '{}' to install hooks.", format!("{} hooks install", BINARY_NAME).cyan());
         return Ok(());
     }
 
@@ -239,21 +257,21 @@ pub fn handle_hooks_show() -> Result<()> {
 
         // Check SessionStart
         if let Some(hooks_array) = hooks_obj.get("SessionStart").and_then(|v| v.as_array()) {
-            if contains_our_hook(hooks_array, "claude-code-sync hook-session-start") {
+            if contains_our_hook(hooks_array, "hook-session-start") {
                 found.push("SessionStart");
             }
         }
 
         // Check Stop
         if let Some(hooks_array) = hooks_obj.get("Stop").and_then(|v| v.as_array()) {
-            if contains_our_hook(hooks_array, "claude-code-sync hook-stop") {
+            if contains_our_hook(hooks_array, "hook-stop") {
                 found.push("Stop");
             }
         }
 
         // Check UserPromptSubmit
         if let Some(hooks_array) = hooks_obj.get("UserPromptSubmit").and_then(|v| v.as_array()) {
-            if contains_our_hook(hooks_array, "claude-code-sync hook-new-project-check") {
+            if contains_our_hook(hooks_array, "hook-new-project-check") {
                 found.push("UserPromptSubmit");
             }
         }
@@ -264,11 +282,11 @@ pub fn handle_hooks_show() -> Result<()> {
     };
 
     if hooks_installed.is_empty() {
-        println!("{}", "claude-code-sync hooks: NOT installed".yellow());
+        println!("{}", format!("{} hooks: NOT installed", BINARY_NAME).yellow());
         println!();
-        println!("Run '{}' to install hooks.", "claude-code-sync hooks install".cyan());
+        println!("Run '{}' to install hooks.", format!("{} hooks install", BINARY_NAME).cyan());
     } else {
-        println!("{}", "claude-code-sync hooks: INSTALLED".green());
+        println!("{}", format!("{} hooks: INSTALLED", BINARY_NAME).green());
         println!();
         println!("Installed hooks:");
         for hook in &hooks_installed {
@@ -285,7 +303,7 @@ pub fn handle_hooks_show() -> Result<()> {
             println!();
             println!(
                 "{}",
-                "Note: Some hooks are missing. Run 'claude-code-sync hooks install' to reinstall."
+                format!("Note: Some hooks are missing. Run '{} hooks install' to reinstall.", BINARY_NAME)
                     .yellow()
             );
         }
@@ -333,7 +351,7 @@ pub fn handle_new_project_check() -> Result<()> {
 
         // Execute pull quietly - we use a separate process to avoid blocking
         // and to ensure clean error handling
-        let pull_result = std::process::Command::new("claude-code-sync")
+        let pull_result = std::process::Command::new(BINARY_NAME)
             .args(["pull", "--quiet"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -385,7 +403,7 @@ pub fn handle_stop() -> Result<()> {
         .unwrap_or(json!({}));
 
     // Execute push quietly after each response
-    let push_result = std::process::Command::new("claude-code-sync")
+    let push_result = std::process::Command::new(BINARY_NAME)
         .args(["push", "--quiet"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -570,7 +588,7 @@ pub fn handle_session_start() -> Result<()> {
     }
 
     // Execute pull quietly (first start confirmed)
-    let pull_result = std::process::Command::new("claude-code-sync")
+    let pull_result = std::process::Command::new(BINARY_NAME)
         .args(["pull", "--quiet"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -631,19 +649,19 @@ pub fn are_hooks_installed() -> Result<bool> {
         let has_session_start = hooks_obj
             .get("SessionStart")
             .and_then(|v| v.as_array())
-            .map(|arr| contains_our_hook(arr, "claude-code-sync hook-session-start"))
+            .map(|arr| contains_our_hook(arr, "hook-session-start"))
             .unwrap_or(false);
 
         let has_stop = hooks_obj
             .get("Stop")
             .and_then(|v| v.as_array())
-            .map(|arr| contains_our_hook(arr, "claude-code-sync hook-stop"))
+            .map(|arr| contains_our_hook(arr, "hook-stop"))
             .unwrap_or(false);
 
         let has_prompt_submit = hooks_obj
             .get("UserPromptSubmit")
             .and_then(|v| v.as_array())
-            .map(|arr| contains_our_hook(arr, "claude-code-sync hook-new-project-check"))
+            .map(|arr| contains_our_hook(arr, "hook-new-project-check"))
             .unwrap_or(false);
 
         Ok(has_session_start && has_stop && has_prompt_submit)

@@ -355,7 +355,7 @@ impl Snapshot {
 
     /// Save this snapshot to disk
     ///
-    /// Snapshots are saved to `~/.claude-code-sync/snapshots/{snapshot_id}.json`
+    /// Snapshots are saved to `~/.config/claude-code-sync/snapshots/{snapshot_id}.json`
     ///
     /// # Arguments
     /// * `custom_path` - Optional custom directory to save snapshot (for testing)

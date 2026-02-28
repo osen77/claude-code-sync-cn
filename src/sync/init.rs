@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::scm;
+use crate::BINARY_NAME;
 
 use super::state::{MultiRepoState, RepoConfig};
 
@@ -128,7 +129,7 @@ pub fn init_sync_repo(repo_path: &Path, remote_url: Option<&str>) -> Result<()> 
         "{}",
         "Sync repository initialized successfully!".green().bold()
     );
-    println!("\n{} claude-code-sync push", "Next steps:".cyan().bold());
+    println!("\n{} {} push", "Next steps:".cyan().bold(), BINARY_NAME);
 
     Ok(())
 }

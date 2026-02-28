@@ -5,12 +5,12 @@ $ErrorActionPreference = "Stop"
 
 # Configuration
 $REPO = "osen77/claude-code-sync-cn"
-$INSTALL_DIR = "$env:LOCALAPPDATA\Programs\claude-code-sync"
-$BINARY_NAME = "claude-code-sync-windows-x64.exe"
+$INSTALL_DIR = "$env:LOCALAPPDATA\Programs\ccs"
+$BINARY_NAME = "ccs-windows-x64.exe"
 
 Write-Host ""
 Write-Host "=====================================================" -ForegroundColor Cyan
-Write-Host "  Claude Code Sync 安装程序 (Windows)" -ForegroundColor Cyan
+Write-Host "  ccs (Claude Code Sync) 安装程序 (Windows)" -ForegroundColor Cyan
 Write-Host "=====================================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -29,10 +29,10 @@ try {
 Write-Host ""
 
 # Check if already installed
-$existingPath = Get-Command claude-code-sync -ErrorAction SilentlyContinue
+$existingPath = Get-Command ccs -ErrorAction SilentlyContinue
 if ($existingPath) {
     try {
-        $currentVersion = & claude-code-sync --version 2>$null
+        $currentVersion = & ccs --version 2>$null
         if ($currentVersion -match '(\d+\.\d+\.\d+)') {
             $CURRENT_VERSION = "v$($matches[1])"
             Write-Host "  当前版本: $CURRENT_VERSION" -ForegroundColor Cyan
@@ -60,7 +60,7 @@ New-Item -ItemType Directory -Force -Path $INSTALL_DIR | Out-Null
 
 # Download
 $DOWNLOAD_URL = "https://github.com/$REPO/releases/download/$LATEST_VERSION/$BINARY_NAME"
-$DEST_PATH = "$INSTALL_DIR\claude-code-sync.exe"
+$DEST_PATH = "$INSTALL_DIR\ccs.exe"
 
 Write-Host "下载中..." -ForegroundColor Cyan
 Write-Host "  $DOWNLOAD_URL" -ForegroundColor Gray
@@ -69,7 +69,7 @@ Write-Host ""
 try {
     # Use BitsTransfer for progress if available, otherwise use Invoke-WebRequest
     if (Get-Command Start-BitsTransfer -ErrorAction SilentlyContinue) {
-        Start-BitsTransfer -Source $DOWNLOAD_URL -Destination $DEST_PATH -Description "Downloading claude-code-sync"
+        Start-BitsTransfer -Source $DOWNLOAD_URL -Destination $DEST_PATH -Description "Downloading ccs"
     } else {
         $ProgressPreference = 'SilentlyContinue'
         Invoke-WebRequest -Uri $DOWNLOAD_URL -OutFile $DEST_PATH -UseBasicParsing
@@ -122,9 +122,9 @@ try {
     Write-Host "已检测到现有配置" -ForegroundColor Green
     Write-Host ""
     Write-Host "常用命令:" -ForegroundColor Cyan
-    Write-Host "  claude-code-sync sync   - 双向同步"
-    Write-Host "  claude-code-sync status - 查看状态"
-    Write-Host "  claude-code-sync update - 检查更新"
+    Write-Host "  ccs sync   - 双向同步"
+    Write-Host "  ccs status - 查看状态"
+    Write-Host "  ccs update - 检查更新"
 } catch {
     Write-Host ""
     $setup = Read-Host "是否立即配置? [Y/n]"
@@ -134,7 +134,7 @@ try {
         & $DEST_PATH setup
     } else {
         Write-Host ""
-        Write-Host "稍后运行 'claude-code-sync setup' 进行配置" -ForegroundColor Cyan
+        Write-Host "稍后运行 'ccs setup' 进行配置" -ForegroundColor Cyan
     }
 }
 

@@ -320,8 +320,8 @@ Include:
 A clear description of the bug
 
 **To Reproduce**
-1. Run `claude-code-sync init ...`
-2. Execute `claude-code-sync push`
+1. Run `ccs init ...`
+2. Execute `ccs push`
 3. See error
 
 **Expected behavior**
@@ -333,7 +333,7 @@ What actually happens
 **Environment**
 - OS: Ubuntu 22.04
 - Rust: 1.75.0
-- claude-code-sync: 0.1.0
+- ccs: 0.1.0
 
 **Logs**
 ```

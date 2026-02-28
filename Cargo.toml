@@ -1,10 +1,14 @@
 [package]
 name = "claude-code-sync"
-version = "0.1.16"
+version = "0.2.0"
 edition = "2021"
 authors = ["Claude Code User"]
 description = "Sync Claude Code conversation history with git repositories"
 license = "MIT"
+
+[[bin]]
+name = "ccs"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4.5.54", features = ["derive"] }

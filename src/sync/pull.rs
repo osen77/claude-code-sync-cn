@@ -14,6 +14,7 @@ use crate::parser::ConversationSession;
 use crate::report::{save_conflict_report, ConflictReport};
 use crate::scm;
 use crate::undo::Snapshot;
+use crate::BINARY_NAME;
 
 use super::discovery::{
     claude_projects_dir, discover_sessions, find_local_project_by_name, warn_large_files,
@@ -388,8 +389,8 @@ pub fn pull_history(
         }
 
         println!(
-            "\n{} View details with: claude-code-sync report",
-            "Hint:".cyan()
+            "\n{} View details with: {} report",
+            "Hint:".cyan(), BINARY_NAME
         );
     } else {
         println!("  {} No conflicts detected", "✓".green());

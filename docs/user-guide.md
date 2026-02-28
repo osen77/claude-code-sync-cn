@@ -1,6 +1,6 @@
 # Claude Code Sync 用户指南
 
-本文档包含 `claude-code-sync` 的安装配置、多设备同步和常用示例。
+本文档包含 `ccs` 的安装配置、多设备同步和常用示例。
 
 ---
 
@@ -50,14 +50,14 @@ cargo install --path .
 ### 前置条件
 
 - 已创建 GitHub 私有仓库（如 `claude-code-history`）
-- 已在所有设备上安装 `claude-code-sync`
+- 已在所有设备上安装 `ccs`
 - 已配置 Git 认证（推荐使用 `gh auth login`）
 
 ### 设备 A（首次设置）
 
 ```bash
 # 运行配置向导
-claude-code-sync setup
+ccs setup
 ```
 
 向导会引导你：
@@ -71,13 +71,13 @@ claude-code-sync setup
 
 ```bash
 # 运行配置向导，选择已有仓库
-claude-code-sync setup
+ccs setup
 ```
 
 或手动初始化：
 
 ```bash
-claude-code-sync init \
+ccs init \
   --local ~/claude-history-backup \
   --remote https://github.com/YOUR_USERNAME/claude-code-history.git \
   --clone
@@ -87,10 +87,10 @@ claude-code-sync init \
 
 ```bash
 # 确认显示 "Use project name only: Yes"
-claude-code-sync config --show
+ccs config --show
 
 # 查看状态
-claude-code-sync status
+ccs status
 ```
 
 ---
@@ -101,7 +101,7 @@ claude-code-sync status
 
 ```bash
 # 开始/结束工作时执行
-claude-code-sync sync
+ccs sync
 ```
 
 `sync` 命令会自动：
@@ -113,22 +113,22 @@ claude-code-sync sync
 
 ```bash
 # 仅拉取
-claude-code-sync pull
+ccs pull
 
 # 仅推送
-claude-code-sync push -m "Update from Mac"
+ccs push -m "Update from Mac"
 ```
 
 ### 切换设备工作流
 
 **在设备 A 结束工作：**
 ```bash
-claude-code-sync push -m "Windows session"
+ccs push -m "Windows session"
 ```
 
 **在设备 B 开始工作：**
 ```bash
-claude-code-sync pull
+ccs pull
 ```
 
 ---
@@ -142,7 +142,7 @@ claude-code-sync pull
 **方式一：通过 setup 向导（新用户推荐）**
 
 ```bash
-claude-code-sync setup
+ccs setup
 ```
 
 向导最后会询问是否配置自动同步，选择"是"即可一键完成所有配置。
@@ -150,7 +150,7 @@ claude-code-sync setup
 **方式二：单独配置（已完成 setup 的用户）**
 
 ```bash
-claude-code-sync automate
+ccs automate
 ```
 
 此命令会：
@@ -181,20 +181,20 @@ alias claude='claude-sync'
 
 ```bash
 # 查看自动同步状态
-claude-code-sync automate --status
+ccs automate --status
 
 # 卸载自动同步
-claude-code-sync automate --uninstall
+ccs automate --uninstall
 
 # 单独管理 hooks
-claude-code-sync hooks install    # 安装 hooks
-claude-code-sync hooks uninstall  # 卸载 hooks
-claude-code-sync hooks show       # 查看状态
+ccs hooks install    # 安装 hooks
+ccs hooks uninstall  # 卸载 hooks
+ccs hooks show       # 查看状态
 
 # 单独管理包装脚本
-claude-code-sync wrapper install    # 创建 claude-sync
-claude-code-sync wrapper uninstall  # 删除 claude-sync
-claude-code-sync wrapper show       # 查看状态
+ccs wrapper install    # 创建 claude-sync
+ccs wrapper uninstall  # 删除 claude-sync
+ccs wrapper show       # 查看状态
 ```
 
 ### Hooks 说明
@@ -228,7 +228,7 @@ cat ~/.config/claude-code-sync/hook-debug.log
 
 ## 配置同步
 
-除了对话历史，`claude-code-sync` 还支持同步 Claude Code 配置文件，让你在多个设备间保持一致的使用体验。
+除了对话历史，`ccs` 还支持同步 Claude Code 配置文件，让你在多个设备间保持一致的使用体验。
 
 ### 同步内容
 
@@ -243,16 +243,16 @@ cat ~/.config/claude-code-sync/hook-debug.log
 
 ```bash
 # 推送当前设备配置到远程
-claude-code-sync config-sync push
+ccs config-sync push
 
 # 查看远程所有设备配置
-claude-code-sync config-sync list
+ccs config-sync list
 
 # 应用其他设备的配置
-claude-code-sync config-sync apply MacBook-Pro
+ccs config-sync apply MacBook-Pro
 
 # 查看配置同步状态
-claude-code-sync config-sync status
+ccs config-sync status
 ```
 
 ### 平台标签
@@ -299,11 +299,11 @@ CLAUDE.md 中可能包含平台特定内容。使用平台标签标记后，跨�
 
 ```bash
 # 查看可用设备
-claude-code-sync config-sync list
+ccs config-sync list
 # 输出: MacBook-Pro, Windows-PC
 
 # 应用 Mac 配置
-claude-code-sync config-sync apply MacBook-Pro
+ccs config-sync apply MacBook-Pro
 ```
 
 **结果：**
@@ -342,13 +342,13 @@ sync-repo/
 
 ## 会话管理
 
-`claude-code-sync` 提供交互式会话管理功能，可以查看、重命名和删除 Claude Code 对话会话。
+`ccs` 提供交互式会话管理功能，可以查看、重命名和删除 Claude Code 对话会话。
 
 ### 交互模式（推荐）
 
 ```bash
 # 进入交互式界面
-claude-code-sync session
+ccs session
 ```
 
 **在项目目录中运行：**
@@ -369,25 +369,25 @@ claude-code-sync session
 
 ```bash
 # 列出所有项目和会话数量
-claude-code-sync session list
+ccs session list
 
 # 列出特定项目的会话
-claude-code-sync session list --project my-project
+ccs session list --project my-project
 
 # 显示完整会话 ID
-claude-code-sync session list --show-ids
+ccs session list --show-ids
 
 # 查看会话详情
-claude-code-sync session show <session-id>
+ccs session show <session-id>
 
 # 重命名会话
-claude-code-sync session rename <session-id> "新的标题"
+ccs session rename <session-id> "新的标题"
 
 # 删除会话（需确认）
-claude-code-sync session delete <session-id>
+ccs session delete <session-id>
 
 # 强制删除（跳过确认）
-claude-code-sync session delete <session-id> --force
+ccs session delete <session-id> --force
 ```
 
 ### 会话标题
@@ -419,61 +419,61 @@ claude-code-sync session delete <session-id> --force
 
 | 命令 | 说明 |
 |------|------|
-| `claude-code-sync sync` | 双向同步 |
-| `claude-code-sync pull` | 拉取远程更新 |
-| `claude-code-sync push` | 推送本地更新 |
-| `claude-code-sync status` | 查看同步状态 |
-| `claude-code-sync update` | 检查更新 |
-| `claude-code-sync automate` | 配置自动同步 |
-| `claude-code-sync session` | 交互式会话管理 |
-| `claude-code-sync session list` | 列出所有会话 |
-| `claude-code-sync session show <id>` | 查看会话详情 |
-| `claude-code-sync session rename <id> <title>` | 重命名会话 |
-| `claude-code-sync session delete <id>` | 删除会话 |
-| `claude-code-sync config-sync push` | 推送配置到远程 |
-| `claude-code-sync config-sync list` | 列出远程设备配置 |
-| `claude-code-sync config-sync apply <device>` | 应用其他设备配置 |
-| `claude-code-sync config-sync status` | 查看配置同步状态 |
-| `claude-code-sync hooks show` | 查看 hooks 状态 |
-| `claude-code-sync wrapper show` | 查看包装脚本状态 |
+| `ccs sync` | 双向同步 |
+| `ccs pull` | 拉取远程更新 |
+| `ccs push` | 推送本地更新 |
+| `ccs status` | 查看同步状态 |
+| `ccs update` | 检查更新 |
+| `ccs automate` | 配置自动同步 |
+| `ccs session` | 交互式会话管理 |
+| `ccs session list` | 列出所有会话 |
+| `ccs session show <id>` | 查看会话详情 |
+| `ccs session rename <id> <title>` | 重命名会话 |
+| `ccs session delete <id>` | 删除会话 |
+| `ccs config-sync push` | 推送配置到远程 |
+| `ccs config-sync list` | 列出远程设备配置 |
+| `ccs config-sync apply <device>` | 应用其他设备配置 |
+| `ccs config-sync status` | 查看配置同步状态 |
+| `ccs hooks show` | 查看 hooks 状态 |
+| `ccs wrapper show` | 查看包装脚本状态 |
 
 ### 配置管理
 
 ```bash
 # 查看当前配置
-claude-code-sync config --show
+ccs config --show
 
 # 只同步最近 30 天的对话
-claude-code-sync config --exclude-older-than 30
+ccs config --exclude-older-than 30
 
 # 排除特定项目
-claude-code-sync config --exclude-projects "*test*,*temp*"
+ccs config --exclude-projects "*test*,*temp*"
 
 # 只同步特定项目
-claude-code-sync config --include-projects "*work*,*important*"
+ccs config --include-projects "*work*,*important*"
 ```
 
 ### 状态检查
 
 ```bash
 # 基本状态
-claude-code-sync status
+ccs status
 
 # 显示文件列表
-claude-code-sync status --show-files
+ccs status --show-files
 
 # 查看冲突
-claude-code-sync status --show-conflicts
+ccs status --show-conflicts
 ```
 
 ### 冲突报告
 
 ```bash
 # 生成 Markdown 报告
-claude-code-sync report --format markdown
+ccs report --format markdown
 
 # 生成 JSON 报告并保存
-claude-code-sync report --format json --output conflicts.json
+ccs report --format json --output conflicts.json
 ```
 
 ---
@@ -484,17 +484,17 @@ claude-code-sync report --format json --output conflicts.json
 
 ```bash
 # 启用 LFS
-claude-code-sync config --enable-lfs true
+ccs config --enable-lfs true
 
 # 自定义 LFS 模式
-claude-code-sync config --enable-lfs true --lfs-patterns "*.jsonl,*.png"
+ccs config --enable-lfs true --lfs-patterns "*.jsonl,*.png"
 ```
 
 ### 自定义同步目录
 
 ```bash
 # 更改存储子目录（默认 "projects"）
-claude-code-sync config --sync-subdirectory "claude-conversations"
+ccs config --sync-subdirectory "claude-conversations"
 ```
 
 ### 自动化备份
@@ -502,7 +502,7 @@ claude-code-sync config --sync-subdirectory "claude-conversations"
 **macOS/Linux crontab：**
 ```bash
 # 每天晚上 11 点同步
-0 23 * * * ~/.local/bin/claude-code-sync sync
+0 23 * * * ~/.local/bin/ccs sync
 ```
 
 **非交互式初始化：**
@@ -517,20 +517,20 @@ use_project_name_only = true
 
 运行：
 ```bash
-claude-code-sync init --config ~/.claude-code-sync-init.toml
+ccs init --config ~/.claude-code-sync-init.toml
 ```
 
 ### 命令别名
 
 **Bash/Zsh：**
 ```bash
-alias ccs='claude-code-sync'
-alias ccs-sync='claude-code-sync sync'
+alias ccs='ccs'
+alias ccs-sync='ccs sync'
 ```
 
 **PowerShell：**
 ```powershell
-Set-Alias ccs claude-code-sync
+Set-Alias ccs ccs
 ```
 
 ---
@@ -544,7 +544,7 @@ Set-Alias ccs claude-code-sync
 **解决：**
 1. 在本地用 Claude Code 打开该项目
 2. 确保 `use_project_name_only = true` 已配置
-3. 重新执行 `claude-code-sync pull`
+3. 重新执行 `ccs pull`
 
 ### 问题 2：Authentication failed
 
@@ -566,19 +566,19 @@ cat ~/.ssh/id_ed25519.pub  # 添加到 GitHub
 - 本地版本：`session-conflict-<timestamp>.jsonl`
 
 **手动解决：**
-1. 查看冲突报告：`claude-code-sync report`
+1. 查看冲突报告：`ccs report`
 2. 选择需要保留的版本
 3. 删除不需要的文件
-4. 推送：`claude-code-sync push`
+4. 推送：`ccs push`
 
 ### 问题 4：更新失败
 
 ```bash
 # 检查更新
-claude-code-sync update --check-only
+ccs update --check-only
 
 # 手动更新
-claude-code-sync update
+ccs update
 ```
 
 ---

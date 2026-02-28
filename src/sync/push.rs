@@ -11,6 +11,7 @@ use crate::history::{
 };
 use crate::interactive_conflict;
 use crate::scm;
+use crate::BINARY_NAME;
 
 use super::discovery::{
     check_directory_structure_consistency, claude_projects_dir, discover_sessions,
@@ -80,7 +81,7 @@ pub fn push_history(
                         println!("\n{}", "推送已取消。".yellow());
                         println!(
                             "提示：使用 '{}' 可以切换同步模式",
-                            "claude-code-sync config --use-project-name-only <true|false>".cyan()
+                            format!("{} config --use-project-name-only <true|false>", BINARY_NAME).cyan()
                         );
                         return Ok(());
                     }

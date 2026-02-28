@@ -139,7 +139,7 @@ impl OperationHistory {
 
     /// Get all operation records
     ///
-    /// This will be used by the `claude-code-sync history` command to display
+    /// This will be used by the `ccs history` command to display
     /// the full history of sync operations to the user.
     pub fn list_operations(&self) -> &[OperationRecord] {
         &self.operations
@@ -147,7 +147,7 @@ impl OperationHistory {
 
     /// Clear all operation history
     ///
-    /// This will be used by a future `claude-code-sync history clear` command
+    /// This will be used by a future `ccs history clear` command
     /// to allow users to reset their operation history.
     pub fn clear(&mut self) -> Result<()> {
         self.operations.clear();

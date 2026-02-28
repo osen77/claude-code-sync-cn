@@ -6,6 +6,8 @@
 use anyhow::Result;
 use colored::Colorize;
 
+use crate::BINARY_NAME;
+
 use super::hooks::{are_hooks_installed, handle_hooks_install, handle_hooks_uninstall};
 use super::wrapper::{get_wrapper_path, handle_wrapper_install, handle_wrapper_uninstall, is_wrapper_installed};
 
@@ -72,7 +74,7 @@ pub fn handle_automate_status() -> Result<()> {
         println!();
         println!(
             "Run '{}' to complete setup.",
-            "claude-code-sync automate".cyan()
+            format!("{} automate", BINARY_NAME).cyan()
         );
     }
 
@@ -143,11 +145,11 @@ fn print_success_message(wrapper_path: &std::path::Path) -> Result<()> {
     println!("{}", "Commands:".bold());
     println!(
         "  {} - Show automation status",
-        "claude-code-sync automate --status".dimmed()
+        format!("{} automate --status", BINARY_NAME).dimmed()
     );
     println!(
         "  {} - Remove automation",
-        "claude-code-sync automate --uninstall".dimmed()
+        format!("{} automate --uninstall", BINARY_NAME).dimmed()
     );
 
     Ok(())
