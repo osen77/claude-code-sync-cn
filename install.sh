@@ -23,7 +23,7 @@ warn() { echo -e "${YELLOW}$1${NC}"; }
 error() { echo -e "${RED}$1${NC}"; exit 1; }
 
 echo ""
-echo -e "${BOLD}${CYAN}🔧 Claude Code Sync 安装程序${NC}"
+echo -e "${BOLD}${CYAN}🔧 ccs (Claude Code Sync) 安装程序${NC}"
 echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
 
@@ -66,7 +66,7 @@ info "检测到系统: ${OS_NAME} (${ARCH_NAME})"
 echo ""
 
 # Construct asset name (tar.gz format from release-new.yml)
-ASSET_NAME="claude-code-sync-${BINARY_OS}-${BINARY_ARCH}.tar.gz"
+ASSET_NAME="ccs-${BINARY_OS}-${BINARY_ARCH}.tar.gz"
 
 # Get latest version
 info "📦 获取最新版本..."
@@ -81,8 +81,8 @@ success "   最新版本: ${LATEST_VERSION}"
 echo ""
 
 # Check if already installed
-if command -v claude-code-sync &> /dev/null; then
-    CURRENT_VERSION=$(claude-code-sync --version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+if command -v ccs &> /dev/null; then
+    CURRENT_VERSION=$(ccs --version 2>/dev/null | grep -oE 'v?[0-9]+\.[0-9]+\.[0-9]+' | head -1)
     if [ -n "$CURRENT_VERSION" ]; then
         info "   当前版本: ${CURRENT_VERSION}"
 
@@ -120,8 +120,8 @@ trap "rm -rf $TEMP_DIR" EXIT
 if curl -fSL --progress-bar "$DOWNLOAD_URL" -o "${TEMP_DIR}/${ASSET_NAME}"; then
     # Extract tar.gz
     tar -xzf "${TEMP_DIR}/${ASSET_NAME}" -C "${TEMP_DIR}"
-    mv "${TEMP_DIR}/claude-code-sync" "${INSTALL_DIR}/claude-code-sync"
-    chmod +x "${INSTALL_DIR}/claude-code-sync"
+    mv "${TEMP_DIR}/ccs" "${INSTALL_DIR}/ccs"
+    chmod +x "${INSTALL_DIR}/ccs"
     success "✓ 下载完成"
 else
     error "下载失败。请检查网络连接或稍后重试。"
@@ -177,8 +177,8 @@ fi
 echo ""
 info "验证安装..."
 
-if "${INSTALL_DIR}/claude-code-sync" --version &> /dev/null; then
-    VERSION=$("${INSTALL_DIR}/claude-code-sync" --version 2>/dev/null)
+if "${INSTALL_DIR}/ccs" --version &> /dev/null; then
+    VERSION=$("${INSTALL_DIR}/ccs" --version 2>/dev/null)
     success "✓ ${VERSION}"
 else
     error "安装验证失败"
@@ -190,13 +190,13 @@ success "🎉 安装完成！"
 echo ""
 
 # Check if already configured
-if "${INSTALL_DIR}/claude-code-sync" status &> /dev/null 2>&1; then
+if "${INSTALL_DIR}/ccs" status &> /dev/null 2>&1; then
     success "✓ 已检测到现有配置"
     echo ""
     info "常用命令:"
-    echo "   claude-code-sync sync   - 双向同步"
-    echo "   claude-code-sync status - 查看状态"
-    echo "   claude-code-sync update - 检查更新"
+    echo "   ccs sync   - 双向同步"
+    echo "   ccs status - 查看状态"
+    echo "   ccs update - 检查更新"
 else
     echo ""
     read -p "是否立即配置? [Y/n] " -n 1 -r
@@ -204,10 +204,10 @@ else
 
     if [[ ! $REPLY =~ ^[Nn]$ ]]; then
         echo ""
-        "${INSTALL_DIR}/claude-code-sync" setup
+        "${INSTALL_DIR}/ccs" setup
     else
         echo ""
-        info "稍后运行 'claude-code-sync setup' 进行配置"
+        info "稍后运行 'ccs setup' 进行配置"
     fi
 fi
 

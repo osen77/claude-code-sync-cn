@@ -4,7 +4,7 @@
 //!
 //! ## Overview
 //!
-//! `claude-code-sync` enables you to back up, version control, and share your Claude Code conversation
+//! `ccs` enables you to back up, version control, and share your Claude Code conversation
 //! history across multiple machines. It works by syncing conversation files (stored as JSONL) from
 //! your local Claude Code projects directory (`~/.claude/projects/`) to a Git repository, which
 //! can be pushed to a remote server for backup or collaboration.
@@ -37,6 +37,9 @@ pub enum VerbosityLevel {
     Normal,  // Standard output
     Verbose, // Detailed output
 }
+
+/// The CLI binary name, used for user-facing messages, hook commands, etc.
+pub const BINARY_NAME: &str = "ccs";
 
 /// Platform-agnostic configuration directory management for claude-code-sync.
 ///

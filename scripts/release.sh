@@ -1,5 +1,5 @@
 #!/bin/bash
-# Interactive release script for claude-code-sync
+# Interactive release script for ccs (claude-code-sync)
 
 set -e
 
@@ -28,7 +28,7 @@ NEXT_MAJOR="$((MAJOR + 1)).0.0"
 # Show header
 echo ""
 echo -e "${BOLD}╔════════════════════════════════════════╗${NC}"
-echo -e "${BOLD}║      claude-code-sync Release Tool     ║${NC}"
+echo -e "${BOLD}║          ccs Release Tool              ║${NC}"
 echo -e "${BOLD}╚════════════════════════════════════════╝${NC}"
 echo ""
 echo -e "Current version: ${GREEN}v${CURRENT_VERSION}${NC}"

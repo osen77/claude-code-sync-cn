@@ -11,6 +11,7 @@ use crate::config::ConfigManager;
 use crate::filter::FilterConfig;
 use crate::scm;
 use crate::sync::{MultiRepoState, RepoConfig};
+use crate::BINARY_NAME;
 use std::collections::HashMap;
 
 /// Handle interactive configuration menu
@@ -458,7 +459,7 @@ fn try_recover_existing_repo() -> Result<Option<MultiRepoState>> {
 
 /// Handle the repository selector menu
 ///
-/// Shows when `claude-code-sync config` is run with no arguments.
+/// Shows when `ccs config` is run with no arguments.
 /// Displays all configured repositories and allows switching between them.
 pub fn handle_repo_selector() -> Result<()> {
     println!("{}", "Repository Configuration".cyan().bold());
@@ -470,7 +471,7 @@ pub fn handle_repo_selector() -> Result<()> {
         Ok(s) => s,
         Err(e) => {
             let err_msg = e.to_string();
-            if err_msg.contains("not initialized") || err_msg.contains("Run 'claude-code-sync init'") {
+            if err_msg.contains("not initialized") || err_msg.contains(&format!("Run '{} init'", BINARY_NAME)) {
                 // Check if there's an existing repo in the default location that we can recover
                 if let Some(recovered) = try_recover_existing_repo()? {
                     println!("{}", "Found existing repository - recovered configuration!".green());
@@ -479,7 +480,7 @@ pub fn handle_repo_selector() -> Result<()> {
                 } else {
                     println!("{}", "No repositories configured.".yellow());
                     println!();
-                    println!("Run '{}' to set up your first repository.", "claude-code-sync init".cyan());
+                    println!("Run '{}' to set up your first repository.", format!("{} init", BINARY_NAME).cyan());
                     return Ok(());
                 }
             } else {
@@ -491,7 +492,7 @@ pub fn handle_repo_selector() -> Result<()> {
     if state.repos.is_empty() {
         println!("{}", "No repositories configured.".yellow());
         println!();
-        println!("Run '{}' to set up your first repository.", "claude-code-sync init".cyan());
+        println!("Run '{}' to set up your first repository.", format!("{} init", BINARY_NAME).cyan());
         return Ok(());
     }
 

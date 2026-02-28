@@ -24,8 +24,11 @@ use handlers::*;
 // Import VerbosityLevel from lib
 use claude_code_sync::VerbosityLevel;
 
+// Re-export BINARY_NAME so child modules can access it via crate::BINARY_NAME
+pub use claude_code_sync::BINARY_NAME;
+
 #[derive(Parser)]
-#[command(name = "claude-code-sync")]
+#[command(name = "ccs")]
 #[command(about = "Sync Claude Code conversation history with git repositories", long_about = None)]
 #[command(version)]
 struct Cli {
@@ -492,7 +495,7 @@ fn main() -> Result<()> {
     logger::rotate_log_if_needed().ok(); // Ignore errors during log rotation
     logger::init_logger().ok(); // Ignore errors during logger init
 
-    log::debug!("claude-code-sync started");
+    log::debug!("ccs started");
 
     // Background update check (non-blocking)
     // Only check if not running update command itself

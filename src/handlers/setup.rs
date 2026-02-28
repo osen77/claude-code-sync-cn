@@ -13,6 +13,7 @@ use crate::config::ConfigManager;
 use crate::filter::FilterConfig;
 use crate::scm;
 use crate::sync;
+use crate::BINARY_NAME;
 
 /// Sync mode options
 #[derive(Debug, Clone)]
@@ -559,7 +560,7 @@ pub fn handle_setup(skip_sync: bool) -> Result<()> {
                 }
                 Err(e) => {
                     println!("{} {}", "⚠️  同步时出现问题:".yellow(), e);
-                    println!("{}", "   可以稍后使用 'claude-code-sync sync' 重试".yellow());
+                    println!("{}", format!("   可以稍后使用 '{} sync' 重试", BINARY_NAME).yellow());
                 }
             }
         }
@@ -656,16 +657,16 @@ pub fn handle_setup(skip_sync: bool) -> Result<()> {
         println!("{}", "自动同步已启用，使用 claude-sync 启动即可。".cyan());
         println!();
         println!("{}", "管理命令:".cyan());
-        println!("   {} - 查看自动同步状态", "claude-code-sync automate --status".bold());
-        println!("   {} - 卸载自动同步", "claude-code-sync automate --uninstall".bold());
+        println!("   {} - 查看自动同步状态", format!("{} automate --status", BINARY_NAME).bold());
+        println!("   {} - 卸载自动同步", format!("{} automate --uninstall", BINARY_NAME).bold());
     } else {
         println!("{}", "常用命令:".cyan());
-        println!("   {} - 双向同步", "claude-code-sync sync".bold());
-        println!("   {} - 推送到远程", "claude-code-sync push".bold());
-        println!("   {} - 拉取到本地", "claude-code-sync pull".bold());
-        println!("   {} - 查看状态", "claude-code-sync status".bold());
+        println!("   {} - 双向同步", format!("{} sync", BINARY_NAME).bold());
+        println!("   {} - 推送到远程", format!("{} push", BINARY_NAME).bold());
+        println!("   {} - 拉取到本地", format!("{} pull", BINARY_NAME).bold());
+        println!("   {} - 查看状态", format!("{} status", BINARY_NAME).bold());
         println!();
-        println!("{}", "提示: 运行 'claude-code-sync automate' 可配置自动同步".dimmed());
+        println!("{}", format!("提示: 运行 '{} automate' 可配置自动同步", BINARY_NAME).dimmed());
     }
     println!();
 

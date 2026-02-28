@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use super::platform_filter::{has_platform_blocks, merge_claude_md, Platform};
 use crate::scm;
 use crate::sync::SyncState;
+use crate::BINARY_NAME;
 
 // Re-export ConfigSyncSettings from filter module
 pub use crate::filter::ConfigSyncSettings;
@@ -196,7 +197,7 @@ pub fn handle_config_list() -> Result<()> {
 
     if !configs.exists() {
         println!("{}", "没有找到配置同步目录".yellow());
-        println!("运行 {} 推送当前设备配置", "claude-code-sync config push".cyan());
+        println!("运行 {} 推送当前设备配置", format!("{} config push", BINARY_NAME).cyan());
         return Ok(());
     }
 
@@ -259,7 +260,7 @@ pub fn handle_config_list() -> Result<()> {
     if !found_any {
         println!("{}", "  没有找到设备配置".dimmed());
         println!();
-        println!("运行 {} 推送当前设备配置", "claude-code-sync config push".cyan());
+        println!("运行 {} 推送当前设备配置", format!("{} config push", BINARY_NAME).cyan());
     }
 
     Ok(())
@@ -276,8 +277,8 @@ pub fn handle_config_apply(
 
     if !source_dir.exists() {
         return Err(anyhow::anyhow!(
-            "设备配置不存在: {}\n运行 `claude-code-sync config list` 查看可用配置",
-            source_device
+            "设备配置不存在: {}\n运行 `{} config list` 查看可用配置",
+            source_device, BINARY_NAME
         ));
     }
 

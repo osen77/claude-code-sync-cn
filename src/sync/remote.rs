@@ -2,6 +2,7 @@ use anyhow::{anyhow, Context, Result};
 use colored::Colorize;
 
 use crate::scm;
+use crate::BINARY_NAME;
 
 use super::state::SyncState;
 
@@ -36,8 +37,8 @@ pub fn show_remote() -> Result<()> {
     if remotes.is_empty() {
         println!("{}", "No remotes configured".yellow());
         println!(
-            "\n{} claude-code-sync remote set origin <url>",
-            "Hint:".cyan()
+            "\n{} {} remote set origin <url>",
+            "Hint:".cyan(), BINARY_NAME
         );
         return Ok(());
     }
@@ -109,7 +110,7 @@ pub fn set_remote(name: &str, url: &str) -> Result<()> {
         state.save()?;
     }
 
-    println!("\n{} claude-code-sync push", "Next:".cyan());
+    println!("\n{} {} push", "Next:".cyan(), BINARY_NAME);
 
     Ok(())
 }

@@ -9,7 +9,7 @@ use crate::config::ConfigManager;
 
 /// Configuration file for non-interactive initialization.
 ///
-/// This struct can be loaded from a TOML file to initialize claude-code-sync
+/// This struct can be loaded from a TOML file to initialize ccs
 /// without requiring interactive prompts. Useful for automation, CI/CD, and
 /// headless environments.
 ///

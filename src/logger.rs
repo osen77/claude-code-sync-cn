@@ -25,13 +25,13 @@ use crate::config::ConfigManager;
 ///
 /// ```bash
 /// # Show all debug messages on console
-/// RUST_LOG=debug claude-code-sync sync
+/// RUST_LOG=debug ccs sync
 ///
 /// # Only show errors on console
-/// RUST_LOG=error claude-code-sync push
+/// RUST_LOG=error ccs push
 ///
 /// # No console output (file logging continues)
-/// RUST_LOG=off claude-code-sync pull
+/// RUST_LOG=off ccs pull
 /// ```
 pub fn init_logger() -> Result<()> {
     // Ensure config directory exists

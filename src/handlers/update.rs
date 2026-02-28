@@ -10,6 +10,8 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::Command;
 
+use crate::BINARY_NAME;
+
 /// GitHub repository for releases
 const GITHUB_REPO: &str = "osen77/claude-code-sync-cn";
 
@@ -51,6 +53,7 @@ fn fetch_with_gh(api_path: &str) -> Option<String> {
 
 /// Fetch release info using curl (unauthenticated, 60 req/hr limit)
 fn fetch_with_curl(url: &str, timeout: u64) -> Option<String> {
+    let user_agent = format!("User-Agent: {}", BINARY_NAME);
     let output = Command::new("curl")
         .args([
             "-fsSL",
@@ -59,7 +62,7 @@ fn fetch_with_curl(url: &str, timeout: u64) -> Option<String> {
             "-H",
             "Accept: application/vnd.github.v3+json",
             "-H",
-            "User-Agent: claude-code-sync",
+            &user_agent,
             url,
         ])
         .output()
@@ -167,9 +170,9 @@ fn get_asset_name() -> Result<String> {
 
     // release-new.yml creates .tar.gz for Unix and .zip for Windows
     let name = if cfg!(target_os = "windows") {
-        format!("claude-code-sync-{}-{}.zip", os, arch)
+        format!("{}-{}-{}.zip", BINARY_NAME, os, arch)
     } else {
-        format!("claude-code-sync-{}-{}.tar.gz", os, arch)
+        format!("{}-{}-{}.tar.gz", BINARY_NAME, os, arch)
     };
 
     Ok(name)
@@ -210,7 +213,7 @@ fn download_and_replace(version: &str) -> Result<()> {
     println!("{}", "📥 正在下载...".cyan());
 
     // Create temp directory
-    let temp_dir = std::env::temp_dir().join(format!("claude-code-sync-update-{}", version));
+    let temp_dir = std::env::temp_dir().join(format!("{}-update-{}", BINARY_NAME, version));
     let _ = fs::remove_dir_all(&temp_dir);
     fs::create_dir_all(&temp_dir).context("Failed to create temp directory")?;
 
@@ -256,12 +259,12 @@ fn download_and_replace(version: &str) -> Result<()> {
     }
 
     // Find the extracted binary
-    let binary_name = if cfg!(windows) {
-        "claude-code-sync.exe"
+    let binary_name_with_ext = if cfg!(windows) {
+        format!("{}.exe", BINARY_NAME)
     } else {
-        "claude-code-sync"
+        BINARY_NAME.to_string()
     };
-    let new_binary = temp_dir.join(binary_name);
+    let new_binary = temp_dir.join(&binary_name_with_ext);
 
     if !new_binary.exists() {
         return Err(anyhow::anyhow!("Binary not found in archive"));
@@ -347,7 +350,7 @@ pub fn handle_update(check_only: bool) -> Result<()> {
     println!();
 
     if check_only {
-        println!("{}", "运行 'claude-code-sync update' 进行更新".cyan());
+        println!("{}", format!("运行 '{} update' 进行更新", BINARY_NAME).cyan());
         return Ok(());
     }
 
@@ -390,7 +393,7 @@ pub fn print_update_notification(new_version: &str) {
     );
     eprintln!(
         "{}",
-        "   运行 'claude-code-sync update' 更新".yellow()
+        format!("   运行 '{} update' 更新", BINARY_NAME).yellow()
     );
     eprintln!();
 }

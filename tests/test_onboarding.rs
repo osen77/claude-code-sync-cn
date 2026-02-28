@@ -1051,7 +1051,7 @@ fn test_config_handles_uninitialized_state() -> Result<()> {
     assert!(result.is_err());
     let err_msg = result.unwrap_err().to_string();
     assert!(
-        err_msg.contains("not initialized") || err_msg.contains("Run 'claude-code-sync init'"),
+        err_msg.contains("not initialized") || err_msg.contains("Run 'ccs init'"),
         "Error message should mention not initialized: {}",
         err_msg
     );

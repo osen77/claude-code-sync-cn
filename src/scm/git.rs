@@ -4,6 +4,7 @@ use anyhow::{anyhow, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::BINARY_NAME;
 use super::Scm;
 
 /// Git SCM implementation using the git CLI.
@@ -49,8 +50,9 @@ impl GitScm {
             .args(["config", "user.name", "Claude Code Sync"])
             .current_dir(path)
             .output();
+        let email = format!("{}@local", BINARY_NAME);
         let _ = Command::new("git")
-            .args(["config", "user.email", "claude-code-sync@local"])
+            .args(["config", "user.email", &email])
             .current_dir(path)
             .output();
 

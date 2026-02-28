@@ -10,6 +10,7 @@ use inquire::Confirm;
 use crate::interactive_conflict;
 use crate::sync;
 use crate::undo;
+use crate::BINARY_NAME;
 
 /// Handle undo pull command
 ///
@@ -94,7 +95,7 @@ pub fn handle_undo_push(preview_only: bool, verbosity: crate::VerbosityLevel) ->
 
     // Load sync state to get repository path
     let state = sync::SyncState::load()
-        .context("Sync not initialized. Run 'claude-code-sync init' first.")?;
+        .context(format!("Sync not initialized. Run '{} init' first.", BINARY_NAME))?;
 
     // Always show preview
     let preview = undo::preview_undo_push(None).context("Failed to preview undo operation")?;

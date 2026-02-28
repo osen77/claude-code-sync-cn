@@ -115,7 +115,7 @@ cwd.split(&['/', '\\'])
 
 ### 4. 交互式配置 (`handlers/setup.rs`)
 
-**命令**: `claude-code-sync setup`
+**命令**: `ccs setup`
 
 **功能**:
 - 引导式配置向导（选择同步模式、输入仓库地址）
@@ -127,13 +127,13 @@ cwd.split(&['/', '\\'])
 
 **功能**:
 - 启动时后台检查新版本（非阻塞）
-- `claude-code-sync update` 手动更新
-- `claude-code-sync update --check-only` 仅检查
+- `ccs update` 手动更新
+- `ccs update --check-only` 仅检查
 - 自动下载并替换当前二进制
 
 ### 6. 自动同步 (`handlers/automate.rs`, `hooks.rs`, `wrapper.rs`)
 
-**命令**: `claude-code-sync automate`
+**命令**: `ccs automate`
 
 **功能**:
 一键配置自动同步，无需手动执行 push/pull 命令。
@@ -153,19 +153,19 @@ cwd.split(&['/', '\\'])
 **相关命令**:
 ```bash
 # 一键配置
-claude-code-sync automate
+ccs automate
 
 # 查看状态
-claude-code-sync automate --status
+ccs automate --status
 
 # 卸载
-claude-code-sync automate --uninstall
+ccs automate --uninstall
 
 # 单独管理 hooks
-claude-code-sync hooks install|uninstall|show
+ccs hooks install|uninstall|show
 
 # 单独管理 wrapper
-claude-code-sync wrapper install|uninstall|show
+ccs wrapper install|uninstall|show
 ```
 
 **工作流**:
@@ -176,7 +176,7 @@ claude-code-sync wrapper install|uninstall|show
 │                                                             │
 │  [启动] claude-sync                                         │
 │     │                                                       │
-│     ├─> Wrapper: claude-code-sync pull (拉取最新)           │
+│     ├─> Wrapper: ccs pull (拉取最新)                        │
 │     │                                                       │
 │     └─> Claude Code 启动                                    │
 │            │                                                │
@@ -191,7 +191,7 @@ claude-code-sync wrapper install|uninstall|show
 
 **配置文件位置**:
 - Hooks: `~/.claude/settings.json`
-- Wrapper: 与 `claude-code-sync` 同目录下的 `claude-sync`
+- Wrapper: 与 `ccs` 同目录下的 `claude-sync`
 
 **调试日志**:
 ```bash
@@ -222,29 +222,29 @@ pub fn check_directory_structure_consistency(
 
 ### 8. 配置同步 (`handlers/config_sync.rs`, `platform_filter.rs`)
 
-**命令**: `claude-code-sync config-sync`
+**命令**: `ccs config-sync`
 
 **功能**:
 跨设备同步 Claude Code 配置文件，支持平台标签过滤。
 
 **自动同步**:
 - 默认情况下，`push` 命令会自动同步设备配置（`push_with_config = true`）
-- 使用 `--no-config` 参数可以跳过配置同步：`claude-code-sync push --no-config`
+- 使用 `--no-config` 参数可以跳过配置同步：`ccs push --no-config`
 - 配置项位于 `~/.claude/filter.toml` 的 `[config_sync]` 部分
 
 **子命令**:
 ```bash
 # 推送配置到远程（手动）
-claude-code-sync config-sync push
+ccs config-sync push
 
 # 列出远程设备配置
-claude-code-sync config-sync list
+ccs config-sync list
 
 # 应用其他设备配置
-claude-code-sync config-sync apply <device>
+ccs config-sync apply <device>
 
 # 查看配置同步状态
-claude-code-sync config-sync status
+ccs config-sync status
 ```
 
 **同步内容**:
@@ -306,7 +306,7 @@ sync-repo/
 
 ### 9. 会话管理 (`handlers/session.rs`)
 
-**命令**: `claude-code-sync session`
+**命令**: `ccs session`
 
 **功能**:
 交互式管理 Claude Code 对话会话，支持查看、重命名、删除操作。
@@ -314,32 +314,32 @@ sync-repo/
 **交互模式**（推荐）:
 ```bash
 # 进入交互式界面
-claude-code-sync session
+ccs session
 
 # 指定项目（跳过项目选择）
-claude-code-sync session --project my-project
+ccs session --project my-project
 ```
 
 **非交互模式**（脚本友好）:
 ```bash
 # 列出所有项目的会话
-claude-code-sync session list
+ccs session list
 
 # 列出特定项目的会话
-claude-code-sync session list --project my-project
+ccs session list --project my-project
 
 # 显示会话 ID
-claude-code-sync session list --show-ids
+ccs session list --show-ids
 
 # 查看会话详情
-claude-code-sync session show <session-id>
+ccs session show <session-id>
 
 # 重命名会话
-claude-code-sync session rename <session-id> "新标题"
+ccs session rename <session-id> "新标题"
 
 # 删除会话
-claude-code-sync session delete <session-id>
-claude-code-sync session delete <session-id> --force  # 跳过确认
+ccs session delete <session-id>
+ccs session delete <session-id> --force  # 跳过确认
 ```
 
 **交互式导航层级**:
@@ -527,13 +527,13 @@ RUST_LOG=debug cargo test -- --nocapture
 cargo install --path . --force
 
 # 运行并查看详细日志
-RUST_LOG=debug claude-code-sync pull
+RUST_LOG=debug ccs pull
 
 # 查看配置
-claude-code-sync config --show
+ccs config --show
 
 # 查看状态
-claude-code-sync status
+ccs status
 ```
 
 ### 代码检查
@@ -562,10 +562,10 @@ cargo doc --open --no-deps
 
 ```bash
 # 查看项目匹配过程
-RUST_LOG=debug claude-code-sync pull 2>&1 | grep "project_name\|MATCH"
+RUST_LOG=debug ccs pull 2>&1 | grep "project_name\|MATCH"
 
 # 查看完整调试信息
-RUST_LOG=trace claude-code-sync sync
+RUST_LOG=trace ccs sync
 ```
 
 ### 常见调试点

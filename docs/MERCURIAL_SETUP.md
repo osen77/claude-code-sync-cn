@@ -1,10 +1,10 @@
 # Mercurial Setup Guide
 
-This guide explains how to use `claude-code-sync` with Mercurial (hg) instead of Git.
+This guide explains how to use `ccs` with Mercurial (hg) instead of Git.
 
 ## Overview
 
-`claude-code-sync` supports both Git and Mercurial as SCM backends. While Git is the default, you can switch to Mercurial if you prefer its workflow or already use it for your projects.
+`ccs` supports both Git and Mercurial as SCM backends. While Git is the default, you can switch to Mercurial if you prefer its workflow or already use it for your projects.
 
 ---
 
@@ -50,20 +50,20 @@ Mercurial Distributed SCM (version 6.x.x)
 
 ```bash
 # Set Mercurial as the SCM backend
-claude-code-sync config --scm-backend mercurial
+ccs config --scm-backend mercurial
 ```
 
 ### 2. Initialize Repository
 
 ```bash
 # Create a new Mercurial repository
-claude-code-sync init --repo ~/claude-backup-hg
+ccs init --repo ~/claude-backup-hg
 ```
 
 ### 3. Push Your History
 
 ```bash
-claude-code-sync push
+ccs push
 ```
 
 ---
@@ -74,19 +74,19 @@ claude-code-sync push
 
 ```bash
 # Initialize with Bitbucket remote
-claude-code-sync init \
+ccs init \
   --repo ~/claude-backup-hg \
   --remote https://bitbucket.org/username/claude-history
 
 # Push
-claude-code-sync push
+ccs push
 ```
 
 ### With Self-Hosted Mercurial
 
 ```bash
 # Initialize with self-hosted server
-claude-code-sync init \
+ccs init \
   --repo ~/claude-backup-hg \
   --remote ssh://hg@yourserver.com/repos/claude-history
 ```
@@ -130,7 +130,7 @@ bb.password = your-app-password
 
 4. **Use SSH URL:**
    ```bash
-   claude-code-sync init \
+   ccs init \
      --repo ~/claude-backup-hg \
      --remote ssh://hg@bitbucket.org/username/claude-history
    ```
@@ -141,8 +141,8 @@ bb.password = your-app-password
 
 ### Command Mapping
 
-| claude-code-sync | Mercurial Command |
-|------------------|-------------------|
+| ccs | Mercurial Command |
+|-----|-------------------|
 | `init` | `hg init` |
 | `push` (stage) | `hg addremove` |
 | `push` (commit) | `hg commit -m` |
@@ -155,7 +155,7 @@ bb.password = your-app-password
 
 - Mercurial uses named branches differently than Git
 - The default branch is `default` (not `main` or `master`)
-- `claude-code-sync` uses `hg branch` to detect the current branch
+- `ccs` uses `hg branch` to detect the current branch
 
 ### Reset Behavior
 
@@ -197,7 +197,7 @@ exclude_attachments = true
 
 Then run:
 ```bash
-claude-code-sync init
+ccs init
 ```
 
 ---
@@ -209,7 +209,7 @@ claude-code-sync init
 Git LFS is not available with Mercurial. If you try to enable LFS with Mercurial:
 
 ```bash
-claude-code-sync config --scm-backend mercurial --enable-lfs true
+ccs config --scm-backend mercurial --enable-lfs true
 ```
 
 You'll get an error:
@@ -240,13 +240,13 @@ You can switch backends, but note:
 
 ```bash
 # Switch from Git to Mercurial
-claude-code-sync config --scm-backend mercurial
+ccs config --scm-backend mercurial
 
 # Reinitialize (creates new .hg repository)
-claude-code-sync init --repo ~/new-hg-backup
+ccs init --repo ~/new-hg-backup
 
 # Push history to new repo
-claude-code-sync push
+ccs push
 ```
 
 ---
