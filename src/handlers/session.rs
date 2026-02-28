@@ -14,6 +14,16 @@ use std::path::{Path, PathBuf};
 use crate::filter::FilterConfig;
 use crate::parser::ConversationSession;
 use crate::sync::discovery::{claude_projects_dir, discover_sessions, extract_project_name};
+use crate::config::ConfigManager;
+
+/// User data configuration for saving custom open commands
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
+struct UserData {
+    /// Global command template for all projects
+    /// Uses {path} and {session_id} placeholders
+    #[serde(default)]
+    command_template: Option<String>,
+}
 
 /// Project summary for listing
 #[derive(Debug, Clone)]
@@ -741,8 +751,31 @@ fn show_session_details(session: &SessionSummary) -> Result<()> {
     Ok(())
 }
 
-/// Open session in Claude Code by executing `claude --resume <session_id>`
-fn open_in_claude(session: &SessionSummary) -> Result<()> {
+/// Load session commands configuration from file
+fn load_user_data() -> Result<UserData> {
+    let path = ConfigManager::user_data_path()?;
+    if !path.exists() {
+        return Ok(UserData::default());
+    }
+    let content = fs::read_to_string(&path)?;
+    let data: UserData = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse user data: {}", path.display()))?;
+    Ok(data)
+}
+
+/// Save user data configuration to file
+fn save_user_data(data: &UserData) -> Result<()> {
+    let path = ConfigManager::user_data_path()?;
+    let content = serde_json::to_string_pretty(data)
+        .with_context(|| "Failed to serialize user data")?;
+    fs::write(&path, content)
+        .with_context(|| format!("Failed to write user data: {}", path.display()))?;
+    Ok(())
+}
+
+/// Open session in Claude Code by executing `claude --resume {session_id}`
+/// Returns: Ok(true) = executed command, Ok(false) = cancelled
+fn open_in_claude(session: &SessionSummary) -> Result<bool> {
     // Get project path from session's cwd field
     let project_path = if let Ok(conv) = ConversationSession::from_file(&session.file_path) {
         conv.cwd().map(|s| s.to_string())
@@ -750,36 +783,101 @@ fn open_in_claude(session: &SessionSummary) -> Result<()> {
         None
     };
 
-    let default_cmd = if let Some(path) = project_path {
+    // Build default command
+    let default_cmd = if let Some(ref path) = project_path {
         format!("cd \"{}\" && claude --resume {}", path, session.session_id)
     } else {
         format!("claude --resume {}", session.session_id)
     };
 
+    // Try to load saved command template
+    let mut initial_cmd = default_cmd.clone();
+    if let Ok(data) = load_user_data() {
+        if let Some(template) = &data.command_template {
+            // Replace placeholders with actual values
+            let mut saved_cmd = template.replace("{session_id}", &session.session_id);
+            if let Some(ref path) = project_path {
+                saved_cmd = saved_cmd.replace("{path}", path);
+            }
+            initial_cmd = saved_cmd;
+        }
+    }
+
     println!();
     let cmd = Text::new("Command to execute:")
-        .with_initial_value(&default_cmd)
-        .with_help_message("Edit the command if needed, press Enter to execute")
+        .with_initial_value(&initial_cmd)
+        .with_help_message("Edit the command if needed. Use {session_id} and {path} as placeholders. Press Enter to execute")
         .prompt();
 
     match cmd {
         Ok(cmd) => {
             let cmd = cmd.trim().to_string();
             if cmd.is_empty() {
+                // Clear saved custom command to restore default
+                if let Ok(mut data) = load_user_data() {
+                    if data.command_template.is_some() {
+                        data.command_template = None;
+                        if let Err(e) = save_user_data(&data) {
+                            println!("{} Failed to clear saved command: {}", "WARNING:".yellow(), e);
+                        } else {
+                            println!("{} Saved command cleared, using default next time", "INFO:".cyan());
+                        }
+                    }
+                }
                 println!("{}", "Command is empty, cancelled.".yellow());
-                return Ok(());
+                return Ok(false);
+            }
+
+            // Save custom command if it's different from default
+            // Convert actual values back to placeholders
+            let mut template = cmd.clone();
+            template = template.replace(&session.session_id, "{session_id}");
+            if let Some(ref path) = project_path {
+                template = template.replace(path, "{path}");
+            }
+
+            if template != default_cmd {
+                // User modified the command, save it
+                let mut data = match load_user_data() {
+                    Ok(d) => d,
+                    Err(e) => {
+                        log::warn!("Failed to load user data: {}, using default", e);
+                        UserData::default()
+                    }
+                };
+                data.command_template = Some(template);
+                if let Err(e) = save_user_data(&data) {
+                    println!("{} Failed to save command: {}", "WARNING:".yellow(), e);
+                } else {
+                    println!("{} Command saved for future use", "INFO:".cyan());
+                }
             }
 
             println!();
             println!("{} {}", "Executing:".cyan().bold(), cmd);
             println!();
 
-            // Execute the command via shell
-            let status = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(&cmd)
-                .status()
-                .with_context(|| format!("Failed to execute command: {}", cmd))?;
+            // Prepend source ~/.zshrc to load shell functions (e.g., cc-auto)
+            let full_cmd = if cfg!(target_os = "windows") {
+                cmd.clone()
+            } else {
+                format!("source ~/.zshrc && {}", cmd)
+            };
+
+            // Execute the command via zsh
+            let status = if cfg!(target_os = "windows") {
+                std::process::Command::new("cmd")
+                    .arg("/C")
+                    .arg(&full_cmd)
+                    .status()
+                    .with_context(|| format!("Failed to execute command: {}", cmd))?
+            } else {
+                std::process::Command::new("zsh")
+                    .arg("-c")
+                    .arg(&full_cmd)
+                    .status()
+                    .with_context(|| format!("Failed to execute command: {}", cmd))?
+            };
 
             if !status.success() {
                 println!(
@@ -788,13 +886,14 @@ fn open_in_claude(session: &SessionSummary) -> Result<()> {
                     status.code().unwrap_or(-1)
                 );
             }
+
+            Ok(true)
         }
         Err(_) => {
             println!("{}", "Cancelled.".yellow());
+            Ok(false)
         }
     }
-
-    Ok(())
 }
 
 /// Interactive rename session
@@ -1019,8 +1118,11 @@ pub fn handle_session_interactive(project_filter: Option<&str>) -> Result<()> {
                     loop {
                         match show_action_menu(&session)? {
                             ActionChoice::OpenClaude => {
-                                open_in_claude(&session)?;
-                                return Ok(());
+                                if open_in_claude(&session)? {
+                                    // Executed command, exit program
+                                    return Ok(());
+                                }
+                                // Cancelled, continue to action menu
                             }
                             ActionChoice::ViewDetails => {
                                 show_session_details(&session)?;

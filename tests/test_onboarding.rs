@@ -1,14 +1,26 @@
 use anyhow::Result;
-use claude_code_sync::config::ConfigManager;
+use claude_code_sync::config::{ConfigManager, CONFIG_DIR_ENV};
 use claude_code_sync::filter::FilterConfig;
 use claude_code_sync::scm;
 use claude_code_sync::sync::SyncState;
 use serial_test::serial;
 use tempfile::TempDir;
 
-/// Test helper to setup a temporary config directory for testing
+/// Test helper to setup a temporary config directory for testing.
+/// Returns TempDir and sets CLAUDE_CODE_SYNC_CONFIG_DIR to point to
+/// a `claude-code-sync` subdirectory inside it.
 fn setup_test_config_env() -> Result<TempDir> {
-    TempDir::new().map_err(Into::into)
+    let temp = TempDir::new()?;
+    // Create the config subdirectory so tests don't need to
+    let config_dir = temp.path().join("claude-code-sync");
+    std::fs::create_dir_all(&config_dir)?;
+    std::env::set_var(CONFIG_DIR_ENV, &config_dir);
+    Ok(temp)
+}
+
+/// Clean up the test config environment variable
+fn cleanup_test_config_env() {
+    std::env::remove_var(CONFIG_DIR_ENV);
 }
 
 #[test]
@@ -46,6 +58,7 @@ fn test_ensure_config_dir_creates_directory() -> Result<()> {
 }
 
 #[test]
+#[serial]
 fn test_sync_state_with_cloned_flag() -> Result<()> {
     let temp_dir = setup_test_config_env()?;
     let repo_path = temp_dir.path().join("test-repo");
@@ -90,7 +103,7 @@ fn test_filter_config_save_and_load() -> Result<()> {
     let temp_dir = setup_test_config_env()?;
 
     // Set XDG_CONFIG_HOME to isolate test config
-    std::env::set_var("XDG_CONFIG_HOME", temp_dir.path());
+    // Config env already set by setup_test_config_env()
 
     let config = FilterConfig {
         exclude_attachments: true,
@@ -105,12 +118,13 @@ fn test_filter_config_save_and_load() -> Result<()> {
     assert_eq!(loaded.exclude_older_than_days, Some(30));
 
     // Clean up env var
-    std::env::remove_var("XDG_CONFIG_HOME");
+    cleanup_test_config_env();
 
     Ok(())
 }
 
 #[test]
+#[serial]
 fn test_scm_clone_validates_path() -> Result<()> {
     let temp_dir = setup_test_config_env()?;
     let clone_path = temp_dir.path().join("cloned-repo");
@@ -137,7 +151,7 @@ fn test_init_from_onboarding() -> Result<()> {
     let repo_path = temp_dir.path().join("onboarding-test-repo");
 
     // Set XDG_CONFIG_HOME to isolate test config
-    std::env::set_var("XDG_CONFIG_HOME", temp_dir.path());
+    // Config env already set by setup_test_config_env()
 
     // Initialize a repo first
     scm::init(&repo_path)?;
@@ -152,7 +166,7 @@ fn test_init_from_onboarding() -> Result<()> {
     assert!(!state.is_cloned_repo);
 
     // Clean up env var
-    std::env::remove_var("XDG_CONFIG_HOME");
+    cleanup_test_config_env();
 
     Ok(())
 }
@@ -164,7 +178,7 @@ fn test_init_from_onboarding_with_remote() -> Result<()> {
     let repo_path = temp_dir.path().join("onboarding-remote-test");
 
     // Set XDG_CONFIG_HOME to isolate test config
-    std::env::set_var("XDG_CONFIG_HOME", temp_dir.path());
+    // Config env already set by setup_test_config_env()
 
     // Initialize a repo first
     scm::init(&repo_path)?;
@@ -183,13 +197,16 @@ fn test_init_from_onboarding_with_remote() -> Result<()> {
     assert!(state.is_cloned_repo);
 
     // Clean up env var
-    std::env::remove_var("XDG_CONFIG_HOME");
+    cleanup_test_config_env();
 
     Ok(())
 }
 
 #[test]
+#[serial]
 fn test_config_directory_structure() -> Result<()> {
+    let _temp_dir = setup_test_config_env()?;
+
     // Ensure config directory can be created
     let config_dir = ConfigManager::ensure_config_dir()?;
 
@@ -205,6 +222,7 @@ fn test_config_directory_structure() -> Result<()> {
     // Verify snapshots is a subdirectory of config
     assert!(snapshots_dir.starts_with(&config_dir));
 
+    cleanup_test_config_env();
     Ok(())
 }
 
@@ -240,7 +258,7 @@ fn test_multiple_config_operations() -> Result<()> {
     let temp_dir = setup_test_config_env()?;
 
     // Set XDG_CONFIG_HOME to isolate test config
-    std::env::set_var("XDG_CONFIG_HOME", temp_dir.path());
+    // Config env already set by setup_test_config_env()
 
     let _loaded = FilterConfig::load()?;
 
@@ -258,7 +276,7 @@ fn test_multiple_config_operations() -> Result<()> {
     assert_eq!(loaded2.exclude_older_than_days, Some(99));
 
     // Clean up env var
-    std::env::remove_var("XDG_CONFIG_HOME");
+    cleanup_test_config_env();
 
     Ok(())
 }
@@ -274,7 +292,7 @@ fn test_init_sync_repo_creates_filter_config() -> Result<()> {
     let repo_path = temp_dir.path().join("cli-init-test-repo");
 
     // Set XDG_CONFIG_HOME to isolate test config
-    std::env::set_var("XDG_CONFIG_HOME", temp_dir.path());
+    // Config env already set by setup_test_config_env()
 
     // Initialize using init_sync_repo (simulates --repo flag)
     claude_code_sync::sync::init_sync_repo(&repo_path, None)?;
@@ -298,7 +316,7 @@ fn test_init_sync_repo_creates_filter_config() -> Result<()> {
     assert!(!filter_config.exclude_attachments);
 
     // Clean up env var
-    std::env::remove_var("XDG_CONFIG_HOME");
+    cleanup_test_config_env();
 
     Ok(())
 }
@@ -310,7 +328,7 @@ fn test_init_sync_repo_with_remote_creates_filter_config() -> Result<()> {
     let repo_path = temp_dir.path().join("cli-remote-test-repo");
 
     // Set XDG_CONFIG_HOME to isolate test config
-    std::env::set_var("XDG_CONFIG_HOME", temp_dir.path());
+    // Config env already set by setup_test_config_env()
 
     // Initialize with remote URL using init_sync_repo (simulates --repo --remote flags)
     claude_code_sync::sync::init_sync_repo(
@@ -332,7 +350,7 @@ fn test_init_sync_repo_with_remote_creates_filter_config() -> Result<()> {
     );
 
     // Clean up env var
-    std::env::remove_var("XDG_CONFIG_HOME");
+    cleanup_test_config_env();
 
     Ok(())
 }
@@ -344,7 +362,7 @@ fn test_init_sync_repo_does_not_overwrite_existing_filter_config() -> Result<()>
     let repo_path = temp_dir.path().join("no-overwrite-test-repo");
 
     // Set XDG_CONFIG_HOME to isolate test config
-    std::env::set_var("XDG_CONFIG_HOME", temp_dir.path());
+    // Config env already set by setup_test_config_env()
 
     // Create an existing filter config with custom values
     let custom_config = FilterConfig {
@@ -370,7 +388,7 @@ fn test_init_sync_repo_does_not_overwrite_existing_filter_config() -> Result<()>
     );
 
     // Clean up env var
-    std::env::remove_var("XDG_CONFIG_HOME");
+    cleanup_test_config_env();
 
     Ok(())
 }
@@ -380,6 +398,7 @@ fn test_init_sync_repo_does_not_overwrite_existing_filter_config() -> Result<()>
 // ============================================================================
 
 #[test]
+#[serial]
 fn test_clone_with_invalid_url_fails() -> Result<()> {
     let temp_dir = setup_test_config_env()?;
     let clone_path = temp_dir.path().join("clone-test-repo");
@@ -392,6 +411,7 @@ fn test_clone_with_invalid_url_fails() -> Result<()> {
 }
 
 #[test]
+#[serial]
 fn test_clone_creates_parent_directories() -> Result<()> {
     let temp_dir = setup_test_config_env()?;
     let nested_path = temp_dir.path().join("deeply").join("nested").join("path").join("repo");
@@ -414,7 +434,7 @@ fn test_init_from_onboarding_sets_is_cloned_flag() -> Result<()> {
     let repo_path = temp_dir.path().join("cloned-repo-test");
 
     // Set XDG_CONFIG_HOME to isolate test config
-    std::env::set_var("XDG_CONFIG_HOME", temp_dir.path());
+    // Config env already set by setup_test_config_env()
 
     // Initialize a repo first (simulating post-clone state)
     scm::init(&repo_path)?;
@@ -433,7 +453,7 @@ fn test_init_from_onboarding_sets_is_cloned_flag() -> Result<()> {
     assert!(state.is_cloned_repo, "is_cloned_repo should be true for cloned repos");
 
     // Clean up env var
-    std::env::remove_var("XDG_CONFIG_HOME");
+    cleanup_test_config_env();
 
     Ok(())
 }
@@ -445,7 +465,7 @@ fn test_init_from_onboarding_local_repo_not_cloned() -> Result<()> {
     let repo_path = temp_dir.path().join("local-repo-test");
 
     // Set XDG_CONFIG_HOME to isolate test config
-    std::env::set_var("XDG_CONFIG_HOME", temp_dir.path());
+    // Config env already set by setup_test_config_env()
 
     // Initialize a repo first
     scm::init(&repo_path)?;
@@ -464,7 +484,7 @@ fn test_init_from_onboarding_local_repo_not_cloned() -> Result<()> {
     assert!(!state.is_cloned_repo, "is_cloned_repo should be false for local repos");
 
     // Clean up env var
-    std::env::remove_var("XDG_CONFIG_HOME");
+    cleanup_test_config_env();
 
     Ok(())
 }
@@ -488,6 +508,7 @@ fn test_default_repo_dir_exists() -> Result<()> {
 // ============================================================================
 
 #[test]
+#[serial]
 fn test_init_config_clone_requires_remote_url() -> Result<()> {
     use claude_code_sync::onboarding::InitConfig;
     use std::io::Write;
@@ -521,6 +542,7 @@ clone = true
 }
 
 #[test]
+#[serial]
 fn test_init_config_clone_with_remote_url_valid() -> Result<()> {
     use claude_code_sync::onboarding::InitConfig;
     use std::io::Write;
@@ -606,11 +628,9 @@ fn test_multi_repo_state_serialization() -> Result<()> {
 #[serial]
 fn test_v1_to_v2_migration() -> Result<()> {
     let temp_dir = setup_test_config_env()?;
-    std::env::set_var("XDG_CONFIG_HOME", temp_dir.path());
+    // Config env already set by setup_test_config_env()
 
-    // Create config directory
-    let config_dir = temp_dir.path().join("claude-code-sync");
-    std::fs::create_dir_all(&config_dir)?;
+    let config_dir = ConfigManager::config_dir()?;
 
     // Write a v1 format state.json
     let v1_state = r#"{
@@ -641,7 +661,7 @@ fn test_v1_to_v2_migration() -> Result<()> {
     assert!(content.contains("\"version\": 2"));
     assert!(content.contains("\"active_repo\": \"default\""));
 
-    std::env::remove_var("XDG_CONFIG_HOME");
+    cleanup_test_config_env();
     Ok(())
 }
 
@@ -650,11 +670,9 @@ fn test_v1_to_v2_migration() -> Result<()> {
 #[serial]
 fn test_sync_state_loads_v2_format() -> Result<()> {
     let temp_dir = setup_test_config_env()?;
-    std::env::set_var("XDG_CONFIG_HOME", temp_dir.path());
+    // Config env already set by setup_test_config_env()
 
-    // Create config directory
-    let config_dir = temp_dir.path().join("claude-code-sync");
-    std::fs::create_dir_all(&config_dir)?;
+    let config_dir = ConfigManager::config_dir()?;
 
     // Write v2 format state.json
     let v2_state = r#"{
@@ -683,7 +701,7 @@ fn test_sync_state_loads_v2_format() -> Result<()> {
     assert!(sync_state.has_remote);
     assert!(sync_state.is_cloned_repo);
 
-    std::env::remove_var("XDG_CONFIG_HOME");
+    cleanup_test_config_env();
     Ok(())
 }
 
@@ -692,11 +710,9 @@ fn test_sync_state_loads_v2_format() -> Result<()> {
 #[serial]
 fn test_multi_repo_state_multiple_repos() -> Result<()> {
     let temp_dir = setup_test_config_env()?;
-    std::env::set_var("XDG_CONFIG_HOME", temp_dir.path());
+    // Config env already set by setup_test_config_env()
 
-    // Create config directory
-    let config_dir = temp_dir.path().join("claude-code-sync");
-    std::fs::create_dir_all(&config_dir)?;
+    let config_dir = ConfigManager::config_dir()?;
 
     // Write v2 format with multiple repos
     let v2_state = r#"{
@@ -735,7 +751,7 @@ fn test_multi_repo_state_multiple_repos() -> Result<()> {
     );
     assert!(sync_state.has_remote);
 
-    std::env::remove_var("XDG_CONFIG_HOME");
+    cleanup_test_config_env();
     Ok(())
 }
 
@@ -744,11 +760,9 @@ fn test_multi_repo_state_multiple_repos() -> Result<()> {
 #[serial]
 fn test_switch_active_repo() -> Result<()> {
     let temp_dir = setup_test_config_env()?;
-    std::env::set_var("XDG_CONFIG_HOME", temp_dir.path());
+    // Config env already set by setup_test_config_env()
 
-    // Create config directory
-    let config_dir = temp_dir.path().join("claude-code-sync");
-    std::fs::create_dir_all(&config_dir)?;
+    let config_dir = ConfigManager::config_dir()?;
 
     // Write v2 format with multiple repos
     let v2_state = r#"{
@@ -791,7 +805,7 @@ fn test_switch_active_repo() -> Result<()> {
     );
     assert!(!sync_state.has_remote);
 
-    std::env::remove_var("XDG_CONFIG_HOME");
+    cleanup_test_config_env();
     Ok(())
 }
 
@@ -802,7 +816,7 @@ fn test_init_creates_v2_format_with_git_repo() -> Result<()> {
     use claude_code_sync::sync;
 
     let temp_dir = setup_test_config_env()?;
-    std::env::set_var("XDG_CONFIG_HOME", temp_dir.path());
+    // Config env already set by setup_test_config_env()
 
     let repo_path = temp_dir.path().join("test-sync-repo");
 
@@ -829,7 +843,7 @@ fn test_init_creates_v2_format_with_git_repo() -> Result<()> {
     assert_eq!(default_repo.sync_repo_path, repo_path);
     assert!(!default_repo.has_remote);
 
-    std::env::remove_var("XDG_CONFIG_HOME");
+    cleanup_test_config_env();
     Ok(())
 }
 
@@ -840,7 +854,7 @@ fn test_init_with_remote_populates_remote_url() -> Result<()> {
     use claude_code_sync::sync;
 
     let temp_dir = setup_test_config_env()?;
-    std::env::set_var("XDG_CONFIG_HOME", temp_dir.path());
+    // Config env already set by setup_test_config_env()
 
     let repo_path = temp_dir.path().join("test-remote-repo");
 
@@ -857,7 +871,7 @@ fn test_init_with_remote_populates_remote_url() -> Result<()> {
         Some("https://github.com/user/repo.git".to_string())
     );
 
-    std::env::remove_var("XDG_CONFIG_HOME");
+    cleanup_test_config_env();
     Ok(())
 }
 
@@ -868,7 +882,7 @@ fn test_full_workflow_with_git_repos() -> Result<()> {
     use claude_code_sync::sync;
 
     let temp_dir = setup_test_config_env()?;
-    std::env::set_var("XDG_CONFIG_HOME", temp_dir.path());
+    // Config env already set by setup_test_config_env()
 
     // Create a "remote" bare repo to simulate a git remote
     let bare_repo_path = temp_dir.path().join("bare-remote.git");
@@ -899,7 +913,7 @@ fn test_full_workflow_with_git_repos() -> Result<()> {
     let remote_output = String::from_utf8_lossy(&output.stdout);
     assert!(remote_output.contains("origin"));
 
-    std::env::remove_var("XDG_CONFIG_HOME");
+    cleanup_test_config_env();
     Ok(())
 }
 
@@ -910,7 +924,7 @@ fn test_operations_use_active_repo() -> Result<()> {
     use claude_code_sync::sync;
 
     let temp_dir = setup_test_config_env()?;
-    std::env::set_var("XDG_CONFIG_HOME", temp_dir.path());
+    // Config env already set by setup_test_config_env()
 
     // Create two repos
     let repo1_path = temp_dir.path().join("repo1");
@@ -951,7 +965,7 @@ fn test_operations_use_active_repo() -> Result<()> {
     let sync_state = SyncState::load()?;
     assert_eq!(sync_state.sync_repo_path, repo2_path);
 
-    std::env::remove_var("XDG_CONFIG_HOME");
+    cleanup_test_config_env();
     Ok(())
 }
 
@@ -960,11 +974,9 @@ fn test_operations_use_active_repo() -> Result<()> {
 #[serial]
 fn test_invalid_active_repo_error() -> Result<()> {
     let temp_dir = setup_test_config_env()?;
-    std::env::set_var("XDG_CONFIG_HOME", temp_dir.path());
+    // Config env already set by setup_test_config_env()
 
-    // Create config directory
-    let config_dir = temp_dir.path().join("claude-code-sync");
-    std::fs::create_dir_all(&config_dir)?;
+    let config_dir = ConfigManager::config_dir()?;
 
     // Write v2 format with invalid active_repo
     let v2_state = r#"{
@@ -988,7 +1000,7 @@ fn test_invalid_active_repo_error() -> Result<()> {
     let err = result.unwrap_err().to_string();
     assert!(err.contains("nonexistent"));
 
-    std::env::remove_var("XDG_CONFIG_HOME");
+    cleanup_test_config_env();
     Ok(())
 }
 
@@ -999,7 +1011,7 @@ fn test_init_from_onboarding_creates_v2() -> Result<()> {
     use claude_code_sync::sync;
 
     let temp_dir = setup_test_config_env()?;
-    std::env::set_var("XDG_CONFIG_HOME", temp_dir.path());
+    // Config env already set by setup_test_config_env()
 
     let repo_path = temp_dir.path().join("onboarding-repo");
 
@@ -1020,7 +1032,7 @@ fn test_init_from_onboarding_creates_v2() -> Result<()> {
         Some("https://github.com/test/repo.git".to_string())
     );
 
-    std::env::remove_var("XDG_CONFIG_HOME");
+    cleanup_test_config_env();
     Ok(())
 }
 
@@ -1030,7 +1042,7 @@ fn test_init_from_onboarding_creates_v2() -> Result<()> {
 #[serial]
 fn test_config_handles_uninitialized_state() -> Result<()> {
     let temp_dir = setup_test_config_env()?;
-    std::env::set_var("XDG_CONFIG_HOME", temp_dir.path());
+    // Config env already set by setup_test_config_env()
 
     // Don't create any state file - simulate fresh install
 
@@ -1044,7 +1056,7 @@ fn test_config_handles_uninitialized_state() -> Result<()> {
         err_msg
     );
 
-    std::env::remove_var("XDG_CONFIG_HOME");
+    cleanup_test_config_env();
     Ok(())
 }
 
@@ -1055,7 +1067,7 @@ fn test_cloned_repo_flag_in_v2() -> Result<()> {
     use claude_code_sync::sync;
 
     let temp_dir = setup_test_config_env()?;
-    std::env::set_var("XDG_CONFIG_HOME", temp_dir.path());
+    // Config env already set by setup_test_config_env()
 
     let repo_path = temp_dir.path().join("cloned-repo");
 
@@ -1074,6 +1086,6 @@ fn test_cloned_repo_flag_in_v2() -> Result<()> {
     let sync_state = SyncState::load()?;
     assert!(sync_state.is_cloned_repo);
 
-    std::env::remove_var("XDG_CONFIG_HOME");
+    cleanup_test_config_env();
     Ok(())
 }

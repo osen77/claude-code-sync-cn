@@ -10,15 +10,15 @@ use crate::scm::Backend;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigSyncSettings {
     /// Enable configuration sync
-    #[serde(default = "default_config_sync_true")]
+    #[serde(default = "default_true")]
     pub enabled: bool,
 
     /// Sync settings.json
-    #[serde(default = "default_config_sync_true")]
+    #[serde(default = "default_true")]
     pub sync_settings: bool,
 
     /// Sync CLAUDE.md
-    #[serde(default = "default_config_sync_true")]
+    #[serde(default = "default_true")]
     pub sync_claude_md: bool,
 
     /// Sync hooks folder
@@ -26,15 +26,15 @@ pub struct ConfigSyncSettings {
     pub sync_hooks: bool,
 
     /// Sync plugins/skills list
-    #[serde(default = "default_config_sync_true")]
+    #[serde(default = "default_true")]
     pub sync_skills_list: bool,
 
     /// Auto-apply CLAUDE.md from the most recently updated device on pull
-    #[serde(default = "default_config_sync_true")]
+    #[serde(default = "default_true")]
     pub auto_apply_claude_md: bool,
 
     /// Push device config automatically when running push command
-    #[serde(default = "default_config_sync_true")]
+    #[serde(default = "default_true")]
     pub push_with_config: bool,
 
     /// Device name (defaults to hostname)
@@ -42,7 +42,7 @@ pub struct ConfigSyncSettings {
     pub device_name: Option<String>,
 }
 
-fn default_config_sync_true() -> bool {
+fn default_true() -> bool {
     true
 }
 
@@ -85,6 +85,20 @@ impl ConfigSyncSettings {
 
         // Fallback
         "unknown-device".to_string()
+    }
+}
+
+/// Auto memory sync settings
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutoMemorySettings {
+    /// Enable auto memory sync
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+impl Default for AutoMemorySettings {
+    fn default() -> Self {
+        Self { enabled: true }
     }
 }
 
@@ -217,6 +231,10 @@ pub struct FilterConfig {
     /// Configuration sync settings (settings.json, CLAUDE.md, hooks, etc.)
     #[serde(default)]
     pub config_sync: ConfigSyncSettings,
+
+    /// Auto memory sync settings (memory/ directory)
+    #[serde(default)]
+    pub auto_memory: AutoMemorySettings,
 }
 
 fn default_lfs_patterns() -> Vec<String> {
@@ -253,6 +271,7 @@ impl Default for FilterConfig {
             sync_subdirectory: default_sync_subdirectory(),
             use_project_name_only: true, // Default to multi-device mode
             config_sync: ConfigSyncSettings::default(),
+            auto_memory: AutoMemorySettings::default(),
         }
     }
 }
@@ -721,6 +740,19 @@ pub fn show_config() -> Result<()> {
             if config.config_sync.sync_skills_list { "Yes" } else { "No" }
         );
     }
+
+    // Show auto memory settings
+    println!();
+    println!("{}", "Auto Memory Settings:".bold());
+    println!(
+        "  {}: {}",
+        "Auto memory sync".cyan(),
+        if config.auto_memory.enabled {
+            "Enabled".green()
+        } else {
+            "Disabled".yellow()
+        }
+    );
 
     Ok(())
 }

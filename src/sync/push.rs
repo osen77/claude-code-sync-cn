@@ -158,6 +158,9 @@ pub fn push_history(
     // Track sessions skipped due to missing cwd
     let mut skipped_no_cwd = 0;
 
+    // Mapping from local project dir -> sync repo project dir (for memory sync)
+    let mut project_dir_to_sync: HashMap<PathBuf, PathBuf> = HashMap::new();
+
     // Closure to compute the relative path for a session, respecting use_project_name_only
     let compute_relative_path =
         |session: &crate::parser::ConversationSession| -> Option<PathBuf> {
@@ -188,6 +191,18 @@ pub fn push_history(
                 continue;
             }
         };
+
+        // Build project dir mapping for memory sync (amortized during session loop)
+        if let Some(sync_project_dir) = relative_path.parent() {
+            if !sync_project_dir.as_os_str().is_empty() {
+                let local_project_dir = Path::new(&session.file_path)
+                    .parent()
+                    .unwrap_or(Path::new(""));
+                project_dir_to_sync
+                    .entry(local_project_dir.to_path_buf())
+                    .or_insert_with(|| sync_project_dir.to_path_buf());
+            }
+        }
 
         let dest_path = projects_dir.join(&relative_path);
 
@@ -470,6 +485,109 @@ pub fn push_history(
                 "  {} Removed {} deleted sessions from sync repo",
                 "✓".green(),
                 deleted_from_repo
+            );
+        }
+    }
+
+    // ============================================================================
+    // SYNC AUTO MEMORY DIRECTORIES
+    // ============================================================================
+    if filter.auto_memory.enabled {
+        if verbosity != VerbosityLevel::Quiet {
+            println!();
+            println!("  {} auto memory directories...", "Syncing".cyan());
+        }
+
+        // project_dir_to_sync was built during session loop above.
+        // NOTE: We cannot use extract_project_name() because it splits by '-'
+        // and fails for project names containing hyphens (e.g. "claude-openclaw").
+        let mut synced_count = 0;
+        // Collect local memory file names per sync project during copy,
+        // so we can detect deletions without re-scanning directories.
+        let mut local_memory_by_sync: HashMap<PathBuf, std::collections::HashSet<std::ffi::OsString>> =
+            HashMap::new();
+        for (local_dir, sync_project) in &project_dir_to_sync {
+            let local_memory = local_dir.join("memory");
+            if !local_memory.is_dir() {
+                continue;
+            }
+
+            let dest_memory_dir = projects_dir.join(sync_project).join("memory");
+
+            // Create destination directory
+            if let Err(e) = fs::create_dir_all(&dest_memory_dir) {
+                log::warn!(
+                    "Failed to create memory directory for {}: {}",
+                    sync_project.display(),
+                    e
+                );
+                continue;
+            }
+
+            // Copy memory files and collect names for deletion detection
+            let file_set = local_memory_by_sync
+                .entry(sync_project.clone())
+                .or_default();
+            if let Ok(entries) = fs::read_dir(&local_memory) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                        file_set.insert(entry.file_name());
+                        let dest_file = dest_memory_dir.join(entry.file_name());
+                        if let Err(e) = fs::copy(entry.path(), &dest_file) {
+                            log::warn!("Failed to copy memory file: {}", e);
+                        }
+                    }
+                }
+            }
+
+            synced_count += 1;
+            if verbosity == VerbosityLevel::Verbose {
+                println!(
+                    "    {} {}",
+                    "→".cyan(),
+                    sync_project.join("memory").display()
+                );
+            }
+        }
+
+        if synced_count > 0 {
+            if verbosity != VerbosityLevel::Quiet {
+                println!("  {} Synced {} memory directories", "✓".green(), synced_count);
+            }
+        } else if verbosity == VerbosityLevel::Verbose {
+            println!("  {} No memory directories found", "ℹ".dimmed());
+        }
+
+        // Remove remote memory files that no longer exist locally.
+        // local_memory_by_sync was populated during the copy phase above.
+        let mut deleted_memory_count = 0;
+        for (sync_project, local_files) in &local_memory_by_sync {
+            let remote_memory = projects_dir.join(sync_project).join("memory");
+            if !remote_memory.is_dir() {
+                continue;
+            }
+
+            if let Ok(entries) = fs::read_dir(&remote_memory) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                        let file_name = entry.file_name();
+                        if !local_files.contains(&file_name) {
+                            if let Err(e) = fs::remove_file(entry.path()) {
+                                log::warn!("Failed to remove deleted memory file: {}", e);
+                            } else {
+                                deleted_memory_count += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if deleted_memory_count > 0 && verbosity != VerbosityLevel::Quiet {
+            println!(
+                "  {} Removed {} deleted memory files from sync repo",
+                "✓".green(),
+                deleted_memory_count
             );
         }
     }

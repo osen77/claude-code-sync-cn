@@ -15,7 +15,9 @@ use crate::report::{save_conflict_report, ConflictReport};
 use crate::scm;
 use crate::undo::Snapshot;
 
-use super::discovery::{claude_projects_dir, discover_sessions, find_local_project_by_name, warn_large_files};
+use super::discovery::{
+    claude_projects_dir, discover_sessions, find_local_project_by_name, warn_large_files,
+};
 use super::state::SyncState;
 use super::MAX_CONVERSATIONS_TO_DISPLAY;
 
@@ -621,6 +623,94 @@ pub fn pull_history(
     // Clean up old snapshots automatically
     if let Err(e) = crate::undo::cleanup_old_snapshots(None, false) {
         log::warn!("Failed to cleanup old snapshots: {}", e);
+    }
+
+    // ============================================================================
+    // SYNC AUTO MEMORY DIRECTORIES
+    // ============================================================================
+    if filter.auto_memory.enabled {
+        println!("  {} auto memory directories...", "Syncing".cyan());
+
+        // Scan sync repo projects directory for memory directories directly.
+        // Don't use extract_project_name() - it splits by '-' and fails
+        // for project names containing hyphens (e.g. "claude-openclaw" -> "openclaw").
+        // The sync repo directory names ARE the correct project names.
+        let mut synced_count = 0;
+
+        if let Ok(entries) = std::fs::read_dir(&remote_projects_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let sync_project_dir = entry.path();
+                if !sync_project_dir.is_dir() {
+                    continue;
+                }
+
+                let remote_memory_path = sync_project_dir.join("memory");
+                if !remote_memory_path.is_dir() {
+                    continue;
+                }
+
+                let project_name = sync_project_dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+
+                if project_name.starts_with('.') || project_name.is_empty() {
+                    continue;
+                }
+
+                // Find the corresponding local project directory
+                let local_project_dir = if filter.use_project_name_only {
+                    find_local_project_by_name(&claude_dir, project_name)
+                } else {
+                    let local_path = claude_dir.join(project_name);
+                    if local_path.is_dir() {
+                        Some(local_path)
+                    } else {
+                        None
+                    }
+                };
+
+                let Some(local_project_dir) = local_project_dir else {
+                    log::debug!(
+                        "No local project found for '{}', skipping memory sync",
+                        project_name
+                    );
+                    continue;
+                };
+
+                // Create local memory directory
+                let local_memory_path = local_project_dir.join("memory");
+                if let Err(e) = std::fs::create_dir_all(&local_memory_path) {
+                    log::warn!("Failed to create local memory directory: {}", e);
+                    continue;
+                }
+
+                // Copy memory files from remote to local
+                if let Ok(mem_entries) = std::fs::read_dir(&remote_memory_path) {
+                    for mem_entry in mem_entries.filter_map(|e| e.ok()) {
+                        if mem_entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                            let local_file = local_memory_path.join(mem_entry.file_name());
+                            if let Err(e) = std::fs::copy(mem_entry.path(), &local_file) {
+                                log::warn!("Failed to copy memory file: {}", e);
+                            }
+                        }
+                    }
+                    synced_count += 1;
+                }
+
+                if verbosity == VerbosityLevel::Verbose {
+                    println!(
+                        "    {} {}/memory",
+                        "←".cyan(),
+                        project_name
+                    );
+                }
+            }
+        }
+
+        if verbosity != VerbosityLevel::Quiet {
+            println!("  {} Synced {} memory directories", "✓".green(), synced_count);
+        }
     }
 
     // Auto-apply CLAUDE.md if enabled

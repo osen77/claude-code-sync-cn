@@ -456,6 +456,14 @@ pub fn title(&self) -> Option<String> {
    - 大量对话文件时避免重复解析
    - 使用增量同步而非全量复制
 
+5. **测试隔离（重要）**
+   - ❌ **禁止**在测试中直接读写真实配置目录（`~/Library/Application Support/claude-code-sync/`）
+   - ❌ **禁止**使用 `XDG_CONFIG_HOME` 做测试隔离——macOS 上 `config_dir()` 不读取该变量
+   - ✅ 使用 `CLAUDE_CODE_SYNC_CONFIG_DIR` 环境变量覆盖配置目录（所有平台通用）
+   - ✅ 所有操作环境变量的测试必须标记 `#[serial]`（环境变量是进程全局的）
+   - ✅ 使用 `setup_test_config_env()` / `cleanup_test_config_env()` 辅助函数
+   - **历史教训**: 曾因测试直接写入/删除真实 `state.json` 导致用户同步仓库配置反复丢失
+
 ## 重要注意事项
 
 ### ⚠️ 中文项目名支持

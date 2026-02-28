@@ -333,6 +333,22 @@ pub fn check_directory_structure_consistency(
     }
 }
 
+/// Get list of memory files that exist in a directory
+#[allow(dead_code)]
+pub fn list_memory_files(memory_dir: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+
+    if let Ok(entries) = fs::read_dir(memory_dir) {
+        for entry in entries.filter_map(|e| e.ok()) {
+            if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                files.push(entry.path());
+            }
+        }
+    }
+
+    files
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
