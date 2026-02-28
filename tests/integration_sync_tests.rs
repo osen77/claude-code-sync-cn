@@ -4,6 +4,7 @@ use tempfile::TempDir;
 use walkdir::WalkDir;
 
 // Import the necessary modules from claude_code_sync
+use claude_code_sync::config::CONFIG_DIR_ENV;
 use claude_code_sync::scm;
 use claude_code_sync::history::{
     ConversationSummary, OperationHistory, OperationType, SyncOperation,
@@ -147,8 +148,8 @@ fn test_full_push_pull_cycle() {
     let _state_file = create_test_sync_state(sync_repo_path, config_dir.path()).unwrap();
     create_test_filter_config(config_dir.path()).unwrap();
 
-    // Set HOME to our test config directory to isolate tests
-    std::env::set_var("HOME", config_dir.path());
+    // Isolate config directory for tests (works on all platforms including macOS)
+    std::env::set_var(CONFIG_DIR_ENV, config_dir.path());
 
     // Discover sessions from test data
     let original_sessions = discover_test_sessions(&claude_projects_dir).unwrap();
@@ -301,7 +302,7 @@ fn test_full_push_pull_cycle() {
     }
 
     // Clean up
-    std::env::remove_var("HOME");
+    std::env::remove_var(CONFIG_DIR_ENV);
 }
 
 #[test]

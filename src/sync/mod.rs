@@ -65,18 +65,26 @@ pub fn sync_bidirectional(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::CONFIG_DIR_ENV;
     use crate::filter::FilterConfig;
     use crate::scm;
+    use serial_test::serial;
     use std::path::Path;
     use tempfile::TempDir;
 
     #[test]
+    #[serial]
     fn test_url_validation() {
         let temp_dir = TempDir::new().unwrap();
         let repo_path = temp_dir.path().join("test-repo");
 
         // Initialize a test repo
         scm::init(&repo_path).unwrap();
+
+        // Isolate config directory to avoid overwriting real state.json
+        let config_dir = temp_dir.path().join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::env::set_var(CONFIG_DIR_ENV, &config_dir);
 
         // Save a test state
         let state = SyncState {
@@ -85,8 +93,6 @@ mod tests {
             is_cloned_repo: false,
         };
 
-        // Create state directory using ConfigManager
-        let _state_path = crate::config::ConfigManager::ensure_config_dir().unwrap();
         let state_file = crate::config::ConfigManager::state_file_path().unwrap();
         std::fs::write(&state_file, serde_json::to_string(&state).unwrap()).unwrap();
 
@@ -111,7 +117,7 @@ mod tests {
         }
 
         // Cleanup
-        std::fs::remove_file(&state_file).ok();
+        std::env::remove_var(CONFIG_DIR_ENV);
     }
 
     #[test]

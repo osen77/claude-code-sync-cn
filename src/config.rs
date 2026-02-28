@@ -4,12 +4,20 @@ use std::path::PathBuf;
 /// Cross-platform configuration directory manager
 pub struct ConfigManager;
 
+/// Environment variable name for overriding the config directory (used by tests on all platforms)
+pub const CONFIG_DIR_ENV: &str = "CLAUDE_CODE_SYNC_CONFIG_DIR";
+
 impl ConfigManager {
     /// Get the main configuration directory path following platform conventions:
     /// - Linux: $XDG_CONFIG_HOME/claude-code-sync or ~/.config/claude-code-sync
     /// - macOS: ~/Library/Application Support/claude-code-sync
     /// - Windows: %APPDATA%\claude-code-sync
     pub fn config_dir() -> Result<PathBuf> {
+        // Allow override via CLAUDE_CODE_SYNC_CONFIG_DIR (used by tests on all platforms)
+        if let Ok(override_dir) = std::env::var(CONFIG_DIR_ENV) {
+            return Ok(PathBuf::from(override_dir));
+        }
+
         #[cfg(target_os = "linux")]
         {
             // Follow XDG Base Directory Specification
@@ -83,6 +91,11 @@ impl ConfigManager {
         Ok(Self::config_dir()?.join("claude-code-sync.log"))
     }
 
+    /// Get the user data file path (user_data.json)
+    pub fn user_data_path() -> Result<PathBuf> {
+        Ok(Self::config_dir()?.join("user_data.json"))
+    }
+
     /// Ensure the configuration directory exists
     pub fn ensure_config_dir() -> Result<PathBuf> {
         let config_dir = Self::config_dir()?;
@@ -112,8 +125,10 @@ impl ConfigManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial]
     fn test_config_paths() {
         // Just ensure they don't panic and return valid paths
         let config_dir = ConfigManager::config_dir().unwrap();
@@ -146,6 +161,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     #[cfg(target_os = "linux")]
     fn test_xdg_config_home_respected() {
         // Set XDG_CONFIG_HOME and verify it's used
@@ -158,11 +174,26 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     #[cfg(target_os = "macos")]
     fn test_macos_library_path() {
         let config_dir = ConfigManager::config_dir().unwrap();
         assert!(config_dir
             .to_string_lossy()
             .contains("Library/Application Support/claude-code-sync"));
+    }
+
+    #[test]
+    #[serial]
+    fn test_config_dir_override() {
+        // Save and restore to avoid polluting parallel tests
+        let saved = std::env::var(CONFIG_DIR_ENV).ok();
+        std::env::set_var(CONFIG_DIR_ENV, "/tmp/test-override");
+        let config_dir = ConfigManager::config_dir().unwrap();
+        assert_eq!(config_dir, PathBuf::from("/tmp/test-override"));
+        match saved {
+            Some(v) => std::env::set_var(CONFIG_DIR_ENV, v),
+            None => std::env::remove_var(CONFIG_DIR_ENV),
+        }
     }
 }

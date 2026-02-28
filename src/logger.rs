@@ -120,6 +120,7 @@ pub fn rotate_log_if_needed() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::CONFIG_DIR_ENV;
     use serial_test::serial;
     use std::fs::File;
 
@@ -136,10 +137,9 @@ mod tests {
     fn test_log_to_file() -> Result<()> {
         // Set up isolated test environment
         let temp_dir = tempfile::TempDir::new()?;
-        std::env::set_var("XDG_CONFIG_HOME", temp_dir.path());
-
-        // Ensure config directory exists
-        ConfigManager::ensure_config_dir()?;
+        let config_dir = temp_dir.path().join("claude-code-sync");
+        std::fs::create_dir_all(&config_dir)?;
+        std::env::set_var(CONFIG_DIR_ENV, &config_dir);
 
         log_to_file("Test log message")?;
 
@@ -149,8 +149,7 @@ mod tests {
         let contents = std::fs::read_to_string(&log_path)?;
         assert!(contents.contains("Test log message"));
 
-        // Clean up env var
-        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var(CONFIG_DIR_ENV);
 
         Ok(())
     }
@@ -160,11 +159,12 @@ mod tests {
     fn test_rotate_log_creates_backup() -> Result<()> {
         // Set up isolated test environment
         let temp_dir = tempfile::TempDir::new()?;
-        std::env::set_var("XDG_CONFIG_HOME", temp_dir.path());
+        let config_dir = temp_dir.path().join("claude-code-sync");
+        std::fs::create_dir_all(&config_dir)?;
+        std::env::set_var(CONFIG_DIR_ENV, &config_dir);
 
         // Create a large log file
         let log_path = ConfigManager::log_file_path()?;
-        ConfigManager::ensure_config_dir()?;
         let mut file = File::create(&log_path)?;
 
         // Write 11MB of data
@@ -185,8 +185,7 @@ mod tests {
             assert!(metadata.len() < 11 * 1024 * 1024);
         }
 
-        // Clean up env var
-        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::remove_var(CONFIG_DIR_ENV);
 
         Ok(())
     }
