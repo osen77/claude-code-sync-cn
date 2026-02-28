@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["BINARY_NAME"],"enum":["Commands","ConfigSyncAction","HistoryAction","HooksAction","RemoteAction","SessionAction","UndoOperation","WrapperAction"],"fn":["main"],"mod":["config","conflict","filter","handlers","history","interactive_conflict","logger","merge","onboarding","parser","report","scm","sync","undo"],"struct":["Cli"]};
