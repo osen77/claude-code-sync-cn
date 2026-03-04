@@ -538,6 +538,9 @@ enum SessionAction {
         #[arg(short, long)]
         force: bool,
     },
+
+    /// List all projects (non-interactive)
+    Projects,
 }
 
 fn main() -> Result<()> {
@@ -1006,6 +1009,9 @@ fn main() -> Result<()> {
                 }
                 Some(SessionAction::Delete { session_id, force }) => {
                     handle_session_delete(&session_id, force)?;
+                }
+                Some(SessionAction::Projects) => {
+                    handle_session_projects()?;
                 }
             }
         }
