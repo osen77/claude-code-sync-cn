@@ -1266,6 +1266,44 @@ pub fn handle_session_list(project_filter: Option<&str>, show_ids: bool) -> Resu
     Ok(())
 }
 
+/// List all projects (non-interactive)
+pub fn handle_session_projects() -> Result<()> {
+    let mut projects = scan_all_projects()?;
+
+    if projects.is_empty() {
+        println!("{}", "No projects found.".yellow());
+        return Ok(());
+    }
+
+    // Sort by last activity (most recent first)
+    projects.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+
+    println!(
+        "{} ({} projects)",
+        "Projects".cyan().bold(),
+        projects.len()
+    );
+    println!("{}", "-".repeat(60));
+
+    for (i, project) in projects.iter().enumerate() {
+        let time_str = project
+            .last_activity
+            .as_ref()
+            .map(|t| format_relative_time(t))
+            .unwrap_or_else(|| "Unknown".to_string());
+
+        println!(
+            "[{:>2}] {} | {} sessions | {}",
+            i + 1,
+            project.name.bold(),
+            project.session_count,
+            time_str.dimmed()
+        );
+    }
+
+    Ok(())
+}
+
 /// Show session details (non-interactive), with optional drill-down flags
 pub fn handle_session_show(
     session_id: &str,
