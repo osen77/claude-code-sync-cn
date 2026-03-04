@@ -488,32 +488,15 @@ fn show_session_menu(
     }
 }
 
-/// Search sessions by keyword in user messages
+/// Search sessions by keyword in user messages (delegates to search_sessions_full)
 fn search_sessions(sessions: &[SessionSummary], keyword: &str) -> Vec<(SessionSummary, Vec<String>)> {
-    let keyword_lower = keyword.to_lowercase();
-    let mut results = Vec::new();
-
-    for session in sessions {
-        if let Ok(conv) = ConversationSession::from_file(&session.file_path) {
-            let mut matched_snippets = Vec::new();
-            for entry in conv.entries.iter().filter(|e| e.entry_type == "user") {
-                if let Some(msg) = entry.message.as_ref() {
-                    if let Some(text) = ConversationSession::extract_user_text(msg) {
-                        if text.to_lowercase().contains(&keyword_lower) {
-                            // Extract a snippet around the match
-                            let snippet = extract_match_snippet(&text, &keyword_lower, 60);
-                            matched_snippets.push(snippet);
-                        }
-                    }
-                }
-            }
-            if !matched_snippets.is_empty() {
-                results.push((session.clone(), matched_snippets));
-            }
-        }
-    }
-
-    results
+    search_sessions_full(sessions, keyword, 60, true)
+        .into_iter()
+        .map(|r| {
+            let snippets = r.matches.into_iter().map(|m| m.snippet).collect();
+            (r.summary, snippets)
+        })
+        .collect()
 }
 
 /// Extract a snippet around the first keyword match
@@ -706,36 +689,45 @@ fn show_session_details(session: &SessionSummary) -> Result<()> {
         session.file_path.display()
     );
 
-    // Show all user messages
+    // Show conversation (both user and assistant messages)
     println!();
     println!("{}", "-".repeat(60).cyan());
-    println!("{}", "User Messages".cyan().bold());
+    println!("{}", "Conversation".cyan().bold());
     println!("{}", "-".repeat(60).cyan());
 
     if let Ok(conv) = ConversationSession::from_file(&session.file_path) {
-        let mut msg_index = 0;
-        for entry in conv.entries.iter().filter(|e| e.entry_type == "user") {
-            if let Some(msg) = entry.message.as_ref() {
-                if let Some(text) = ConversationSession::extract_user_text(msg) {
-                    msg_index += 1;
-                    println!();
-                    let time_str = entry
-                        .timestamp
-                        .as_ref()
-                        .map(|t| format_relative_time(t))
-                        .unwrap_or_default();
-                    println!(
-                        "{} {}",
-                        format!("[{}]", msg_index).cyan(),
-                        time_str.dimmed()
-                    );
-                    println!("{}", text);
+        let messages = collect_display_messages(&conv);
+
+        if messages.is_empty() {
+            println!();
+            println!("{}", "(No messages found)".dimmed());
+        } else {
+            for m in &messages {
+                println!();
+
+                let time_str = m
+                    .timestamp
+                    .as_ref()
+                    .map(|t| format_relative_time(t))
+                    .unwrap_or_default();
+
+                let role_label = if m.role == "user" {
+                    "[User]".green().bold()
+                } else {
+                    "[Claude]".blue().bold()
+                };
+
+                println!(
+                    "{} {} {}",
+                    format!("[{}]", m.index).cyan(),
+                    role_label,
+                    time_str.dimmed()
+                );
+
+                for line in m.content.lines() {
+                    println!("  {}", line);
                 }
             }
-        }
-        if msg_index == 0 {
-            println!();
-            println!("{}", "(No user messages found)".dimmed());
         }
     }
 
@@ -1274,20 +1266,651 @@ pub fn handle_session_list(project_filter: Option<&str>, show_ids: bool) -> Resu
     Ok(())
 }
 
-/// Show session details (non-interactive)
-pub fn handle_session_show(session_id: &str) -> Result<()> {
+/// Show session details (non-interactive), with optional drill-down flags
+pub fn handle_session_show(
+    session_id: &str,
+    tail: Option<usize>,
+    head: Option<usize>,
+    around: Option<&str>,
+    num: usize,
+    json: bool,
+) -> Result<()> {
     let projects = scan_all_projects()?;
 
     for project in &projects {
         let sessions = scan_project_sessions(project)?;
 
         if let Some(session) = sessions.iter().find(|s| s.session_id == session_id) {
-            show_session_details(session)?;
+            // If no drill-down flags and not json, use interactive view
+            if tail.is_none() && head.is_none() && around.is_none() && !json {
+                show_session_details(session)?;
+                return Ok(());
+            }
+
+            // Drill-down mode: parse and filter messages
+            let conv = ConversationSession::from_file(&session.file_path)?;
+            let messages = collect_display_messages(&conv);
+
+            if messages.is_empty() {
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string(&serde_json::json!({
+                            "session_id": session.session_id,
+                            "project": session.project_name,
+                            "title": session.title,
+                            "message_count": 0,
+                            "messages": []
+                        }))?
+                    );
+                } else {
+                    println!("(No messages found)");
+                }
+                return Ok(());
+            }
+
+            // Determine slice range
+            let total = messages.len();
+            let (start, end, showing) = if let Some(keyword) = around {
+                let keyword_lower = keyword.to_lowercase();
+                let pos = messages
+                    .iter()
+                    .position(|m| m.content.to_lowercase().contains(&keyword_lower))
+                    .unwrap_or(0);
+                let s = pos.saturating_sub(num);
+                let e = (pos + num + 1).min(total);
+                (s, e, format!("around:\"{}\":{}", keyword, num))
+            } else if let Some(n) = tail {
+                let s = total.saturating_sub(n);
+                (s, total, format!("tail:{}", n))
+            } else if let Some(n) = head {
+                (0, n.min(total), format!("head:{}", n))
+            } else {
+                (0, total, "all".to_string())
+            };
+
+            let slice = &messages[start..end];
+
+            if json {
+                let json_msgs: Vec<serde_json::Value> = slice
+                    .iter()
+                    .map(|m| {
+                        serde_json::json!({
+                            "index": m.index,
+                            "role": m.role,
+                            "timestamp": m.timestamp,
+                            "content": m.content,
+                        })
+                    })
+                    .collect();
+
+                println!(
+                    "{}",
+                    serde_json::to_string(&serde_json::json!({
+                        "session_id": session.session_id,
+                        "project": session.project_name,
+                        "title": session.title,
+                        "message_count": session.message_count,
+                        "showing": showing,
+                        "messages": json_msgs,
+                    }))?
+                );
+            } else {
+                let is_tty = atty::is(atty::Stream::Stdout);
+                println!(
+                    "--- {} | {} | {} | {} msgs | showing {} ---",
+                    session.session_id,
+                    session.project_name,
+                    session.display_title(40),
+                    session.message_count,
+                    showing,
+                );
+                println!();
+                for m in slice {
+                    let role_tag = if m.role == "user" { "U" } else { "A" };
+                    let time_str = m
+                        .timestamp
+                        .as_ref()
+                        .map(|t| format_compact_relative_time(t))
+                        .unwrap_or_default();
+                    if is_tty {
+                        println!(
+                            "[{}] [{}] {}",
+                            format!("{}", m.index).cyan(),
+                            if m.role == "user" {
+                                role_tag.green().bold().to_string()
+                            } else {
+                                role_tag.blue().bold().to_string()
+                            },
+                            time_str.dimmed()
+                        );
+                    } else {
+                        println!("[{}] [{}] {}", m.index, role_tag, time_str);
+                    }
+                    for line in m.content.lines() {
+                        println!("  {}", line);
+                    }
+                    println!();
+                }
+            }
+
             return Ok(());
         }
     }
 
     anyhow::bail!("Session not found: {}", session_id)
+}
+
+// ============================================================================
+// Search functionality
+// ============================================================================
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct SearchMatch {
+    role: String,
+    snippet: String,
+}
+
+#[derive(Debug, Clone)]
+struct SessionSearchResult {
+    summary: SessionSummary,
+    matches: Vec<SearchMatch>,
+    score: f64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct MemoryMatch {
+    snippet: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct MemorySearchResult {
+    project: String,
+    file: String,
+    matches: Vec<MemoryMatch>,
+}
+
+/// A processed message ready for display
+struct DisplayMessage {
+    index: usize,
+    role: String,
+    timestamp: Option<String>,
+    content: String,
+}
+
+/// Collect displayable messages from a conversation (filtering tool_result entries)
+fn collect_display_messages(conv: &ConversationSession) -> Vec<DisplayMessage> {
+    let mut messages = Vec::new();
+    let mut index = 0;
+
+    for entry in &conv.entries {
+        match entry.entry_type.as_str() {
+            "user" | "assistant" => {}
+            _ => continue,
+        }
+
+        if ConversationSession::is_tool_result_entry(entry) {
+            continue;
+        }
+
+        let is_user = entry.entry_type == "user";
+
+        if let Some(msg) = entry.message.as_ref() {
+            if let Some(text) = ConversationSession::extract_display_content(msg, is_user) {
+                index += 1;
+                messages.push(DisplayMessage {
+                    index,
+                    role: if is_user {
+                        "user".to_string()
+                    } else {
+                        "assistant".to_string()
+                    },
+                    timestamp: entry.timestamp.clone(),
+                    content: text,
+                });
+            }
+        }
+    }
+
+    messages
+}
+
+/// Parse a duration string (e.g., "1d", "3h", "1w") into a cutoff DateTime
+fn parse_duration_filter(since: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+    use chrono::Utc;
+
+    let since = since.trim().to_lowercase();
+    if since.len() < 2 {
+        anyhow::bail!("Invalid duration: '{}'. Use format like '1d', '3h', '1w'", since);
+    }
+    let (num_str, unit) = since.split_at(since.len() - 1);
+    let num: i64 = num_str
+        .parse()
+        .with_context(|| format!("Invalid duration number: '{}'", num_str))?;
+
+    let duration = match unit {
+        "m" => chrono::Duration::minutes(num),
+        "h" => chrono::Duration::hours(num),
+        "d" => chrono::Duration::days(num),
+        "w" => chrono::Duration::weeks(num),
+        _ => anyhow::bail!(
+            "Unknown duration unit '{}'. Use m/h/d/w (e.g., '1d', '3h', '1w')",
+            unit
+        ),
+    };
+
+    Ok(Utc::now() - duration)
+}
+
+/// Calculate a 0.0-1.0 recency score (half-life: 7 days)
+fn calculate_recency_score(last_activity: Option<&str>) -> f64 {
+    use chrono::{DateTime, Utc};
+
+    let Some(ts) = last_activity else {
+        return 0.0;
+    };
+    let Ok(dt) = DateTime::parse_from_rfc3339(ts) else {
+        return 0.0;
+    };
+
+    let hours_ago = Utc::now()
+        .signed_duration_since(dt.with_timezone(&Utc))
+        .num_hours() as f64;
+
+    // Half-life of 168 hours (7 days): score = e^(-t * ln2 / 168)
+    (-hours_ago / 168.0 * 0.693).exp()
+}
+
+/// Compact relative time for search output
+fn format_compact_relative_time(timestamp: &str) -> String {
+    use chrono::{DateTime, Utc};
+
+    if let Ok(dt) = DateTime::parse_from_rfc3339(timestamp) {
+        let duration = Utc::now().signed_duration_since(dt.with_timezone(&Utc));
+        let minutes = duration.num_minutes();
+        let hours = duration.num_hours();
+        let days = duration.num_days();
+
+        if minutes < 1 {
+            "now".to_string()
+        } else if minutes < 60 {
+            format!("{}m ago", minutes)
+        } else if hours < 24 {
+            format!("{}h ago", hours)
+        } else if days < 7 {
+            format!("{}d ago", days)
+        } else if days < 30 {
+            format!("{}w ago", days / 7)
+        } else {
+            format!("{}mo ago", days / 30)
+        }
+    } else {
+        "?".to_string()
+    }
+}
+
+/// Search memory files (*.md) in project memory directories
+fn search_memory_files(
+    projects: &[ProjectSummary],
+    keyword: &str,
+    context_chars: usize,
+) -> Vec<MemorySearchResult> {
+    let keyword_lower = keyword.to_lowercase();
+    let mut results = Vec::new();
+
+    for project in projects {
+        let memory_dir = project.dir_path.join("memory");
+        if !memory_dir.is_dir() {
+            continue;
+        }
+
+        let Ok(entries) = fs::read_dir(&memory_dir) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                continue;
+            }
+
+            let Ok(content) = fs::read_to_string(&path) else {
+                continue;
+            };
+
+            let file_name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown");
+
+            // Collect match snippets
+            let mut matches = Vec::new();
+            for line in content.lines() {
+                if line.to_lowercase().contains(&keyword_lower) {
+                    let snippet = extract_match_snippet(line, &keyword_lower, context_chars);
+                    matches.push(MemoryMatch { snippet });
+                }
+            }
+
+            if !matches.is_empty() {
+                results.push(MemorySearchResult {
+                    project: project.name.clone(),
+                    file: format!("memory/{}", file_name),
+                    matches,
+                });
+            }
+        }
+    }
+
+    results
+}
+
+/// Search sessions across projects (both user and assistant messages)
+fn search_sessions_full(
+    sessions: &[SessionSummary],
+    keyword: &str,
+    context_chars: usize,
+    user_only: bool,
+) -> Vec<SessionSearchResult> {
+    let keyword_lower = keyword.to_lowercase();
+    let mut results = Vec::new();
+
+    for session in sessions {
+        let Ok(conv) = ConversationSession::from_file(&session.file_path) else {
+            continue;
+        };
+
+        let mut matches = Vec::new();
+        const MAX_MATCHES_PER_SESSION: usize = 20;
+
+        for entry in &conv.entries {
+            if matches.len() >= MAX_MATCHES_PER_SESSION {
+                break;
+            }
+
+            let is_user = entry.entry_type == "user";
+            let is_assistant = entry.entry_type == "assistant";
+
+            if !is_user && !is_assistant {
+                continue;
+            }
+
+            if user_only && is_assistant {
+                continue;
+            }
+
+            if ConversationSession::is_tool_result_entry(entry) {
+                continue;
+            }
+
+            if let Some(msg) = entry.message.as_ref() {
+                let text = if is_user {
+                    ConversationSession::extract_user_text(msg)
+                } else {
+                    ConversationSession::extract_display_content(msg, false)
+                };
+
+                if let Some(text) = text {
+                    if text.to_lowercase().contains(&keyword_lower) {
+                        let snippet =
+                            extract_match_snippet(&text, &keyword_lower, context_chars);
+                        matches.push(SearchMatch {
+                            role: if is_user {
+                                "user".to_string()
+                            } else {
+                                "assistant".to_string()
+                            },
+                            snippet,
+                        });
+                    }
+                }
+            }
+        }
+
+        if !matches.is_empty() {
+            let recency_score = calculate_recency_score(session.last_activity.as_deref());
+            let match_score = (matches.len() as f64).ln_1p();
+            let score = recency_score * 0.6 + match_score * 0.4;
+
+            results.push(SessionSearchResult {
+                summary: session.clone(),
+                matches,
+                score,
+            });
+        }
+    }
+
+    results.sort_by(|a, b| {
+        b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    results
+}
+
+/// Handle `ccs session search` command
+pub fn handle_session_search(
+    keyword: &str,
+    project_filter: Option<&str>,
+    since: Option<&str>,
+    context_chars: usize,
+    limit: usize,
+    user_only: bool,
+    json_output: bool,
+) -> Result<()> {
+    // 1. Parse time filter
+    let cutoff = if let Some(since_str) = since {
+        Some(parse_duration_filter(since_str)?)
+    } else {
+        None
+    };
+
+    // 2. Scan and filter projects
+    let projects = scan_all_projects()?;
+    let filtered_projects: Vec<_> = if let Some(name) = project_filter {
+        projects.into_iter().filter(|p| p.name == name).collect()
+    } else {
+        projects
+    };
+
+    if filtered_projects.is_empty() {
+        if json_output {
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "query": keyword,
+                    "total_matches": 0,
+                    "memory_results": [],
+                    "session_results": [],
+                }))?
+            );
+        } else {
+            println!("[0 results | query: \"{}\"]", keyword);
+        }
+        return Ok(());
+    }
+
+    // 3. Search memory files (no time filter - memory is persistent knowledge)
+    let memory_results = search_memory_files(&filtered_projects, keyword, context_chars);
+
+    // 4. Collect sessions with time filter
+    let mut all_sessions = Vec::new();
+    for project in &filtered_projects {
+        let sessions = scan_project_sessions(project)?;
+        for session in sessions {
+            if let Some(ref cutoff_dt) = cutoff {
+                if let Some(ref ts) = session.last_activity {
+                    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
+                        if dt.with_timezone(&chrono::Utc) < *cutoff_dt {
+                            continue;
+                        }
+                    }
+                } else {
+                    continue;
+                }
+            }
+            all_sessions.push(session);
+        }
+    }
+
+    // 5. Search sessions
+    let session_results = search_sessions_full(&all_sessions, keyword, context_chars, user_only);
+
+    // 6. Count totals
+    let memory_match_count: usize = memory_results.iter().map(|r| r.matches.len()).sum();
+    let session_match_count: usize = session_results.iter().map(|r| r.matches.len()).sum();
+    let total_matches = memory_match_count + session_match_count;
+
+    // 7. Output
+    if json_output {
+        let session_json: Vec<serde_json::Value> = session_results
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "session_id": r.summary.session_id,
+                    "project": r.summary.project_name,
+                    "title": r.summary.title,
+                    "last_activity": r.summary.last_activity,
+                    "message_count": r.summary.message_count,
+                    "matches": r.matches,
+                })
+            })
+            .collect();
+
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "query": keyword,
+                "total_matches": total_matches,
+                "memory_results": memory_results,
+                "session_results": session_json,
+            }))?
+        );
+        return Ok(());
+    }
+
+    // Text output
+    let is_tty = atty::is(atty::Stream::Stdout);
+
+    if total_matches == 0 {
+        println!("[0 results | query: \"{}\"]", keyword);
+        return Ok(());
+    }
+
+    // Header
+    if memory_match_count > 0 && session_match_count > 0 {
+        println!(
+            "[{} matches: {} in memory, {} in {} sessions | query: \"{}\"]",
+            total_matches,
+            memory_match_count,
+            session_match_count,
+            session_results.len(),
+            keyword
+        );
+    } else if memory_match_count > 0 {
+        println!(
+            "[{} matches in memory | query: \"{}\"]",
+            memory_match_count, keyword
+        );
+    } else {
+        println!(
+            "[{} matches in {} sessions | query: \"{}\"]",
+            session_match_count,
+            session_results.len(),
+            keyword
+        );
+    }
+    println!();
+
+    let mut shown = 0;
+
+    // Memory results first
+    if !memory_results.is_empty() {
+        if is_tty {
+            println!("{}", "=== Memory ===".cyan().bold());
+        } else {
+            println!("=== Memory ===");
+        }
+        for result in &memory_results {
+            if shown >= limit {
+                break;
+            }
+            let header = format!("--- {} | {} ---", result.project, result.file);
+            if is_tty {
+                println!("{}", header.dimmed());
+            } else {
+                println!("{}", header);
+            }
+            for m in &result.matches {
+                if shown >= limit {
+                    break;
+                }
+                println!("  {}", m.snippet);
+                shown += 1;
+            }
+            println!();
+        }
+    }
+
+    // Session results
+    if !session_results.is_empty() && shown < limit {
+        if !memory_results.is_empty() {
+            if is_tty {
+                println!("{}", "=== Sessions ===".cyan().bold());
+            } else {
+                println!("=== Sessions ===");
+            }
+        }
+        for result in &session_results {
+            if shown >= limit {
+                break;
+            }
+            let time_str = result
+                .summary
+                .last_activity
+                .as_ref()
+                .map(|t| format_compact_relative_time(t))
+                .unwrap_or_else(|| "?".to_string());
+
+            let header = format!(
+                "--- {} | {} | {} | {} | {} msgs ---",
+                result.summary.session_id,
+                result.summary.project_name,
+                result.summary.display_title(40),
+                time_str,
+                result.summary.message_count,
+            );
+
+            if is_tty {
+                println!("{}", header.dimmed());
+            } else {
+                println!("{}", header);
+            }
+
+            for m in &result.matches {
+                if shown >= limit {
+                    break;
+                }
+                let role_tag = if m.role == "user" { "U" } else { "A" };
+                println!("  [{}] {}", role_tag, m.snippet);
+                shown += 1;
+            }
+            println!();
+        }
+    }
+
+    // Footer
+    if total_matches > limit {
+        println!(
+            "[showing {} of {} matches | use -n {} to see more]",
+            shown.min(limit),
+            total_matches,
+            total_matches
+        );
+    }
+
+    Ok(())
 }
 
 /// Rename session (non-interactive)
@@ -1403,5 +2026,77 @@ mod tests {
         let short = session.display_title(10);
         assert!(short.chars().count() <= 10);
         assert!(short.ends_with("..."));
+    }
+
+    #[test]
+    fn test_parse_duration_filter_days() {
+        let cutoff = parse_duration_filter("7d").unwrap();
+        let expected = chrono::Utc::now() - chrono::Duration::days(7);
+        assert!((cutoff - expected).num_seconds().abs() < 2);
+    }
+
+    #[test]
+    fn test_parse_duration_filter_hours() {
+        let cutoff = parse_duration_filter("3h").unwrap();
+        let expected = chrono::Utc::now() - chrono::Duration::hours(3);
+        assert!((cutoff - expected).num_seconds().abs() < 2);
+    }
+
+    #[test]
+    fn test_parse_duration_filter_weeks() {
+        let cutoff = parse_duration_filter("2w").unwrap();
+        let expected = chrono::Utc::now() - chrono::Duration::weeks(2);
+        assert!((cutoff - expected).num_seconds().abs() < 2);
+    }
+
+    #[test]
+    fn test_parse_duration_filter_minutes() {
+        let cutoff = parse_duration_filter("30m").unwrap();
+        let expected = chrono::Utc::now() - chrono::Duration::minutes(30);
+        assert!((cutoff - expected).num_seconds().abs() < 2);
+    }
+
+    #[test]
+    fn test_parse_duration_filter_invalid() {
+        assert!(parse_duration_filter("abc").is_err());
+        assert!(parse_duration_filter("3x").is_err());
+        assert!(parse_duration_filter("d").is_err());
+    }
+
+    #[test]
+    fn test_calculate_recency_score_now() {
+        let now = chrono::Utc::now().to_rfc3339();
+        let score = calculate_recency_score(Some(&now));
+        assert!(score > 0.95);
+    }
+
+    #[test]
+    fn test_calculate_recency_score_week_ago() {
+        let week_ago = (chrono::Utc::now() - chrono::Duration::days(7)).to_rfc3339();
+        let score = calculate_recency_score(Some(&week_ago));
+        assert!(score > 0.4 && score < 0.6, "score was {}", score);
+    }
+
+    #[test]
+    fn test_calculate_recency_score_none() {
+        assert_eq!(calculate_recency_score(None), 0.0);
+    }
+
+    #[test]
+    fn test_format_compact_relative_time_now() {
+        let now = chrono::Utc::now().to_rfc3339();
+        assert_eq!(format_compact_relative_time(&now), "now");
+    }
+
+    #[test]
+    fn test_format_compact_relative_time_hours() {
+        let ts = (chrono::Utc::now() - chrono::Duration::hours(3)).to_rfc3339();
+        assert_eq!(format_compact_relative_time(&ts), "3h ago");
+    }
+
+    #[test]
+    fn test_format_compact_relative_time_days() {
+        let ts = (chrono::Utc::now() - chrono::Duration::days(5)).to_rfc3339();
+        assert_eq!(format_compact_relative_time(&ts), "5d ago");
     }
 }
