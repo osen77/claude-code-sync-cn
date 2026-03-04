@@ -32,5 +32,5 @@ pub use update::{check_for_update_silent, handle_update, print_update_notificati
 pub use wrapper::{handle_wrapper_install, handle_wrapper_show, handle_wrapper_uninstall};
 pub use session::{
     handle_session_interactive, handle_session_list, handle_session_show,
-    handle_session_rename, handle_session_delete,
+    handle_session_rename, handle_session_delete, handle_session_search,
 };

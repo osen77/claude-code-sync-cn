@@ -325,6 +325,122 @@ impl ConversationSession {
         self.entries.iter().filter_map(|e| e.timestamp.clone()).next()
     }
 
+    /// Format a single content block for display.
+    /// Simplifies tool_use, tool_result, image blocks into tags.
+    pub fn format_content_block(block: &Value) -> Option<String> {
+        let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
+        match block_type {
+            "text" => {
+                let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                if text.trim().is_empty() {
+                    return None;
+                }
+                Some(simplify_text_content(text))
+            }
+            "tool_use" => {
+                let name = block
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or("unknown");
+                let hint = block
+                    .get("input")
+                    .and_then(|inp| inp.get("file_path"))
+                    .and_then(|fp| fp.as_str())
+                    .and_then(|fp| {
+                        fp.split(&['/', '\\'])
+                            .rfind(|s| !s.is_empty())
+                    });
+                if let Some(file) = hint {
+                    Some(format!("[Tool: {} -> {}]", name, file))
+                } else {
+                    Some(format!("[Tool: {}]", name))
+                }
+            }
+            "tool_result" => {
+                let content_str = block
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("");
+                if is_user_interaction_result(content_str) {
+                    Some(format_user_interaction(content_str))
+                } else {
+                    None
+                }
+            }
+            "image" => Some("[Image]".to_string()),
+            _ => None,
+        }
+    }
+
+    /// Check if a user entry is a system-generated tool result (not user interaction).
+    /// Returns false if any block contains a user interaction response.
+    pub fn is_tool_result_entry(entry: &ConversationEntry) -> bool {
+        if entry.entry_type != "user" {
+            return false;
+        }
+        if let Some(msg) = &entry.message {
+            if let Some(arr) = msg.get("content").and_then(|c| c.as_array()) {
+                if arr.is_empty() {
+                    return false;
+                }
+                // All blocks must be tool_result AND none must be user interaction
+                return arr.iter().all(|block| {
+                    if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+                        return false;
+                    }
+                    let content = block
+                        .get("content")
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("");
+                    !is_user_interaction_result(content)
+                });
+            }
+        }
+        false
+    }
+
+    /// Extract and format message content for display.
+    /// For user messages, filters system content and tool results.
+    /// For assistant messages, simplifies tool_use/image/code blocks.
+    pub fn extract_display_content(message: &Value, is_user: bool) -> Option<String> {
+        let content = message.get("content")?;
+
+        // Case 1: content is a plain string
+        if let Some(s) = content.as_str() {
+            if is_user && Self::is_system_content(s) {
+                return None;
+            }
+            return Some(simplify_text_content(s));
+        }
+
+        // Case 2: content is an array of blocks
+        if let Some(arr) = content.as_array() {
+            let parts: Vec<String> = arr
+                .iter()
+                .filter_map(|block| {
+                    // Filter system content on raw text before formatting
+                    if is_user {
+                        if let Some(raw) = block.get("text").and_then(|t| t.as_str()) {
+                            if Self::is_system_content(raw) {
+                                return None;
+                            }
+                        }
+                    }
+                    Self::format_content_block(block)
+                })
+                .collect();
+
+            if parts.is_empty() {
+                return None;
+            }
+
+            return Some(parts.join("\n"));
+        }
+
+        None
+    }
+
     /// Calculate a simple hash of the conversation content
     pub fn content_hash(&self) -> String {
         use std::collections::hash_map::DefaultHasher;
@@ -337,6 +453,99 @@ impl ConversationSession {
             }
         }
         format!("{:x}", hasher.finish())
+    }
+}
+
+/// Check if a tool_result content is a user interaction response.
+fn is_user_interaction_result(content: &str) -> bool {
+    content.starts_with("User has answered")
+        || content.starts_with("User has approved")
+        || content.starts_with("The user doesn't want to proceed")
+}
+
+/// Format a user interaction tool_result into a concise display tag.
+fn format_user_interaction(content: &str) -> String {
+    if content.starts_with("User has answered") {
+        // Format: 'User has answered your questions: "question"="answer". ...'
+        // Extract the question="answer" part
+        if let Some(qa) = content.strip_prefix("User has answered your questions: ") {
+            // Take up to the first ". " delimiter
+            let text = if let Some(pos) = qa.find(". ") {
+                &qa[..pos]
+            } else {
+                qa
+            };
+            // Unicode-safe truncation
+            let chars: Vec<char> = text.chars().collect();
+            let display = if chars.len() > 150 {
+                let s: String = chars[..150].iter().collect();
+                format!("{}...", s)
+            } else {
+                text.to_string()
+            };
+            return format!("[User answered: {}]", display);
+        }
+        "[User answered]".to_string()
+    } else if content.starts_with("User has approved") {
+        "[User approved plan]".to_string()
+    } else if content.starts_with("The user doesn't want to proceed") {
+        // Extract: "the user said:\n<actual feedback>"
+        if let Some(pos) = content.find("the user said:\n") {
+            let feedback = &content[pos + "the user said:\n".len()..];
+            let chars: Vec<char> = feedback.chars().collect();
+            let truncated = if chars.len() > 100 {
+                let s: String = chars[..100].iter().collect();
+                format!("{}...", s)
+            } else {
+                feedback.to_string()
+            };
+            return format!("[User rejected: {}]", truncated.trim());
+        }
+        "[User rejected]".to_string()
+    } else {
+        format!("[User response: {}]", &content[..content.len().min(80)])
+    }
+}
+
+/// Simplify text content for display:
+/// - Replace fenced code blocks (```...```) with [Code] tag
+/// - Truncate text exceeding 500 characters
+fn simplify_text_content(text: &str) -> String {
+    simplify_text_content_with_limit(text, 500)
+}
+
+fn simplify_text_content_with_limit(text: &str, max_chars: usize) -> String {
+    let mut result = String::new();
+    let mut in_code_block = false;
+
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            if !in_code_block {
+                in_code_block = true;
+                let lang = line.trim_start().trim_start_matches('`').trim();
+                if lang.is_empty() {
+                    result.push_str("[Code]");
+                } else {
+                    result.push_str(&format!("[Code: {}]", lang));
+                }
+                result.push('\n');
+            } else {
+                in_code_block = false;
+            }
+        } else if !in_code_block {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+
+    let result = result.trim_end().to_string();
+
+    let chars: Vec<char> = result.chars().collect();
+    if chars.len() > max_chars {
+        let truncated: String = chars[..max_chars].iter().collect();
+        format!("{}...[truncated]", truncated.trim_end())
+    } else {
+        result
     }
 }
 
@@ -511,5 +720,252 @@ mod tests {
             file_path: "test.jsonl".to_string(),
         };
         assert_eq!(session.title(), Some("second-rename".to_string()));
+    }
+
+    #[test]
+    fn test_simplify_text_replaces_code_blocks() {
+        let input = "Here is some code:\n```rust\nfn main() {}\n```\nDone.";
+        let result = simplify_text_content(input);
+        assert!(result.contains("[Code: rust]"));
+        assert!(!result.contains("fn main"));
+        assert!(result.contains("Done."));
+    }
+
+    #[test]
+    fn test_simplify_text_bare_code_block() {
+        let input = "Before\n```\nsome code\n```\nAfter";
+        let result = simplify_text_content(input);
+        assert!(result.contains("[Code]"));
+        assert!(!result.contains("some code"));
+        assert!(result.contains("Before"));
+        assert!(result.contains("After"));
+    }
+
+    #[test]
+    fn test_simplify_text_truncates_long_content() {
+        let long_text = "a".repeat(600);
+        let result = simplify_text_content(&long_text);
+        assert!(result.contains("...[truncated]"));
+        assert!(result.len() < 600);
+    }
+
+    #[test]
+    fn test_simplify_text_no_truncation_for_short() {
+        let short = "Hello world";
+        let result = simplify_text_content(short);
+        assert_eq!(result, "Hello world");
+    }
+
+    #[test]
+    fn test_format_tool_use_block_with_file() {
+        let block = serde_json::json!({
+            "type": "tool_use",
+            "name": "Write",
+            "id": "toolu_123",
+            "input": {"file_path": "/src/main.rs", "content": "fn main() {}"}
+        });
+        let result = ConversationSession::format_content_block(&block);
+        assert_eq!(result, Some("[Tool: Write -> main.rs]".to_string()));
+    }
+
+    #[test]
+    fn test_format_tool_use_block_without_file() {
+        let block = serde_json::json!({
+            "type": "tool_use",
+            "name": "Bash",
+            "id": "toolu_123",
+            "input": {"command": "ls -la"}
+        });
+        let result = ConversationSession::format_content_block(&block);
+        assert_eq!(result, Some("[Tool: Bash]".to_string()));
+    }
+
+    #[test]
+    fn test_format_image_block() {
+        let block = serde_json::json!({
+            "type": "image",
+            "source": {"type": "base64", "media_type": "image/png", "data": "abc"}
+        });
+        let result = ConversationSession::format_content_block(&block);
+        assert_eq!(result, Some("[Image]".to_string()));
+    }
+
+    #[test]
+    fn test_format_tool_result_returns_none() {
+        let block = serde_json::json!({
+            "type": "tool_result",
+            "tool_use_id": "toolu_123",
+            "content": "File created"
+        });
+        let result = ConversationSession::format_content_block(&block);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_is_tool_result_entry_true() {
+        let entry: ConversationEntry = serde_json::from_value(serde_json::json!({
+            "type": "user",
+            "uuid": "1",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "abc", "content": "ok"}
+                ]
+            }
+        }))
+        .unwrap();
+        assert!(ConversationSession::is_tool_result_entry(&entry));
+    }
+
+    #[test]
+    fn test_is_tool_result_entry_false_for_real_user() {
+        let entry: ConversationEntry = serde_json::from_value(serde_json::json!({
+            "type": "user",
+            "uuid": "1",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Hello"}
+                ]
+            }
+        }))
+        .unwrap();
+        assert!(!ConversationSession::is_tool_result_entry(&entry));
+    }
+
+    #[test]
+    fn test_is_tool_result_entry_false_for_assistant() {
+        let entry: ConversationEntry = serde_json::from_value(serde_json::json!({
+            "type": "assistant",
+            "uuid": "1",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "text", "text": "Hi"}]
+            }
+        }))
+        .unwrap();
+        assert!(!ConversationSession::is_tool_result_entry(&entry));
+    }
+
+    #[test]
+    fn test_extract_display_content_assistant_mixed() {
+        let msg = serde_json::json!({
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "I'll create the file."},
+                {"type": "tool_use", "name": "Write", "id": "t1", "input": {"file_path": "/src/app.rs", "content": "..."}}
+            ]
+        });
+        let result = ConversationSession::extract_display_content(&msg, false).unwrap();
+        assert!(result.contains("I'll create the file."));
+        assert!(result.contains("[Tool: Write -> app.rs]"));
+    }
+
+    #[test]
+    fn test_extract_display_content_user_plain_string() {
+        let msg = serde_json::json!({
+            "role": "user",
+            "content": "Hello world"
+        });
+        let result = ConversationSession::extract_display_content(&msg, true).unwrap();
+        assert_eq!(result, "Hello world");
+    }
+
+    #[test]
+    fn test_extract_display_content_skips_system_content() {
+        let msg = serde_json::json!({
+            "role": "user",
+            "content": "<ide_opened_file>/src/main.rs</ide_opened_file>"
+        });
+        let result = ConversationSession::extract_display_content(&msg, true);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_display_content_skips_tool_result_only() {
+        let msg = serde_json::json!({
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}
+            ]
+        });
+        let result = ConversationSession::extract_display_content(&msg, true);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_user_interaction_answer_detected() {
+        assert!(is_user_interaction_result(
+            "User has answered your questions: \"tag lang\"=\"english\""
+        ));
+    }
+
+    #[test]
+    fn test_user_interaction_approved() {
+        assert!(is_user_interaction_result("User has approved your plan."));
+    }
+
+    #[test]
+    fn test_user_interaction_rejected() {
+        assert!(is_user_interaction_result(
+            "The user doesn't want to proceed with this tool use."
+        ));
+    }
+
+    #[test]
+    fn test_regular_tool_result_not_interaction() {
+        assert!(!is_user_interaction_result("File created successfully"));
+        assert!(!is_user_interaction_result("   1→use anyhow"));
+    }
+
+    #[test]
+    fn test_format_user_interaction_answer() {
+        let content = "User has answered your questions: \"Which lang?\"=\"English\". You can now continue.";
+        let result = format_user_interaction(content);
+        assert!(result.starts_with("[User answered:"));
+        assert!(result.contains("Which lang?"));
+        assert!(result.contains("English"));
+    }
+
+    #[test]
+    fn test_format_user_interaction_approved() {
+        let result = format_user_interaction("User has approved your plan. Start coding.");
+        assert_eq!(result, "[User approved plan]");
+    }
+
+    #[test]
+    fn test_format_user_interaction_rejected() {
+        let content = "The user doesn't want to proceed with this tool use. The tool use was rejected. To tell you how to proceed, the user said:\nPlease add memory search support";
+        let result = format_user_interaction(content);
+        assert!(result.starts_with("[User rejected:"));
+        assert!(result.contains("memory search"));
+    }
+
+    #[test]
+    fn test_is_tool_result_entry_not_skipped_for_user_interaction() {
+        let entry: ConversationEntry = serde_json::from_value(serde_json::json!({
+            "type": "user",
+            "uuid": "1",
+            "message": {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "User has answered your questions: \"q\"=\"a\""}
+                ]
+            }
+        }))
+        .unwrap();
+        // Should NOT be treated as a tool_result entry (should be displayed)
+        assert!(!ConversationSession::is_tool_result_entry(&entry));
+    }
+
+    #[test]
+    fn test_format_content_block_user_interaction_tool_result() {
+        let block = serde_json::json!({
+            "type": "tool_result",
+            "tool_use_id": "t1",
+            "content": "User has approved your plan."
+        });
+        let result = ConversationSession::format_content_block(&block);
+        assert_eq!(result, Some("[User approved plan]".to_string()));
     }
 }

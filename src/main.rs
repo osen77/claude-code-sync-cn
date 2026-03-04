@@ -464,10 +464,60 @@ enum SessionAction {
         show_ids: bool,
     },
 
-    /// Show session details
+    /// Search sessions and memory files by keyword
+    Search {
+        /// Search keyword
+        keyword: String,
+
+        /// Filter by project name
+        #[arg(short, long)]
+        project: Option<String>,
+
+        /// Only search sessions active within this duration (e.g., "1d", "3h", "1w")
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Context chars around each match (default: 100)
+        #[arg(short, long, default_value_t = 100)]
+        context: usize,
+
+        /// Maximum number of match results (default: 10)
+        #[arg(short = 'n', long, default_value_t = 10)]
+        limit: usize,
+
+        /// Search only user messages (default: both user and assistant)
+        #[arg(long)]
+        user_only: bool,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show session details (supports drill-down with --tail/--head/--around)
     Show {
         /// Session ID
         session_id: String,
+
+        /// Show last N messages
+        #[arg(long)]
+        tail: Option<usize>,
+
+        /// Show first N messages
+        #[arg(long)]
+        head: Option<usize>,
+
+        /// Show N messages around keyword match
+        #[arg(long)]
+        around: Option<String>,
+
+        /// Number of messages before/after for --around (default: 5)
+        #[arg(short = 'n', long, default_value_t = 5)]
+        num: usize,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Rename session (change title)
@@ -914,8 +964,42 @@ fn main() -> Result<()> {
                     let filter = list_project.as_deref().or(project.as_deref());
                     handle_session_list(filter, show_ids)?;
                 }
-                Some(SessionAction::Show { session_id }) => {
-                    handle_session_show(&session_id)?;
+                Some(SessionAction::Search {
+                    keyword,
+                    project: search_project,
+                    since,
+                    context,
+                    limit,
+                    user_only,
+                    json,
+                }) => {
+                    let filter = search_project.as_deref().or(project.as_deref());
+                    handle_session_search(
+                        &keyword,
+                        filter,
+                        since.as_deref(),
+                        context,
+                        limit,
+                        user_only,
+                        json,
+                    )?;
+                }
+                Some(SessionAction::Show {
+                    session_id,
+                    tail,
+                    head,
+                    around,
+                    num,
+                    json,
+                }) => {
+                    handle_session_show(
+                        &session_id,
+                        tail,
+                        head,
+                        around.as_deref(),
+                        num,
+                        json,
+                    )?;
                 }
                 Some(SessionAction::Rename { session_id, title }) => {
                     handle_session_rename(&session_id, &title)?;
