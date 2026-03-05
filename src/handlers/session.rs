@@ -51,22 +51,38 @@ pub struct SessionSummary {
 }
 
 impl SessionSummary {
-    /// Create a SessionSummary from a ConversationSession
+    /// Create a SessionSummary from a ConversationSession.
+    /// Message counts use "turn" granularity: consecutive assistant entries
+    /// between two user messages count as one assistant turn.
     pub fn from_session(session: &ConversationSession, project_name: &str, project_dir: &Path) -> Self {
         let file_size = fs::metadata(&session.file_path)
             .map(|m| m.len())
             .unwrap_or(0);
 
-        let user_count = session
-            .entries
-            .iter()
-            .filter(|e| e.entry_type == "user")
-            .count();
-        let assistant_count = session
-            .entries
-            .iter()
-            .filter(|e| e.entry_type == "assistant")
-            .count();
+        // Count turns: user turns = non-tool-result user entries,
+        // assistant turns = groups of consecutive assistant entries between user entries
+        let mut user_count = 0;
+        let mut assistant_count = 0;
+        let mut in_assistant_turn = false;
+
+        for entry in &session.entries {
+            match entry.entry_type.as_str() {
+                "user" => {
+                    if ConversationSession::is_tool_result_entry(entry) {
+                        continue;
+                    }
+                    user_count += 1;
+                    in_assistant_turn = false;
+                }
+                "assistant" => {
+                    if !in_assistant_turn {
+                        assistant_count += 1;
+                        in_assistant_turn = true;
+                    }
+                }
+                _ => {}
+            }
+        }
 
         SessionSummary {
             session_id: session.session_id.clone(),
@@ -74,7 +90,7 @@ impl SessionSummary {
             project_name: project_name.to_string(),
             project_dir: project_dir.to_path_buf(),
             file_path: PathBuf::from(&session.file_path),
-            message_count: session.message_count(),
+            message_count: user_count + assistant_count,
             user_message_count: user_count,
             assistant_message_count: assistant_count,
             first_timestamp: session.first_timestamp(),
@@ -1476,10 +1492,17 @@ struct DisplayMessage {
     content: String,
 }
 
-/// Collect displayable messages from a conversation (filtering tool_result entries)
+/// Collect displayable messages from a conversation.
+/// Merges all assistant entries between two user messages into a single reply,
+/// with tool calls summarized in one line.
 fn collect_display_messages(conv: &ConversationSession) -> Vec<DisplayMessage> {
     let mut messages = Vec::new();
     let mut index = 0;
+
+    // Accumulator for current assistant turn
+    let mut assistant_texts: Vec<String> = Vec::new();
+    let mut assistant_tools: Vec<(String, Option<String>)> = Vec::new();
+    let mut assistant_ts: Option<String> = None;
 
     for entry in &conv.entries {
         match entry.entry_type.as_str() {
@@ -1493,24 +1516,114 @@ fn collect_display_messages(conv: &ConversationSession) -> Vec<DisplayMessage> {
 
         let is_user = entry.entry_type == "user";
 
-        if let Some(msg) = entry.message.as_ref() {
-            if let Some(text) = ConversationSession::extract_display_content(msg, is_user) {
-                index += 1;
-                messages.push(DisplayMessage {
-                    index,
-                    role: if is_user {
-                        "user".to_string()
-                    } else {
-                        "assistant".to_string()
-                    },
-                    timestamp: entry.timestamp.clone(),
-                    content: text,
-                });
+        if is_user {
+            // Flush accumulated assistant turn
+            flush_assistant_turn(
+                &mut messages,
+                &mut index,
+                &mut assistant_texts,
+                &mut assistant_tools,
+                &mut assistant_ts,
+            );
+
+            // Emit user message
+            if let Some(msg) = entry.message.as_ref() {
+                if let Some(text) = ConversationSession::extract_display_content(msg, true) {
+                    index += 1;
+                    messages.push(DisplayMessage {
+                        index,
+                        role: "user".to_string(),
+                        timestamp: entry.timestamp.clone(),
+                        content: text,
+                    });
+                }
+            }
+        } else {
+            // Assistant entry: accumulate
+            if assistant_ts.is_none() {
+                assistant_ts = entry.timestamp.clone();
+            }
+
+            if let Some(msg) = entry.message.as_ref() {
+                // Single-pass: try_extract_tool_info returns Some for tool-only messages
+                if let Some(tools) = ConversationSession::try_extract_tool_info(msg) {
+                    assistant_tools.extend(tools);
+                } else if let Some(text) =
+                    ConversationSession::extract_display_content(msg, false)
+                {
+                    assistant_texts.push(text);
+                }
             }
         }
     }
 
+    // Flush remaining assistant turn
+    flush_assistant_turn(
+        &mut messages,
+        &mut index,
+        &mut assistant_texts,
+        &mut assistant_tools,
+        &mut assistant_ts,
+    );
+
     messages
+}
+
+/// Flush accumulated assistant texts and tools into a single DisplayMessage.
+fn flush_assistant_turn(
+    messages: &mut Vec<DisplayMessage>,
+    index: &mut usize,
+    texts: &mut Vec<String>,
+    tools: &mut Vec<(String, Option<String>)>,
+    ts: &mut Option<String>,
+) {
+    if texts.is_empty() && tools.is_empty() {
+        return;
+    }
+    let mut parts = Vec::new();
+    parts.extend(texts.drain(..));
+    if !tools.is_empty() {
+        parts.push(format_tool_summary(tools));
+        tools.clear();
+    }
+    *index += 1;
+    messages.push(DisplayMessage {
+        index: *index,
+        role: "assistant".to_string(),
+        timestamp: ts.take(),
+        content: parts.join("\n"),
+    });
+}
+
+/// Format accumulated tool calls into a compact summary.
+/// Groups by tool name, shows files per tool.
+/// Output: "[Tools: Read -> file1.rs|file2.rs, Edit -> main.rs, Bash]"
+fn format_tool_summary(tools: &[(String, Option<String>)]) -> String {
+    use std::collections::BTreeMap;
+
+    // Group files by tool name, preserving order via BTreeMap
+    let mut grouped: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for (name, file) in tools {
+        let entry = grouped.entry(name.as_str()).or_default();
+        if let Some(f) = file {
+            if !entry.contains(&f.as_str()) {
+                entry.push(f.as_str());
+            }
+        }
+    }
+
+    let parts: Vec<String> = grouped
+        .into_iter()
+        .map(|(name, files)| {
+            if files.is_empty() {
+                name.to_string()
+            } else {
+                format!("{} -> {}", name, files.join("|"))
+            }
+        })
+        .collect();
+
+    format!("[Tools: {}]", parts.join(", "))
 }
 
 /// Parse a duration string (e.g., "1d", "3h", "1w") into a cutoff DateTime
