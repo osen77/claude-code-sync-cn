@@ -325,6 +325,30 @@ impl ConversationSession {
         self.entries.iter().filter_map(|e| e.timestamp.clone()).next()
     }
 
+    /// Try to extract tool info from a tool-only message (all blocks are tool_use).
+    /// Returns None if the message contains any non-tool_use blocks.
+    /// Returns Some(vec) with (tool_name, optional_file_hint) for each tool call.
+    pub fn try_extract_tool_info(message: &Value) -> Option<Vec<(String, Option<String>)>> {
+        let arr = message.get("content")?.as_array()?;
+        if arr.is_empty() {
+            return None;
+        }
+        let mut tools = Vec::new();
+        for block in arr {
+            if block.get("type").and_then(|t| t.as_str()) != Some("tool_use") {
+                return None; // Not tool-only
+            }
+            let name = block
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let file = extract_file_hint(block).map(|s| s.to_string());
+            tools.push((name, file));
+        }
+        Some(tools)
+    }
+
     /// Format a single content block for display.
     /// Simplifies tool_use, tool_result, image blocks into tags.
     pub fn format_content_block(block: &Value) -> Option<String> {
@@ -343,15 +367,7 @@ impl ConversationSession {
                     .get("name")
                     .and_then(|n| n.as_str())
                     .unwrap_or("unknown");
-                let hint = block
-                    .get("input")
-                    .and_then(|inp| inp.get("file_path"))
-                    .and_then(|fp| fp.as_str())
-                    .and_then(|fp| {
-                        fp.split(&['/', '\\'])
-                            .rfind(|s| !s.is_empty())
-                    });
-                if let Some(file) = hint {
+                if let Some(file) = extract_file_hint(block) {
                     Some(format!("[Tool: {} -> {}]", name, file))
                 } else {
                     Some(format!("[Tool: {}]", name))
@@ -454,6 +470,15 @@ impl ConversationSession {
         }
         format!("{:x}", hasher.finish())
     }
+}
+
+/// Extract file basename hint from a tool_use block's input.file_path.
+fn extract_file_hint<'a>(block: &'a Value) -> Option<&'a str> {
+    block
+        .get("input")
+        .and_then(|inp| inp.get("file_path"))
+        .and_then(|fp| fp.as_str())
+        .and_then(|fp| fp.split(&['/', '\\']).rfind(|s| !s.is_empty()))
 }
 
 /// Check if a tool_result content is a user interaction response.
