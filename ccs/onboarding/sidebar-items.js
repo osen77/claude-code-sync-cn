@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CloneLocation","RepoType"],"fn":["default_scm_backend","default_sync_subdirectory","expand_tilde","is_valid_git_url","run_onboarding"],"struct":["InitConfig","OnboardingConfig"]};
