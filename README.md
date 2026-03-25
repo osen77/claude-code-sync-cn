@@ -19,12 +19,40 @@
 
 ### 安装
 
+**一键安装（推荐）：**
+
 ```bash
-# macOS / Linux
+# macOS Apple Silicon (M1/M2/M3/M4)
+curl -fsSL https://github.com/osen77/claude-code-sync-cn/releases/latest/download/ccs-macos-aarch64.tar.gz | tar xz && sudo mv ccs /usr/local/bin/
+
+# macOS Intel
+curl -fsSL https://github.com/osen77/claude-code-sync-cn/releases/latest/download/ccs-macos-x86_64.tar.gz | tar xz && sudo mv ccs /usr/local/bin/
+
+# Linux x86_64
+curl -fsSL https://github.com/osen77/claude-code-sync-cn/releases/latest/download/ccs-linux-x86_64.tar.gz | tar xz && sudo mv ccs /usr/local/bin/
+```
+
+**其他安装方式：**
+
+```bash
+# 安装脚本（自动检测平台）
 curl -fsSL https://raw.githubusercontent.com/osen77/claude-code-sync-cn/main/install.sh | bash
 
 # Windows PowerShell
 irm https://raw.githubusercontent.com/osen77/claude-code-sync-cn/main/install.ps1 | iex
+
+# 从源码编译
+git clone https://github.com/osen77/claude-code-sync-cn && cd claude-code-sync && cargo install --path .
+```
+
+### 更新
+
+```bash
+# 自动更新
+ccs update
+
+# 或使用安装命令重新下载覆盖（适用于旧版本无 update 命令的情况）
+curl -fsSL https://github.com/osen77/claude-code-sync-cn/releases/latest/download/ccs-macos-aarch64.tar.gz | tar xz && sudo mv ccs $(which ccs)
 ```
 
 ### 配置
@@ -34,10 +62,11 @@ ccs setup
 ```
 
 向导会引导你完成所有配置，包括：
-1. 选择同步模式
-2. 配置远程仓库
-3. 设置本地目录
+1. 选择同步模式（多设备 / 单设备）
+2. 配置远程仓库（已有仓库或自动创建）
+3. 设置过滤选项（排除附件、旧对话）
 4. 配置自动同步（推荐）
+5. 配置跨设备配置同步
 
 ### 使用
 
@@ -45,6 +74,12 @@ ccs setup
 
 ```bash
 claude-sync
+```
+
+### 卸载
+
+```bash
+ccs uninstall
 ```
 
 ## 文档
@@ -61,9 +96,11 @@ claude-sync
 | `ccs sync` | 双向同步 |
 | `ccs automate` | 配置自动同步 |
 | `ccs status` | 查看同步状态 |
+| `ccs session` | 会话管理 |
 | `ccs config-sync push` | 推送配置到远程 |
 | `ccs config-sync apply <device>` | 应用其他设备配置 |
 | `ccs update` | 更新到最新版本 |
+| `ccs uninstall` | 卸载并清理所有数据 |
 
 更多命令请参阅 [用户指南](docs/user-guide.md)。
 
@@ -133,4 +170,4 @@ macOS 专用配置
 
 ---
 
-*最后更新: 2026-02-04*
+*最后更新: 2026-03-26*

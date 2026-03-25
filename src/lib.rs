@@ -98,11 +98,11 @@ pub mod logger;
 /// and entries without UUIDs (merged by timestamp).
 pub mod merge;
 
-/// Interactive onboarding flow for first-time setup.
+/// Non-interactive initialization support.
 ///
-/// Guides users through initial configuration including repository setup (clone vs local),
-/// remote URL configuration, and filter preferences. Uses terminal UI prompts to collect
-/// user preferences and validates inputs before saving configuration.
+/// Provides `InitConfig` for TOML-based initialization (CI/CD, automation)
+/// and `OnboardingConfig` as an intermediate config structure.
+/// The interactive setup wizard lives in `handlers::setup`.
 pub mod onboarding;
 
 /// JSONL conversation file parsing and serialization.
