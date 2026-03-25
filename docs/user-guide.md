@@ -6,7 +6,7 @@
 
 ## 目录
 
-- [快速安装](#快速安装)
+- [安装与更新](#安装与更新)
 - [多设备同步配置](#多设备同步配置)
 - [日常使用](#日常使用)
 - [自动同步（推荐）](#自动同步推荐)
@@ -15,12 +15,32 @@
 - [常用命令示例](#常用命令示例)
 - [高级配置](#高级配置)
 - [故障排查](#故障排查)
+- [卸载](#卸载)
 
 ---
 
-## 快速安装
+## 安装与更新
 
 ### 一键安装（推荐）
+
+直接下载最新版预编译二进制，无需额外依赖：
+
+```bash
+# macOS Apple Silicon (M1/M2/M3/M4)
+curl -fsSL https://github.com/osen77/claude-code-sync-cn/releases/latest/download/ccs-macos-aarch64.tar.gz | tar xz && sudo mv ccs /usr/local/bin/
+
+# macOS Intel
+curl -fsSL https://github.com/osen77/claude-code-sync-cn/releases/latest/download/ccs-macos-x86_64.tar.gz | tar xz && sudo mv ccs /usr/local/bin/
+
+# Linux x86_64
+curl -fsSL https://github.com/osen77/claude-code-sync-cn/releases/latest/download/ccs-linux-x86_64.tar.gz | tar xz && sudo mv ccs /usr/local/bin/
+```
+
+> **不确定你的 Mac 芯片？** 运行 `uname -m`，输出 `arm64` 是 Apple Silicon，`x86_64` 是 Intel。
+
+### 安装脚本
+
+自动检测平台并安装：
 
 ```bash
 # macOS / Linux
@@ -30,11 +50,6 @@ curl -fsSL https://raw.githubusercontent.com/osen77/claude-code-sync-cn/main/ins
 irm https://raw.githubusercontent.com/osen77/claude-code-sync-cn/main/install.ps1 | iex
 ```
 
-安装脚本会：
-1. 下载预编译二进制文件
-2. 添加到 PATH
-3. 运行交互式配置向导 (`setup`)
-
 ### 从源码安装
 
 ```bash
@@ -42,6 +57,18 @@ git clone https://github.com/osen77/claude-code-sync-cn
 cd claude-code-sync
 cargo install --path .
 ```
+
+### 更新
+
+```bash
+# 方式一：内置更新命令
+ccs update
+
+# 方式二：重新下载覆盖（适用于旧版本无 update 命令的情况）
+curl -fsSL https://github.com/osen77/claude-code-sync-cn/releases/latest/download/ccs-macos-aarch64.tar.gz | tar xz && sudo mv ccs $(which ccs)
+```
+
+> 将 URL 中的 `ccs-macos-aarch64` 替换为你的平台：`ccs-macos-x86_64`（Intel Mac）、`ccs-linux-x86_64`（Linux）。
 
 ---
 
@@ -64,8 +91,10 @@ ccs setup
 1. 选择同步模式（多设备/单设备）
 2. 输入或创建远程仓库
 3. 设置本地备份目录
-4. 可选执行首次同步
-5. 配置自动同步（推荐）- 启动时自动拉取，退出时自动推送
+4. 设置过滤选项（排除附件、旧对话）
+5. 可选执行首次同步
+6. 配置自动同步（推荐）- 启动时自动拉取，退出时自动推送
+7. 配置跨设备配置同步
 
 ### 设备 B（加入同步）
 
@@ -419,11 +448,11 @@ ccs session delete <session-id> --force
 
 | 命令 | 说明 |
 |------|------|
+| `ccs setup` | 交互式配置向导 |
 | `ccs sync` | 双向同步 |
 | `ccs pull` | 拉取远程更新 |
 | `ccs push` | 推送本地更新 |
 | `ccs status` | 查看同步状态 |
-| `ccs update` | 检查更新 |
 | `ccs automate` | 配置自动同步 |
 | `ccs session` | 交互式会话管理 |
 | `ccs session list` | 列出所有会话 |
@@ -436,6 +465,8 @@ ccs session delete <session-id> --force
 | `ccs config-sync status` | 查看配置同步状态 |
 | `ccs hooks show` | 查看 hooks 状态 |
 | `ccs wrapper show` | 查看包装脚本状态 |
+| `ccs update` | 更新到最新版本 |
+| `ccs uninstall` | 卸载并清理所有数据 |
 
 ### 配置管理
 
@@ -577,9 +608,31 @@ cat ~/.ssh/id_ed25519.pub  # 添加到 GitHub
 # 检查更新
 ccs update --check-only
 
-# 手动更新
+# 自动更新
 ccs update
+
+# 如果 update 命令不可用（旧版本），直接下载替换：
+curl -fsSL https://github.com/osen77/claude-code-sync-cn/releases/latest/download/ccs-macos-aarch64.tar.gz | tar xz && sudo mv ccs $(which ccs)
 ```
+
+---
+
+## 卸载
+
+```bash
+# 交互式卸载（逐步确认清理范围）
+ccs uninstall
+
+# 强制卸载（跳过确认）
+ccs uninstall --force
+```
+
+卸载会清理：
+1. Claude Code hooks（从 `~/.claude/settings.json` 移除）
+2. 启动包装脚本（`claude-sync`）
+3. 配置目录（state.json、config.toml、日志等）
+4. 同步仓库（需单独确认，可能包含未推送的对话历史）
+5. ccs 二进制本身（需单独确认）
 
 ---
 
@@ -617,4 +670,4 @@ ccs update
 
 ---
 
-*最后更新: 2026-02-05*
+*最后更新: 2026-03-26*

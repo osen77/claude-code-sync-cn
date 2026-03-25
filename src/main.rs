@@ -255,6 +255,13 @@ enum Commands {
         check_only: bool,
     },
 
+    /// Uninstall ccs and clean up all artifacts
+    Uninstall {
+        /// Skip confirmation prompts
+        #[arg(long)]
+        force: bool,
+    },
+
     /// Clean up old snapshot files
     CleanupSnapshots {
         /// Show what would be deleted without actually deleting
@@ -608,10 +615,12 @@ fn main() -> Result<()> {
     let is_init_command = matches!(command, Commands::Init { .. });
     let is_config_command = matches!(command, Commands::Config { .. });
     let is_session_command = matches!(command, Commands::Session { .. });
+    let is_setup_command = matches!(command, Commands::Setup { .. });
+    let is_update_command = matches!(command, Commands::Update { .. });
+    let is_uninstall_command = matches!(command, Commands::Uninstall { .. });
 
-    // Run onboarding if needed (skip for Init, Config, and Session commands)
-    // Session is a local-only feature that doesn't require sync repo configuration
-    if needs_onboarding && !is_init_command && !is_config_command && !is_session_command {
+    // Run onboarding if needed (skip for commands that don't require sync repo)
+    if needs_onboarding && !is_init_command && !is_config_command && !is_session_command && !is_setup_command && !is_update_command && !is_uninstall_command {
         log::info!("Running onboarding flow - first time setup detected");
 
         // Try non-interactive init first (from config file)
@@ -623,8 +632,8 @@ fn main() -> Result<()> {
         }
 
         if !initialized {
-            // Fall back to interactive onboarding
-            run_onboarding_flow()?;
+            // Fall back to interactive setup wizard
+            handle_setup(false)?;
         }
 
         log::info!("Onboarding completed successfully");
@@ -692,10 +701,9 @@ fn main() -> Result<()> {
                     "Clone and initialization complete!".green().bold()
                 );
             } else {
-                // No args provided, try config file first, then fall back to interactive onboarding
+                // No args provided, try config file first, then fall back to setup wizard
                 if !try_init_from_config()? {
-                    // No config file found, run interactive onboarding
-                    run_onboarding_flow()?;
+                    handle_setup(false)?;
                 }
             }
         }
@@ -879,6 +887,9 @@ fn main() -> Result<()> {
         }
         Commands::Update { check_only } => {
             handle_update(check_only)?;
+        }
+        Commands::Uninstall { force } => {
+            handle_uninstall(force)?;
         }
         Commands::CleanupSnapshots {
             dry_run,

@@ -6,11 +6,11 @@
 use anyhow::{Context, Result};
 use colored::Colorize;
 use inquire::{Confirm, Select, Text};
-use std::path::PathBuf;
 use std::process::Command;
 
 use crate::config::ConfigManager;
 use crate::filter::FilterConfig;
+use crate::onboarding::{expand_tilde, is_valid_git_url};
 use crate::scm;
 use crate::sync;
 use crate::BINARY_NAME;
@@ -193,14 +193,6 @@ fn create_github_repo(repo_name: &str, private: bool) -> Result<String> {
     println!();
     println!("{}", format!("📦 正在创建仓库 {}...", repo_name).cyan());
 
-    let mut args = vec!["repo", "create", repo_name, "--clone=false", "--source=."];
-    if private {
-        args.push("--private");
-    } else {
-        args.push("--public");
-    }
-
-    // Get the repo URL using gh repo create
     let output = Command::new("gh")
         .args(["repo", "create", repo_name, if private { "--private" } else { "--public" }, "--clone=false"])
         .output()
@@ -265,6 +257,77 @@ fn ensure_gh_ready() -> Result<()> {
     Ok(())
 }
 
+/// Prompt user to confirm overwriting a directory, then delete and clone.
+/// Returns Ok(true) if cloned, Ok(false) if user cancelled.
+fn confirm_overwrite_and_clone(
+    local_path: &std::path::Path,
+    remote_url: &str,
+    prompt: &str,
+) -> Result<bool> {
+    let overwrite = Confirm::new(prompt)
+        .with_default(false)
+        .prompt()
+        .unwrap_or(false);
+
+    if overwrite {
+        std::fs::remove_dir_all(local_path).context("删除已有目录失败")?;
+        println!("{}", "📥 正在克隆仓库...".cyan());
+        clone_with_retry(remote_url, local_path)?;
+        Ok(true)
+    } else {
+        println!("{}", "已取消。请手动清理目录后重试。".yellow());
+        Ok(false)
+    }
+}
+
+/// Normalize a git URL for comparison (strip .git suffix, trailing slashes, protocol differences).
+fn normalize_git_url(url: &str) -> String {
+    url.trim()
+        .trim_end_matches('/')
+        .trim_end_matches(".git")
+        .to_lowercase()
+}
+
+/// Clone with retry logic for authentication and repo-not-found errors.
+fn clone_with_retry(remote_url: &str, local_path: &std::path::Path) -> Result<()> {
+    let clone_result = scm::clone(remote_url, local_path);
+
+    if let Err(e) = clone_result {
+        let handle_result = handle_clone_failure(&e, remote_url);
+
+        match handle_result {
+            Ok(()) => {
+                // Retry clone after authentication
+                println!();
+                println!("{}", "📥 重新尝试克隆...".cyan());
+                scm::clone(remote_url, local_path).context("重试克隆仍然失败")?;
+            }
+            Err(ref retry_err) if retry_err.to_string() == "REPO_NOT_FOUND_CREATE_NEW" => {
+                // User wants to create new repo
+                ensure_gh_ready()?;
+
+                let repo_name = Text::new("新仓库名称:")
+                    .with_default("claude-code-history")
+                    .prompt()
+                    .context("取消输入仓库名称")?;
+
+                let private = Confirm::new("设为私有仓库?")
+                    .with_default(true)
+                    .prompt()
+                    .unwrap_or(true);
+
+                let new_url = create_github_repo(&repo_name, private)?;
+
+                println!();
+                println!("{}", "📥 克隆新仓库...".cyan());
+                scm::clone(&new_url, local_path).context("克隆新仓库失败")?;
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
 /// Handle clone failure with helpful guidance
 fn handle_clone_failure(error: &anyhow::Error, remote_url: &str) -> Result<()> {
     let error_msg = error.to_string().to_lowercase();
@@ -273,7 +336,11 @@ fn handle_clone_failure(error: &anyhow::Error, remote_url: &str) -> Result<()> {
     println!("{}", "❌ 克隆仓库失败".red().bold());
     println!();
 
-    if error_msg.contains("authentication") || error_msg.contains("auth") || error_msg.contains("permission") || error_msg.contains("403") || error_msg.contains("401") {
+    if error_msg.contains("no such file or directory") || error_msg.contains("not recognized") || error_msg.contains("command not found") {
+        // Git not installed (shouldn't happen if pre-flight check passes, but just in case)
+        println!("{}", "💡 未找到 git 命令。请先安装 Git:".yellow());
+        print_git_install_instructions();
+    } else if error_msg.contains("authentication") || error_msg.contains("auth") || error_msg.contains("permission") || error_msg.contains("403") || error_msg.contains("401") {
         // Authentication error
         println!("{}", "💡 这可能是认证问题。解决方案:".yellow());
         println!();
@@ -296,23 +363,38 @@ fn handle_clone_failure(error: &anyhow::Error, remote_url: &str) -> Result<()> {
             return Ok(()); // Signal to retry clone
         }
     } else if error_msg.contains("not found") || error_msg.contains("404") || error_msg.contains("does not exist") {
-        // Repository not found
-        println!("{}", "💡 仓库不存在。解决方案:".yellow());
+        // Repository not found — could be genuinely missing OR a private repo without access
+        // (GitHub returns "not found" for unauthorized access to private repos)
+        println!("{}", "💡 仓库不存在或无访问权限。".yellow());
         println!();
-        println!("   1. 检查仓库地址是否正确");
-        println!("   2. 确认仓库是否已创建");
-        println!("   3. 如果是私有仓库，请确认有访问权限");
+        println!("   可能的原因:");
+        println!("   1. 仓库地址不正确");
+        println!("   2. 仓库尚未创建");
+        println!("   3. {}", "这是一个私有仓库，需要先登录 GitHub".cyan());
         println!();
-        println!("   {}", format!("   当前地址: {}", remote_url).cyan());
+        println!("   当前地址: {}", remote_url.cyan());
         println!();
 
-        let create_new = Confirm::new("是否创建新仓库?")
-            .with_default(true)
-            .prompt()
-            .unwrap_or(false);
+        let action = Select::new(
+            "请选择:",
+            vec![
+                "先登录 GitHub 再重试 (私有仓库推荐)",
+                "创建新仓库",
+                "取消",
+            ],
+        )
+        .prompt()
+        .unwrap_or("取消");
 
-        if create_new {
-            return Err(anyhow::anyhow!("REPO_NOT_FOUND_CREATE_NEW"));
+        match action {
+            "先登录 GitHub 再重试 (私有仓库推荐)" => {
+                ensure_gh_ready()?;
+                return Ok(()); // Signal to retry clone
+            }
+            "创建新仓库" => {
+                return Err(anyhow::anyhow!("REPO_NOT_FOUND_CREATE_NEW"));
+            }
+            _ => {}
         }
     } else {
         // Generic error
@@ -327,6 +409,13 @@ fn handle_clone_failure(error: &anyhow::Error, remote_url: &str) -> Result<()> {
     Err(anyhow::anyhow!("克隆失败，请解决上述问题后重试"))
 }
 
+/// Print git installation instructions for each platform.
+fn print_git_install_instructions() {
+    println!("   macOS:   brew install git");
+    println!("   Ubuntu:  sudo apt-get install git");
+    println!("   Windows: https://git-scm.com/download/win");
+}
+
 /// Run the interactive setup wizard
 pub fn handle_setup(skip_sync: bool) -> Result<()> {
     println!();
@@ -336,6 +425,15 @@ pub fn handle_setup(skip_sync: bool) -> Result<()> {
     );
     println!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".cyan());
     println!();
+
+    // Pre-flight: ensure git is installed
+    if !scm::Backend::Git.is_available() {
+        println!("{}", "❌ 未检测到 Git".red().bold());
+        println!();
+        println!("{}", "💡 请先安装 Git:".yellow());
+        print_git_install_instructions();
+        return Err(anyhow::anyhow!("需要安装 Git 才能使用 Claude Code Sync"));
+    }
 
     // Step 1: Select sync mode
     let sync_mode = Select::new(
@@ -478,45 +576,50 @@ pub fn handle_setup(skip_sync: bool) -> Result<()> {
     println!();
 
     // Step 4: Clone repository (with retry logic)
-    println!("{}", "📥 正在克隆仓库...".cyan());
+    // Check if the target directory already exists
+    if local_path.exists() {
+        if scm::is_repo(&local_path) {
+            // It's already a git repo — check if it's the same remote
+            let existing_scm = scm::open(&local_path).context("无法打开已有仓库")?;
+            let existing_remote = existing_scm.get_remote_url("origin").unwrap_or_default();
 
-    let clone_result = scm::clone(&remote_url, &local_path);
+            let remote_matches = normalize_git_url(&existing_remote) == normalize_git_url(&remote_url);
 
-    if let Err(e) = clone_result {
-        let handle_result = handle_clone_failure(&e, &remote_url);
-
-        match handle_result {
-            Ok(()) => {
-                // Retry clone after authentication
+            if remote_matches {
+                println!("{}", "📦 检测到已有仓库，正在拉取最新变更...".cyan());
+                let branch = existing_scm.current_branch().unwrap_or_else(|_| "main".to_string());
+                existing_scm.pull("origin", &branch).ok(); // best-effort pull
+            } else {
+                println!("{}", "⚠️  目标目录已存在一个不同的仓库".yellow().bold());
+                println!("   已有远程: {}", existing_remote);
+                println!("   新的远程: {}", remote_url);
                 println!();
-                println!("{}", "📥 重新尝试克隆...".cyan());
-                scm::clone(&remote_url, &local_path).context("重试克隆仍然失败")?;
+
+                if !confirm_overwrite_and_clone(&local_path, &remote_url, "是否删除已有仓库并重新克隆?")? {
+                    return Ok(());
+                }
             }
-            Err(ref retry_err) if retry_err.to_string() == "REPO_NOT_FOUND_CREATE_NEW" => {
-                // User wants to create new repo
-                ensure_gh_ready()?;
-
-                let repo_name = Text::new("新仓库名称:")
-                    .with_default("claude-code-history")
-                    .prompt()
-                    .context("取消输入仓库名称")?;
-
-                let private = Confirm::new("设为私有仓库?")
-                    .with_default(true)
-                    .prompt()
-                    .unwrap_or(true);
-
-                let new_url = create_github_repo(&repo_name, private)?;
-
+        } else {
+            // Directory exists but is not a git repo
+            let is_empty = local_path.read_dir().map(|mut d| d.next().is_none()).unwrap_or(false);
+            if is_empty {
+                // Empty directory — remove it so clone can proceed
+                std::fs::remove_dir(&local_path).ok();
+                println!("{}", "📥 正在克隆仓库...".cyan());
+                clone_with_retry(&remote_url, &local_path)?;
+            } else {
+                println!("{}", "⚠️  目标目录已存在且不是 Git 仓库".yellow().bold());
+                println!("   路径: {}", local_path.display());
                 println!();
-                println!("{}", "📥 克隆新仓库...".cyan());
-                scm::clone(&new_url, &local_path).context("克隆新仓库失败")?;
 
-                // Update remote_url for later use
-                // Note: we continue with new_url
+                if !confirm_overwrite_and_clone(&local_path, &remote_url, "是否删除该目录并重新克隆?")? {
+                    return Ok(());
+                }
             }
-            Err(e) => return Err(e),
         }
+    } else {
+        println!("{}", "📥 正在克隆仓库...".cyan());
+        clone_with_retry(&remote_url, &local_path)?;
     }
 
     println!("{}", "✓ 仓库克隆成功".green());
@@ -525,16 +628,38 @@ pub fn handle_setup(skip_sync: bool) -> Result<()> {
     sync::init_from_onboarding(&local_path, Some(&remote_url), true)
         .context("初始化同步状态失败")?;
 
-    // Step 6: Save filter configuration
-    let filter_config = FilterConfig {
+    // Step 6: Filter preferences
+    let exclude_attachments = Confirm::new("是否排除文件附件 (图片、PDF 等)?")
+        .with_default(true)
+        .with_help_message("仅同步 .jsonl 对话文件，排除附件可减少存储空间")
+        .prompt()
+        .unwrap_or(true);
+
+    let exclude_old = Confirm::new("是否排除旧对话?")
+        .with_default(false)
+        .with_help_message("仅同步近期修改的对话")
+        .prompt()
+        .unwrap_or(false);
+
+    let exclude_older_than_days = if exclude_old {
+        let days_str = Text::new("排除多少天前的对话:")
+            .with_default("30")
+            .prompt()
+            .unwrap_or_else(|_| "30".to_string());
+
+        days_str.parse::<u32>().ok()
+    } else {
+        None
+    };
+
+    // Build filter configuration (will be saved after all preferences are collected)
+    let mut filter_config = FilterConfig {
         use_project_name_only,
         sync_subdirectory: "projects".to_string(),
+        exclude_attachments,
+        exclude_older_than_days,
         ..Default::default()
     };
-    filter_config.save().context("保存配置失败")?;
-
-    println!("{}", "✓ 配置已保存".green());
-    println!();
 
     // Step 7: Optional initial sync
     if !skip_sync {
@@ -613,8 +738,7 @@ pub fn handle_setup(skip_sync: bool) -> Result<()> {
         .prompt()
         .unwrap_or(true);
 
-    // Update filter config with config sync settings
-    let mut filter_config = FilterConfig::load().unwrap_or_default();
+    // Update config sync settings on the same filter_config
     filter_config.config_sync.enabled = sync_config;
 
     if sync_config {
@@ -645,8 +769,8 @@ pub fn handle_setup(skip_sync: bool) -> Result<()> {
             .unwrap_or(true);
     }
 
-    filter_config.save().context("保存配置同步设置失败")?;
-    println!("{}", "✓ 配置同步设置已保存".green());
+    filter_config.save().context("保存配置失败")?;
+    println!("{}", "✓ 配置已保存".green());
 
     println!();
     println!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".green());
@@ -671,26 +795,4 @@ pub fn handle_setup(skip_sync: bool) -> Result<()> {
     println!();
 
     Ok(())
-}
-
-/// Validate git URL format
-fn is_valid_git_url(url: &str) -> bool {
-    url.starts_with("https://")
-        || url.starts_with("http://")
-        || url.starts_with("git@")
-        || url.starts_with("ssh://")
-}
-
-/// Expand tilde in path
-fn expand_tilde(path: &str) -> Result<PathBuf> {
-    if path.starts_with("~/") || path == "~" {
-        let home = dirs::home_dir().context("无法获取用户主目录")?;
-        if path == "~" {
-            Ok(home)
-        } else {
-            Ok(home.join(&path[2..]))
-        }
-    } else {
-        Ok(PathBuf::from(path))
-    }
 }
