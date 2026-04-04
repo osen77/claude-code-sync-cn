@@ -56,7 +56,7 @@ pub fn init_logger() -> Result<()> {
             )
         })
         .filter_level(default_level)
-        .target(env_logger::Target::Stdout)
+        .target(env_logger::Target::Stderr)
         .try_init()
         .ok(); // Ignore error if logger is already initialized
 
