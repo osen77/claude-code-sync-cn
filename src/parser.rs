@@ -131,22 +131,26 @@ impl ConversationSession {
                 continue;
             }
 
-            let entry: ConversationEntry = serde_json::from_str(&line).with_context(|| {
-                format!(
-                    "Failed to parse JSON at line {} in {}",
-                    line_num + 1,
-                    path.display()
-                )
-            })?;
-
-            // Extract session ID from first entry that has one
-            if session_id.is_none() {
-                if let Some(ref sid) = entry.session_id {
-                    session_id = Some(sid.clone());
+            match serde_json::from_str::<ConversationEntry>(&line) {
+                Ok(entry) => {
+                    // Extract session ID from first entry that has one
+                    if session_id.is_none() {
+                        if let Some(ref sid) = entry.session_id {
+                            session_id = Some(sid.clone());
+                        }
+                    }
+                    entries.push(entry);
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Skipping malformed line {} in {}: {}",
+                        line_num + 1,
+                        path.display(),
+                        e
+                    );
+                    continue;
                 }
             }
-
-            entries.push(entry);
         }
 
         // If no session ID in entries, use filename (without extension) as session ID
@@ -444,6 +448,80 @@ impl ConversationSession {
                         }
                     }
                     Self::format_content_block(block)
+                })
+                .collect();
+
+            if parts.is_empty() {
+                return None;
+            }
+
+            return Some(parts.join("\n"));
+        }
+
+        None
+    }
+
+    /// Extract full message content without truncation or code block simplification.
+    /// Used for JSON output and search indexing where complete content is needed.
+    /// Still filters system content for user messages.
+    pub fn extract_display_content_full(message: &Value, is_user: bool) -> Option<String> {
+        let content = message.get("content")?;
+
+        // Case 1: content is a plain string
+        if let Some(s) = content.as_str() {
+            if is_user && Self::is_system_content(s) {
+                return None;
+            }
+            return Some(s.to_string());
+        }
+
+        // Case 2: content is an array of blocks
+        if let Some(arr) = content.as_array() {
+            let parts: Vec<String> = arr
+                .iter()
+                .filter_map(|block| {
+                    if is_user {
+                        if let Some(raw) = block.get("text").and_then(|t| t.as_str()) {
+                            if Self::is_system_content(raw) {
+                                return None;
+                            }
+                        }
+                    }
+                    let block_type = block.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                    match block_type {
+                        "text" => {
+                            let text = block.get("text").and_then(|t| t.as_str()).unwrap_or("");
+                            if text.trim().is_empty() {
+                                None
+                            } else {
+                                Some(text.to_string())
+                            }
+                        }
+                        "tool_use" => {
+                            let name = block
+                                .get("name")
+                                .and_then(|n| n.as_str())
+                                .unwrap_or("unknown");
+                            if let Some(file) = extract_file_hint(block) {
+                                Some(format!("[Tool: {} -> {}]", name, file))
+                            } else {
+                                Some(format!("[Tool: {}]", name))
+                            }
+                        }
+                        "tool_result" => {
+                            let content_str = block
+                                .get("content")
+                                .and_then(|c| c.as_str())
+                                .unwrap_or("");
+                            if is_user_interaction_result(content_str) {
+                                Some(format_user_interaction(content_str))
+                            } else {
+                                None
+                            }
+                        }
+                        "image" => Some("[Image]".to_string()),
+                        _ => None,
+                    }
                 })
                 .collect();
 
@@ -992,5 +1070,200 @@ mod tests {
         });
         let result = ConversationSession::format_content_block(&block);
         assert_eq!(result, Some("[User approved plan]".to_string()));
+    }
+
+    // =========================================================================
+    // Tests for JSONL parse tolerance (skip malformed lines)
+    // =========================================================================
+
+    #[test]
+    fn test_from_file_skips_malformed_lines() {
+        use std::fs::File;
+        use std::io::Write;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.jsonl");
+
+        let mut file = File::create(&file_path).unwrap();
+        writeln!(file, r#"{{"type":"user","sessionId":"s1","uuid":"1","timestamp":"2025-01-01T00:00:00Z"}}"#).unwrap();
+        writeln!(file, r#"THIS IS NOT VALID JSON"#).unwrap();
+        writeln!(file, r#"{{"type":"assistant","sessionId":"s1","uuid":"2","timestamp":"2025-01-01T00:01:00Z"}}"#).unwrap();
+
+        let session = ConversationSession::from_file(&file_path).unwrap();
+        assert_eq!(session.session_id, "s1");
+        assert_eq!(session.entries.len(), 2);
+    }
+
+    #[test]
+    fn test_from_file_skips_concatenated_json_lines() {
+        use std::fs::File;
+        use std::io::Write;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.jsonl");
+
+        let mut file = File::create(&file_path).unwrap();
+        writeln!(file, r#"{{"type":"user","sessionId":"s1","uuid":"1","timestamp":"2025-01-01T00:00:00Z"}}"#).unwrap();
+        // Two JSON objects concatenated on one line (real corruption pattern)
+        writeln!(file, r#"{{"type":"assistant","uuid":"2","message":{{"content":"partial"}}}}{{"type":"user","uuid":"3"}}"#).unwrap();
+        writeln!(file, r#"{{"type":"assistant","sessionId":"s1","uuid":"4","timestamp":"2025-01-01T00:02:00Z"}}"#).unwrap();
+
+        let session = ConversationSession::from_file(&file_path).unwrap();
+        // Line 2 (concatenated) should be skipped, lines 1 and 3 parsed
+        assert_eq!(session.entries.len(), 2);
+    }
+
+    #[test]
+    fn test_from_file_all_lines_malformed() {
+        use std::fs::File;
+        use std::io::Write;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("bad-session-id.jsonl");
+
+        let mut file = File::create(&file_path).unwrap();
+        writeln!(file, "NOT JSON 1").unwrap();
+        writeln!(file, "NOT JSON 2").unwrap();
+
+        // Should still succeed with session ID from filename, 0 entries
+        let session = ConversationSession::from_file(&file_path).unwrap();
+        assert_eq!(session.session_id, "bad-session-id");
+        assert_eq!(session.entries.len(), 0);
+    }
+
+    #[test]
+    fn test_from_file_truncated_json_line() {
+        use std::fs::File;
+        use std::io::Write;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("test.jsonl");
+
+        let mut file = File::create(&file_path).unwrap();
+        writeln!(file, r#"{{"type":"user","sessionId":"s1","uuid":"1","timestamp":"2025-01-01T00:00:00Z"}}"#).unwrap();
+        // Truncated JSON (write interrupted)
+        writeln!(file, r#"{{"type":"assistant","uuid":"2","message":{{"content":"hello wor"#).unwrap();
+        writeln!(file, r#"{{"type":"user","sessionId":"s1","uuid":"3","timestamp":"2025-01-01T00:02:00Z"}}"#).unwrap();
+
+        let session = ConversationSession::from_file(&file_path).unwrap();
+        assert_eq!(session.entries.len(), 2);
+    }
+
+    #[test]
+    fn test_from_file_session_id_from_valid_line_after_bad() {
+        use std::fs::File;
+        use std::io::Write;
+        use tempfile::TempDir;
+
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("fallback.jsonl");
+
+        let mut file = File::create(&file_path).unwrap();
+        writeln!(file, "GARBAGE").unwrap();
+        writeln!(file, r#"{{"type":"user","sessionId":"real-id","uuid":"1","timestamp":"2025-01-01T00:00:00Z"}}"#).unwrap();
+
+        let session = ConversationSession::from_file(&file_path).unwrap();
+        // Session ID should come from the valid line, not the filename
+        assert_eq!(session.session_id, "real-id");
+    }
+
+    // =========================================================================
+    // Tests for extract_display_content_full (no truncation)
+    // =========================================================================
+
+    #[test]
+    fn test_extract_display_content_full_no_truncation() {
+        let long_text = "a".repeat(1000);
+        let msg = serde_json::json!({
+            "role": "assistant",
+            "content": long_text
+        });
+        let result = ConversationSession::extract_display_content_full(&msg, false).unwrap();
+        assert_eq!(result.len(), 1000);
+        assert!(!result.contains("[truncated]"));
+
+        // Compare with simplified version
+        let simplified = ConversationSession::extract_display_content(&msg, false).unwrap();
+        assert!(simplified.contains("[truncated]"));
+        assert!(simplified.len() < 1000);
+    }
+
+    #[test]
+    fn test_extract_display_content_full_preserves_code_blocks() {
+        let text = "Here is code:\n```rust\nfn main() {\n    println!(\"hello\");\n}\n```\nDone.";
+        let msg = serde_json::json!({
+            "role": "assistant",
+            "content": text
+        });
+        let result = ConversationSession::extract_display_content_full(&msg, false).unwrap();
+        assert!(result.contains("fn main()"));
+        assert!(result.contains("println!"));
+        assert!(!result.contains("[Code"));
+
+        // Compare with simplified version
+        let simplified = ConversationSession::extract_display_content(&msg, false).unwrap();
+        assert!(simplified.contains("[Code: rust]"));
+        assert!(!simplified.contains("fn main()"));
+    }
+
+    #[test]
+    fn test_extract_display_content_full_filters_system_content() {
+        let msg = serde_json::json!({
+            "role": "user",
+            "content": "<ide_opened_file>/src/main.rs</ide_opened_file>"
+        });
+        // System content should still be filtered even in full mode
+        let result = ConversationSession::extract_display_content_full(&msg, true);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_extract_display_content_full_array_blocks() {
+        let msg = serde_json::json!({
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "I'll create a file with this code:\n```python\ndef hello():\n    pass\n```"},
+                {"type": "tool_use", "name": "Write", "id": "t1", "input": {"file_path": "/app.py", "content": "..."}}
+            ]
+        });
+        let full = ConversationSession::extract_display_content_full(&msg, false).unwrap();
+        assert!(full.contains("def hello()"));
+        assert!(full.contains("[Tool: Write -> app.py]"));
+
+        let simplified = ConversationSession::extract_display_content(&msg, false).unwrap();
+        assert!(!simplified.contains("def hello()"));
+        assert!(simplified.contains("[Code: python]"));
+    }
+
+    #[test]
+    fn test_extract_display_content_full_empty_text_skipped() {
+        let msg = serde_json::json!({
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": ""},
+                {"type": "text", "text": "   "},
+                {"type": "text", "text": "real content"}
+            ]
+        });
+        let result = ConversationSession::extract_display_content_full(&msg, false).unwrap();
+        assert_eq!(result, "real content");
+    }
+
+    #[test]
+    fn test_extract_display_content_full_user_text_array() {
+        let msg = serde_json::json!({
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "<ide_opened_file>/main.rs</ide_opened_file>"},
+                {"type": "text", "text": "Fix the bug in main.rs"}
+            ]
+        });
+        let result = ConversationSession::extract_display_content_full(&msg, true).unwrap();
+        // System content filtered, real user message preserved
+        assert_eq!(result, "Fix the bug in main.rs");
     }
 }

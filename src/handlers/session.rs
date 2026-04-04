@@ -712,7 +712,7 @@ fn show_session_details(session: &SessionSummary) -> Result<()> {
     println!("{}", "-".repeat(60).cyan());
 
     if let Ok(conv) = ConversationSession::from_file(&session.file_path) {
-        let messages = collect_display_messages(&conv);
+        let messages = collect_display_messages(&conv, false);
 
         if messages.is_empty() {
             println!();
@@ -1343,7 +1343,8 @@ pub fn handle_session_show(
 
             // Drill-down mode: parse and filter messages
             let conv = ConversationSession::from_file(&session.file_path)?;
-            let messages = collect_display_messages(&conv);
+            // JSON output uses full content (no truncation); terminal uses simplified
+            let messages = collect_display_messages(&conv, json);
 
             if messages.is_empty() {
                 if json {
@@ -1495,7 +1496,8 @@ struct DisplayMessage {
 /// Collect displayable messages from a conversation.
 /// Merges all assistant entries between two user messages into a single reply,
 /// with tool calls summarized in one line.
-fn collect_display_messages(conv: &ConversationSession) -> Vec<DisplayMessage> {
+/// When `full_content` is true, uses full text extraction (no truncation/code simplification).
+fn collect_display_messages(conv: &ConversationSession, full_content: bool) -> Vec<DisplayMessage> {
     let mut messages = Vec::new();
     let mut index = 0;
 
@@ -1528,7 +1530,12 @@ fn collect_display_messages(conv: &ConversationSession) -> Vec<DisplayMessage> {
 
             // Emit user message
             if let Some(msg) = entry.message.as_ref() {
-                if let Some(text) = ConversationSession::extract_display_content(msg, true) {
+                let text = if full_content {
+                    ConversationSession::extract_display_content_full(msg, true)
+                } else {
+                    ConversationSession::extract_display_content(msg, true)
+                };
+                if let Some(text) = text {
                     index += 1;
                     messages.push(DisplayMessage {
                         index,
@@ -1548,10 +1555,15 @@ fn collect_display_messages(conv: &ConversationSession) -> Vec<DisplayMessage> {
                 // Single-pass: try_extract_tool_info returns Some for tool-only messages
                 if let Some(tools) = ConversationSession::try_extract_tool_info(msg) {
                     assistant_tools.extend(tools);
-                } else if let Some(text) =
-                    ConversationSession::extract_display_content(msg, false)
-                {
-                    assistant_texts.push(text);
+                } else {
+                    let text = if full_content {
+                        ConversationSession::extract_display_content_full(msg, false)
+                    } else {
+                        ConversationSession::extract_display_content(msg, false)
+                    };
+                    if let Some(text) = text {
+                        assistant_texts.push(text);
+                    }
                 }
             }
         }
@@ -1795,10 +1807,11 @@ fn search_sessions_full(
             }
 
             if let Some(msg) = entry.message.as_ref() {
+                // Use full content for search to avoid missing matches in truncated text
                 let text = if is_user {
                     ConversationSession::extract_user_text(msg)
                 } else {
-                    ConversationSession::extract_display_content(msg, false)
+                    ConversationSession::extract_display_content_full(msg, false)
                 };
 
                 if let Some(text) = text {
