@@ -506,7 +506,9 @@ fn show_session_menu(
 
 /// Search sessions by keyword in user messages (delegates to search_sessions_full)
 fn search_sessions(sessions: &[SessionSummary], keyword: &str) -> Vec<(SessionSummary, Vec<String>)> {
-    search_sessions_full(sessions, keyword, 60, true)
+    // Split input into multiple keywords for AND matching
+    let keywords: Vec<&str> = keyword.split_whitespace().collect();
+    search_sessions_full(sessions, &keywords, 60, true)
         .into_iter()
         .map(|r| {
             let snippets = r.matches.into_iter().map(|m| m.snippet).collect();
@@ -1715,10 +1717,10 @@ fn format_compact_relative_time(timestamp: &str) -> String {
 /// Search memory files (*.md) in project memory directories
 fn search_memory_files(
     projects: &[ProjectSummary],
-    keyword: &str,
+    keywords: &[&str],
     context_chars: usize,
 ) -> Vec<MemorySearchResult> {
-    let keyword_lower = keyword.to_lowercase();
+    let keywords_lower: Vec<String> = keywords.iter().map(|k| k.to_lowercase()).collect();
     let mut results = Vec::new();
 
     for project in projects {
@@ -1749,8 +1751,10 @@ fn search_memory_files(
             // Collect match snippets
             let mut matches = Vec::new();
             for line in content.lines() {
-                if line.to_lowercase().contains(&keyword_lower) {
-                    let snippet = extract_match_snippet(line, &keyword_lower, context_chars);
+                let line_lower = line.to_lowercase();
+                // AND match: all keywords must be present in the line
+                if keywords_lower.iter().all(|kw| line_lower.contains(kw.as_str())) {
+                    let snippet = extract_match_snippet(line, &keywords_lower[0], context_chars);
                     matches.push(MemoryMatch { snippet });
                 }
             }
@@ -1771,11 +1775,11 @@ fn search_memory_files(
 /// Search sessions across projects (both user and assistant messages)
 fn search_sessions_full(
     sessions: &[SessionSummary],
-    keyword: &str,
+    keywords: &[&str],
     context_chars: usize,
     user_only: bool,
 ) -> Vec<SessionSearchResult> {
-    let keyword_lower = keyword.to_lowercase();
+    let keywords_lower: Vec<String> = keywords.iter().map(|k| k.to_lowercase()).collect();
     let mut results = Vec::new();
 
     for session in sessions {
@@ -1815,9 +1819,12 @@ fn search_sessions_full(
                 };
 
                 if let Some(text) = text {
-                    if text.to_lowercase().contains(&keyword_lower) {
+                    let text_lower = text.to_lowercase();
+                    // AND match: all keywords must be present
+                    if keywords_lower.iter().all(|kw| text_lower.contains(kw.as_str())) {
+                        // Use the first keyword for snippet centering
                         let snippet =
-                            extract_match_snippet(&text, &keyword_lower, context_chars);
+                            extract_match_snippet(&text, &keywords_lower[0], context_chars);
                         matches.push(SearchMatch {
                             role: if is_user {
                                 "user".to_string()
@@ -1855,7 +1862,7 @@ fn search_sessions_full(
 
 /// Handle `ccs session search` command
 pub fn handle_session_search(
-    keyword: &str,
+    keywords: &[&str],
     project_filter: Option<&str>,
     since: Option<&str>,
     context_chars: usize,
@@ -1863,6 +1870,8 @@ pub fn handle_session_search(
     user_only: bool,
     json_output: bool,
 ) -> Result<()> {
+    let query_display = keywords.join(" ");
+
     // 1. Parse time filter
     let cutoff = if let Some(since_str) = since {
         Some(parse_duration_filter(since_str)?)
@@ -1883,20 +1892,20 @@ pub fn handle_session_search(
             println!(
                 "{}",
                 serde_json::to_string(&serde_json::json!({
-                    "query": keyword,
+                    "query": query_display,
                     "total_matches": 0,
                     "memory_results": [],
                     "session_results": [],
                 }))?
             );
         } else {
-            println!("[0 results | query: \"{}\"]", keyword);
+            println!("[0 results | query: \"{}\"]", query_display);
         }
         return Ok(());
     }
 
     // 3. Search memory files (no time filter - memory is persistent knowledge)
-    let memory_results = search_memory_files(&filtered_projects, keyword, context_chars);
+    let memory_results = search_memory_files(&filtered_projects, keywords, context_chars);
 
     // 4. Collect sessions with time filter
     let mut all_sessions = Vec::new();
@@ -1919,7 +1928,7 @@ pub fn handle_session_search(
     }
 
     // 5. Search sessions
-    let session_results = search_sessions_full(&all_sessions, keyword, context_chars, user_only);
+    let session_results = search_sessions_full(&all_sessions, keywords, context_chars, user_only);
 
     // 6. Count totals
     let memory_match_count: usize = memory_results.iter().map(|r| r.matches.len()).sum();
@@ -1945,7 +1954,7 @@ pub fn handle_session_search(
         println!(
             "{}",
             serde_json::to_string(&serde_json::json!({
-                "query": keyword,
+                "query": query_display,
                 "total_matches": total_matches,
                 "memory_results": memory_results,
                 "session_results": session_json,
@@ -1958,7 +1967,7 @@ pub fn handle_session_search(
     let is_tty = atty::is(atty::Stream::Stdout);
 
     if total_matches == 0 {
-        println!("[0 results | query: \"{}\"]", keyword);
+        println!("[0 results | query: \"{}\"]", query_display);
         return Ok(());
     }
 
@@ -1970,19 +1979,19 @@ pub fn handle_session_search(
             memory_match_count,
             session_match_count,
             session_results.len(),
-            keyword
+            query_display
         );
     } else if memory_match_count > 0 {
         println!(
             "[{} matches in memory | query: \"{}\"]",
-            memory_match_count, keyword
+            memory_match_count, query_display
         );
     } else {
         println!(
             "[{} matches in {} sessions | query: \"{}\"]",
             session_match_count,
             session_results.len(),
-            keyword
+            query_display
         );
     }
     println!();

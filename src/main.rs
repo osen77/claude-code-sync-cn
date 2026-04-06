@@ -471,10 +471,10 @@ enum SessionAction {
         show_ids: bool,
     },
 
-    /// Search sessions and memory files by keyword
+    /// Search sessions and memory files by keyword (multiple words = AND match)
     Search {
-        /// Search keyword
-        keyword: String,
+        /// Search keywords (multiple words are AND-matched)
+        keyword: Vec<String>,
 
         /// Filter by project name
         #[arg(short, long)]
@@ -988,8 +988,9 @@ fn main() -> Result<()> {
                     json,
                 }) => {
                     let filter = search_project.as_deref().or(project.as_deref());
+                    let keywords: Vec<&str> = keyword.iter().map(|s| s.as_str()).collect();
                     handle_session_search(
-                        &keyword,
+                        &keywords,
                         filter,
                         since.as_deref(),
                         context,
