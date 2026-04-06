@@ -1468,11 +1468,18 @@ struct SearchMatch {
     snippet: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+enum MatchMode {
+    And, // 0 — sorted first
+    Or,  // 1 — sorted after AND
+}
+
 #[derive(Debug, Clone)]
 struct SessionSearchResult {
     summary: SessionSummary,
     matches: Vec<SearchMatch>,
     score: f64,
+    match_mode: MatchMode,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1485,6 +1492,14 @@ struct MemorySearchResult {
     project: String,
     file: String,
     matches: Vec<MemoryMatch>,
+    #[serde(skip)]
+    match_mode: MatchMode,
+}
+
+impl Default for MatchMode {
+    fn default() -> Self {
+        MatchMode::And
+    }
 }
 
 /// A processed message ready for display
@@ -1721,6 +1736,7 @@ fn search_memory_files(
     context_chars: usize,
 ) -> Vec<MemorySearchResult> {
     let keywords_lower: Vec<String> = keywords.iter().map(|k| k.to_lowercase()).collect();
+    let multi_keyword = keywords_lower.len() > 1;
     let mut results = Vec::new();
 
     for project in projects {
@@ -1748,31 +1764,60 @@ fn search_memory_files(
                 .and_then(|n| n.to_str())
                 .unwrap_or("unknown");
 
-            // Collect match snippets
-            let mut matches = Vec::new();
+            let mut and_matches = Vec::new();
+            let mut or_matches = Vec::new();
+
             for line in content.lines() {
                 let line_lower = line.to_lowercase();
-                // AND match: all keywords must be present in the line
-                if keywords_lower.iter().all(|kw| line_lower.contains(kw.as_str())) {
-                    let snippet = extract_match_snippet(line, &keywords_lower[0], context_chars);
-                    matches.push(MemoryMatch { snippet });
+                let matched: Vec<&String> = keywords_lower
+                    .iter()
+                    .filter(|kw| line_lower.contains(kw.as_str()))
+                    .collect();
+
+                if matched.is_empty() {
+                    continue;
+                }
+
+                let snippet = extract_match_snippet(line, matched[0], context_chars);
+                let m = MemoryMatch { snippet };
+
+                if matched.len() == keywords_lower.len() {
+                    and_matches.push(m);
+                } else if multi_keyword {
+                    or_matches.push(m);
                 }
             }
 
-            if !matches.is_empty() {
+            let file_label = format!("memory/{}", file_name);
+
+            if !and_matches.is_empty() {
                 results.push(MemorySearchResult {
                     project: project.name.clone(),
-                    file: format!("memory/{}", file_name),
-                    matches,
+                    file: file_label.clone(),
+                    matches: and_matches,
+                    match_mode: MatchMode::And,
+                });
+            }
+            if !or_matches.is_empty() {
+                results.push(MemorySearchResult {
+                    project: project.name.clone(),
+                    file: file_label,
+                    matches: or_matches,
+                    match_mode: MatchMode::Or,
                 });
             }
         }
     }
 
+    // Sort: AND first
+    results.sort_by(|a, b| a.match_mode.cmp(&b.match_mode));
+
     results
 }
 
-/// Search sessions across projects (both user and assistant messages)
+/// Search sessions across projects (both user and assistant messages).
+/// With multiple keywords, collects AND matches (all keywords present)
+/// and OR matches (any keyword present), sorted with AND results first.
 fn search_sessions_full(
     sessions: &[SessionSummary],
     keywords: &[&str],
@@ -1780,6 +1825,7 @@ fn search_sessions_full(
     user_only: bool,
 ) -> Vec<SessionSearchResult> {
     let keywords_lower: Vec<String> = keywords.iter().map(|k| k.to_lowercase()).collect();
+    let multi_keyword = keywords_lower.len() > 1;
     let mut results = Vec::new();
 
     for session in sessions {
@@ -1787,11 +1833,12 @@ fn search_sessions_full(
             continue;
         };
 
-        let mut matches = Vec::new();
+        let mut and_matches = Vec::new();
+        let mut or_matches = Vec::new();
         const MAX_MATCHES_PER_SESSION: usize = 20;
 
         for entry in &conv.entries {
-            if matches.len() >= MAX_MATCHES_PER_SESSION {
+            if and_matches.len() + or_matches.len() >= MAX_MATCHES_PER_SESSION {
                 break;
             }
 
@@ -1811,7 +1858,6 @@ fn search_sessions_full(
             }
 
             if let Some(msg) = entry.message.as_ref() {
-                // Use full content for search to avoid missing matches in truncated text
                 let text = if is_user {
                     ConversationSession::extract_user_text(msg)
                 } else {
@@ -1820,41 +1866,69 @@ fn search_sessions_full(
 
                 if let Some(text) = text {
                     let text_lower = text.to_lowercase();
-                    // AND match: all keywords must be present
-                    if keywords_lower.iter().all(|kw| text_lower.contains(kw.as_str())) {
-                        // Use the first keyword for snippet centering
-                        let snippet =
-                            extract_match_snippet(&text, &keywords_lower[0], context_chars);
-                        matches.push(SearchMatch {
-                            role: if is_user {
-                                "user".to_string()
-                            } else {
-                                "assistant".to_string()
-                            },
-                            snippet,
-                        });
+                    let matched_kws: Vec<&String> = keywords_lower
+                        .iter()
+                        .filter(|kw| text_lower.contains(kw.as_str()))
+                        .collect();
+
+                    if matched_kws.is_empty() {
+                        continue;
+                    }
+
+                    let is_and = matched_kws.len() == keywords_lower.len();
+                    // Center snippet on first matched keyword
+                    let snippet =
+                        extract_match_snippet(&text, matched_kws[0], context_chars);
+                    let m = SearchMatch {
+                        role: if is_user { "user".to_string() } else { "assistant".to_string() },
+                        snippet,
+                    };
+
+                    if is_and {
+                        and_matches.push(m);
+                    } else if multi_keyword {
+                        or_matches.push(m);
                     }
                 }
             }
         }
 
-        if !matches.is_empty() {
-            let recency_score = calculate_recency_score(session.last_activity.as_deref());
-            let match_score = (matches.len() as f64).ln_1p();
-            let score = recency_score * 0.6 + match_score * 0.4;
+        let recency_score = calculate_recency_score(session.last_activity.as_deref());
 
+        // Emit AND result if any AND matches
+        if !and_matches.is_empty() {
+            let match_score = (and_matches.len() as f64).ln_1p();
+            let score = recency_score * 0.6 + match_score * 0.4;
             results.push(SessionSearchResult {
                 summary: session.clone(),
-                matches,
+                matches: and_matches,
                 score,
+                match_mode: MatchMode::And,
+            });
+        }
+
+        // Emit OR result for partial matches (only with multi-keyword queries)
+        if !or_matches.is_empty() {
+            let match_score = (or_matches.len() as f64).ln_1p();
+            let score = recency_score * 0.6 + match_score * 0.4;
+            results.push(SessionSearchResult {
+                summary: session.clone(),
+                matches: or_matches,
+                score,
+                match_mode: MatchMode::Or,
             });
         }
     }
 
+    // Sort: AND first, then by score within each group
     results.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        a.match_mode
+            .cmp(&b.match_mode)
+            .then_with(|| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
     });
 
     results
@@ -1946,6 +2020,7 @@ pub fn handle_session_search(
                     "title": r.summary.title,
                     "last_activity": r.summary.last_activity,
                     "message_count": r.summary.message_count,
+                    "match_mode": if r.match_mode == MatchMode::And { "and" } else { "or" },
                     "matches": r.matches,
                 })
             })
@@ -1998,6 +2073,8 @@ pub fn handle_session_search(
 
     let mut shown = 0;
 
+    let multi_keyword = keywords.len() > 1;
+
     // Memory results first
     if !memory_results.is_empty() {
         if is_tty {
@@ -2005,9 +2082,24 @@ pub fn handle_session_search(
         } else {
             println!("=== Memory ===");
         }
+        let mut prev_mode: Option<&MatchMode> = None;
         for result in &memory_results {
             if shown >= limit {
                 break;
+            }
+            if multi_keyword {
+                if prev_mode.map_or(true, |m| m != &result.match_mode) {
+                    let label = match result.match_mode {
+                        MatchMode::And => format!("[AND] all of: {}", query_display),
+                        MatchMode::Or => format!("[OR] any of: {}", query_display),
+                    };
+                    if is_tty {
+                        println!("{}", label.yellow());
+                    } else {
+                        println!("{}", label);
+                    }
+                    prev_mode = Some(&result.match_mode);
+                }
             }
             let header = format!("--- {} | {} ---", result.project, result.file);
             if is_tty {
@@ -2035,9 +2127,24 @@ pub fn handle_session_search(
                 println!("=== Sessions ===");
             }
         }
+        let mut prev_mode: Option<&MatchMode> = None;
         for result in &session_results {
             if shown >= limit {
                 break;
+            }
+            if multi_keyword {
+                if prev_mode.map_or(true, |m| m != &result.match_mode) {
+                    let label = match result.match_mode {
+                        MatchMode::And => format!("[AND] all of: {}", query_display),
+                        MatchMode::Or => format!("[OR] any of: {}", query_display),
+                    };
+                    if is_tty {
+                        println!("{}", label.yellow());
+                    } else {
+                        println!("{}", label);
+                    }
+                    prev_mode = Some(&result.match_mode);
+                }
             }
             let time_str = result
                 .summary
