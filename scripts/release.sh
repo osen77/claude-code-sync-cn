@@ -1,5 +1,13 @@
 #!/bin/bash
-# Interactive release script for ccs (claude-code-sync)
+# Release script for ccs (claude-code-sync)
+# Supports both interactive and non-interactive (CI/Claude) usage.
+#
+# Interactive:  ./scripts/release.sh
+# Non-interactive: ./scripts/release.sh patch|minor|major|push [-m "commit message"] [-y]
+#
+# Options:
+#   -m MSG   Commit message for uncommitted changes (default: auto-generated)
+#   -y       Skip confirmation prompts
 
 set -e
 
@@ -25,54 +33,74 @@ NEXT_PATCH="${MAJOR}.${MINOR}.$((PATCH + 1))"
 NEXT_MINOR="${MAJOR}.$((MINOR + 1)).0"
 NEXT_MAJOR="$((MAJOR + 1)).0.0"
 
-# Show header
-echo ""
-echo -e "${BOLD}╔════════════════════════════════════════╗${NC}"
-echo -e "${BOLD}║          ccs Release Tool              ║${NC}"
-echo -e "${BOLD}╚════════════════════════════════════════╝${NC}"
-echo ""
-echo -e "Current version: ${GREEN}v${CURRENT_VERSION}${NC}"
-echo ""
+# Parse arguments
+ACTION=""
+COMMIT_MSG=""
+AUTO_YES=false
 
-# Show menu
-echo -e "${BOLD}Select an action:${NC}"
-echo ""
-echo -e "  ${CYAN}1)${NC} Push only         - Push commits to remote (no version change)"
-echo -e "  ${CYAN}2)${NC} Release patch     - ${YELLOW}v${CURRENT_VERSION}${NC} → ${GREEN}v${NEXT_PATCH}${NC}  (bug fixes)"
-echo -e "  ${CYAN}3)${NC} Release minor     - ${YELLOW}v${CURRENT_VERSION}${NC} → ${GREEN}v${NEXT_MINOR}${NC}  (new features)"
-echo -e "  ${CYAN}4)${NC} Release major     - ${YELLOW}v${CURRENT_VERSION}${NC} → ${GREEN}v${NEXT_MAJOR}${NC}  (breaking changes)"
-echo -e "  ${CYAN}q)${NC} Quit"
-echo ""
+# First positional arg is the action
+if [ $# -ge 1 ] && [[ "$1" =~ ^(patch|minor|major|push)$ ]]; then
+    ACTION="$1"
+    shift
+fi
 
-read -p "Your choice [1-4/q]: " choice
+# Parse flags
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -m)
+            COMMIT_MSG="$2"
+            shift 2
+            ;;
+        -y)
+            AUTO_YES=true
+            shift
+            ;;
+        *)
+            echo -e "${RED}Unknown option: $1${NC}"
+            echo "Usage: $0 [patch|minor|major|push] [-m \"message\"] [-y]"
+            exit 1
+            ;;
+    esac
+done
 
-case "$choice" in
-    1)
-        ACTION="push"
-        ;;
-    2)
-        ACTION="patch"
-        NEW_VERSION="$NEXT_PATCH"
-        ;;
-    3)
-        ACTION="minor"
-        NEW_VERSION="$NEXT_MINOR"
-        ;;
-    4)
-        ACTION="major"
-        NEW_VERSION="$NEXT_MAJOR"
-        ;;
-    q|Q)
-        echo -e "${YELLOW}Cancelled.${NC}"
-        exit 0
-        ;;
-    *)
-        echo -e "${RED}Invalid choice.${NC}"
-        exit 1
-        ;;
+# Interactive mode if no action specified
+if [ -z "$ACTION" ]; then
+    echo ""
+    echo -e "${BOLD}╔════════════════════════════════════════╗${NC}"
+    echo -e "${BOLD}║          ccs Release Tool              ║${NC}"
+    echo -e "${BOLD}╚════════════════════════════════════════╝${NC}"
+    echo ""
+    echo -e "Current version: ${GREEN}v${CURRENT_VERSION}${NC}"
+    echo ""
+    echo -e "${BOLD}Select an action:${NC}"
+    echo ""
+    echo -e "  ${CYAN}1)${NC} Push only         - Push commits to remote (no version change)"
+    echo -e "  ${CYAN}2)${NC} Release patch     - ${YELLOW}v${CURRENT_VERSION}${NC} → ${GREEN}v${NEXT_PATCH}${NC}  (bug fixes)"
+    echo -e "  ${CYAN}3)${NC} Release minor     - ${YELLOW}v${CURRENT_VERSION}${NC} → ${GREEN}v${NEXT_MINOR}${NC}  (new features)"
+    echo -e "  ${CYAN}4)${NC} Release major     - ${YELLOW}v${CURRENT_VERSION}${NC} → ${GREEN}v${NEXT_MAJOR}${NC}  (breaking changes)"
+    echo -e "  ${CYAN}q)${NC} Quit"
+    echo ""
+
+    read -p "Your choice [1-4/q]: " choice
+
+    case "$choice" in
+        1) ACTION="push" ;;
+        2) ACTION="patch" ;;
+        3) ACTION="minor" ;;
+        4) ACTION="major" ;;
+        q|Q) echo -e "${YELLOW}Cancelled.${NC}"; exit 0 ;;
+        *) echo -e "${RED}Invalid choice.${NC}"; exit 1 ;;
+    esac
+    echo ""
+fi
+
+# Resolve new version
+case "$ACTION" in
+    patch) NEW_VERSION="$NEXT_PATCH" ;;
+    minor) NEW_VERSION="$NEXT_MINOR" ;;
+    major) NEW_VERSION="$NEXT_MAJOR" ;;
+    push)  NEW_VERSION="" ;;
 esac
-
-echo ""
 
 # Check for uncommitted changes
 HAS_CHANGES=false
@@ -86,15 +114,22 @@ fi
 if [ "$ACTION" = "push" ]; then
     # Push only
     if [ "$HAS_CHANGES" = true ]; then
-        read -p "Commit all changes before push? [Y/n]: " -n 1 -r
-        echo ""
-        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
-            read -p "Commit message: " COMMIT_MSG
-            if [ -z "$COMMIT_MSG" ]; then
-                COMMIT_MSG="chore: update"
-            fi
+        if [ "$AUTO_YES" = true ]; then
+            # Auto-commit with provided or default message
+            [ -z "$COMMIT_MSG" ] && COMMIT_MSG="chore: update"
             git add -A
             git commit -m "$COMMIT_MSG"
+        else
+            read -p "Commit all changes before push? [Y/n]: " -n 1 -r
+            echo ""
+            if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+                if [ -z "$COMMIT_MSG" ]; then
+                    read -p "Commit message: " COMMIT_MSG
+                    [ -z "$COMMIT_MSG" ] && COMMIT_MSG="chore: update"
+                fi
+                git add -A
+                git commit -m "$COMMIT_MSG"
+            fi
         fi
     fi
     echo -e "${CYAN}Pushing to remote...${NC}"
@@ -109,6 +144,18 @@ else
     if git rev-parse "$TAG_NAME" >/dev/null 2>&1; then
         echo -e "${RED}Error: Tag ${TAG_NAME} already exists!${NC}"
         exit 1
+    fi
+
+    echo -e "${CYAN}Releasing ${YELLOW}v${CURRENT_VERSION}${NC} → ${GREEN}v${NEW_VERSION}${NC}"
+
+    # Confirm unless auto-yes
+    if [ "$AUTO_YES" != true ]; then
+        read -p "Continue? [Y/n]: " -n 1 -r
+        echo ""
+        if [[ $REPLY =~ ^[Nn]$ ]]; then
+            echo -e "${YELLOW}Cancelled.${NC}"
+            exit 0
+        fi
     fi
 
     # Stage all changes first if any
