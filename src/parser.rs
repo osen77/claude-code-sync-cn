@@ -121,6 +121,7 @@ impl ConversationSession {
         let reader = BufReader::new(file);
         let mut entries = Vec::new();
         let mut session_id = None;
+        let mut malformed_lines: Vec<usize> = Vec::new();
 
         for (line_num, line) in reader.lines().enumerate() {
             let line = line.with_context(|| {
@@ -131,7 +132,18 @@ impl ConversationSession {
                 continue;
             }
 
-            match serde_json::from_str::<ConversationEntry>(&line) {
+            let parsed = serde_json::from_str::<ConversationEntry>(&line);
+            let recovered = if parsed.is_err() {
+                // Try to recover concatenated JSON objects from corrupted lines.
+                // Claude Code sometimes truncates a write mid-signature and
+                // appends the next object on the same line, producing:
+                //   <truncated_json>{"parentUuid":...valid_json...}
+                Self::try_recover_entries(&line)
+            } else {
+                Vec::new()
+            };
+
+            match parsed {
                 Ok(entry) => {
                     // Extract session ID from first entry that has one
                     if session_id.is_none() {
@@ -142,15 +154,42 @@ impl ConversationSession {
                     entries.push(entry);
                 }
                 Err(e) => {
-                    log::warn!(
-                        "Skipping malformed line {} in {}: {}",
-                        line_num + 1,
-                        path.display(),
-                        e
-                    );
+                    if recovered.is_empty() {
+                        malformed_lines.push(line_num + 1);
+                        log::debug!(
+                            "Skipping malformed line {} in {}: {}",
+                            line_num + 1,
+                            path.display(),
+                            e
+                        );
+                    } else {
+                        log::debug!(
+                            "Recovered {} entry(ies) from malformed line {} in {}",
+                            recovered.len(),
+                            line_num + 1,
+                            path.display(),
+                        );
+                        for entry in &recovered {
+                            if session_id.is_none() {
+                                if let Some(ref sid) = entry.session_id {
+                                    session_id = Some(sid.clone());
+                                }
+                            }
+                        }
+                        entries.extend(recovered);
+                    }
                     continue;
                 }
             }
+        }
+
+        if !malformed_lines.is_empty() {
+            log::debug!(
+                "Skipped {} malformed line(s) in {}: lines {:?}",
+                malformed_lines.len(),
+                path.display(),
+                malformed_lines
+            );
         }
 
         // If no session ID in entries, use filename (without extension) as session ID
@@ -172,6 +211,31 @@ impl ConversationSession {
             entries,
             file_path: path.to_string_lossy().to_string(),
         })
+    }
+
+    /// Try to recover valid JSON entries from a corrupted line.
+    ///
+    /// Handles the common corruption pattern where Claude Code truncates a
+    /// write mid-field and appends the next JSON object on the same line:
+    ///   `<truncated>{"parentUuid":"...valid...}`
+    ///
+    /// Scans for `{"parentUuid"` boundaries and parses each candidate.
+    fn try_recover_entries(line: &str) -> Vec<ConversationEntry> {
+        let mut recovered = Vec::new();
+        let needle = r#"{"parentUuid""#;
+        let mut search_from = 1; // skip position 0 (already failed as whole line)
+
+        while let Some(rel) = line[search_from..].find(needle) {
+            let start = search_from + rel;
+            let candidate = &line[start..];
+            if let Ok(entry) = serde_json::from_str::<ConversationEntry>(candidate) {
+                recovered.push(entry);
+                break; // the rest of the line is this object
+            }
+            search_from = start + 1;
+        }
+
+        recovered
     }
 
     /// Write the conversation session to a JSONL file
