@@ -1393,7 +1393,18 @@ fn get_project_description(project_path: &Path, max_chars: usize) -> Option<Stri
         content.as_str()
     };
 
-    let content = content.trim_start();
+    // Skip markdown headings, blank lines, and Claude Code boilerplate
+    let content = content
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim();
+            !trimmed.is_empty()
+                && !trimmed.starts_with('#')
+                && !trimmed.starts_with("This file provides guidance to Claude")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let content = content.trim();
     if content.is_empty() {
         return None;
     }
