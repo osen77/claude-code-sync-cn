@@ -1548,10 +1548,11 @@ pub fn handle_session_overview(
             .take(recent_count)
             .map(|s| {
                 let summary = SessionSummary::from_session(s, &project.name, &project.dir_path);
+                let title = summary.display_title(50);
                 let recent_messages = extract_recent_user_messages(s, 3, 10);
                 SessionOverview {
                     session_id: summary.session_id,
-                    title: summary.title,
+                    title,
                     message_count: summary.message_count,
                     last_activity: summary.last_activity,
                     recent_messages,
@@ -1618,7 +1619,7 @@ pub fn handle_session_overview(
                 println!(
                     "  {} {} ({} msgs, {})",
                     branch,
-                    sess.title.replace('\n', " "),
+                    sess.title,
                     sess.message_count,
                     sess_time.dimmed(),
                 );
