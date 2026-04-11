@@ -1322,6 +1322,322 @@ pub fn handle_session_projects() -> Result<()> {
     Ok(())
 }
 
+// ============================================================================
+// Overview
+// ============================================================================
+
+#[derive(serde::Serialize)]
+struct ProjectOverview {
+    name: String,
+    path: Option<String>,
+    description: Option<String>,
+    session_count: usize,
+    last_activity: Option<String>,
+    recent_sessions: Vec<SessionOverview>,
+}
+
+#[derive(serde::Serialize)]
+struct SessionOverview {
+    session_id: String,
+    title: String,
+    message_count: usize,
+    last_activity: Option<String>,
+    recent_messages: Vec<String>,
+}
+
+/// Truncate text at a word/line boundary, Unicode-safe
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_chars {
+        return text.to_string();
+    }
+    let truncated: String = chars[..max_chars].iter().collect();
+    if let Some(pos) = truncated.rfind(['\n', ' ']) {
+        format!("{}...", &truncated[..pos])
+    } else {
+        format!("{}...", truncated)
+    }
+}
+
+/// Check if a timestamp is at or after the given cutoff
+fn is_after_cutoff(timestamp: Option<&str>, cutoff: &chrono::DateTime<chrono::Utc>) -> bool {
+    timestamp.is_some_and(|ts| {
+        chrono::DateTime::parse_from_rfc3339(ts)
+            .map(|dt| dt.with_timezone(&chrono::Utc) >= *cutoff)
+            .unwrap_or(false)
+    })
+}
+
+/// Read project description from CLAUDE.md (priority) or README.md
+fn get_project_description(project_path: &Path, max_chars: usize) -> Option<String> {
+    let desc_file = ["CLAUDE.md", "README.md"]
+        .iter()
+        .map(|f| project_path.join(f))
+        .find(|p| p.exists())?;
+
+    let content = fs::read_to_string(&desc_file).ok()?;
+
+    // Skip YAML frontmatter (--- ... ---)
+    let content = if let Some(after_prefix) = content.strip_prefix("---") {
+        if let Some(end_idx) = after_prefix.find("\n---") {
+            let skip = end_idx + 4; // skip past "\n---"
+            if skip < after_prefix.len() {
+                &after_prefix[skip..]
+            } else {
+                ""
+            }
+        } else {
+            content.as_str()
+        }
+    } else {
+        content.as_str()
+    };
+
+    let content = content.trim_start();
+    if content.is_empty() {
+        return None;
+    }
+
+    Some(truncate_chars(content, max_chars))
+}
+
+/// Extract recent meaningful user messages from a session
+fn extract_recent_user_messages(
+    session: &ConversationSession,
+    count: usize,
+    min_chars: usize,
+) -> Vec<String> {
+    let mut messages = Vec::new();
+
+    for entry in session.entries.iter().rev() {
+        if messages.len() >= count {
+            break;
+        }
+
+        if entry.entry_type != "user" || ConversationSession::is_tool_result_entry(entry) {
+            continue;
+        }
+
+        if let Some(msg) = &entry.message {
+            if let Some(text) = ConversationSession::extract_user_text(msg) {
+                let text = text.replace('\n', " ");
+                let text = text.trim().to_string();
+                if text.chars().count() >= min_chars {
+                    messages.push(truncate_chars(&text, 100));
+                }
+            }
+        }
+    }
+
+    messages.reverse();
+    messages
+}
+
+/// Scan all projects with their parsed sessions in one pass (avoids double JSONL parsing)
+fn scan_all_projects_with_sessions() -> Result<Vec<(ProjectSummary, Vec<ConversationSession>)>> {
+    let claude_dir = claude_projects_dir()?;
+
+    if !claude_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut results = Vec::new();
+    let filter = FilterConfig {
+        max_file_size_bytes: u64::MAX,
+        ..FilterConfig::default()
+    };
+
+    for entry in fs::read_dir(&claude_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if !path.is_dir() {
+            continue;
+        }
+
+        let dir_name = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+
+        if dir_name.starts_with('.') {
+            continue;
+        }
+
+        let sessions = discover_sessions(&path, &filter).unwrap_or_default();
+        if sessions.is_empty() {
+            continue;
+        }
+
+        let project_name = sessions
+            .iter()
+            .find_map(|s| s.project_name().map(|n| n.to_string()))
+            .unwrap_or_else(|| extract_project_name(dir_name).to_string());
+
+        let valid_session_count = sessions.iter().filter(|s| is_valid_session(s)).count();
+        if valid_session_count == 0 {
+            continue;
+        }
+
+        let last_activity = sessions
+            .iter()
+            .filter(|s| s.message_count() > 0)
+            .filter_map(|s| s.latest_timestamp())
+            .max();
+
+        let summary = ProjectSummary {
+            name: project_name,
+            dir_path: path,
+            session_count: valid_session_count,
+            last_activity,
+        };
+
+        results.push((summary, sessions));
+    }
+
+    results.sort_by(|a, b| b.0.last_activity.cmp(&a.0.last_activity));
+    Ok(results)
+}
+
+/// Overview of all projects with recent session context
+pub fn handle_session_overview(
+    recent_count: usize,
+    since: Option<&str>,
+    json_output: bool,
+) -> Result<()> {
+    let since_cutoff = since.map(parse_duration_filter).transpose()?;
+
+    let mut project_sessions = scan_all_projects_with_sessions()?;
+
+    if let Some(ref cutoff) = since_cutoff {
+        project_sessions.retain(|(p, _)| is_after_cutoff(p.last_activity.as_deref(), cutoff));
+    }
+
+    if project_sessions.is_empty() {
+        if json_output {
+            println!("{}", serde_json::to_string_pretty(&json!({
+                "total_projects": 0,
+                "projects": []
+            }))?);
+        } else {
+            println!("{}", "No projects found.".yellow());
+        }
+        return Ok(());
+    }
+
+    let mut overviews = Vec::new();
+    let total_sessions: usize = project_sessions.iter().map(|(p, _)| p.session_count).sum();
+
+    for (project, sessions) in &project_sessions {
+        let project_path = sessions
+            .iter()
+            .find_map(|s| s.cwd().map(|c| c.to_string()));
+
+        let description = project_path
+            .as_deref()
+            .and_then(|p| get_project_description(Path::new(p), 300));
+
+        let mut valid_sessions: Vec<&ConversationSession> = sessions
+            .iter()
+            .filter(|s| is_valid_session(s))
+            .collect();
+        valid_sessions.sort_by_key(|s| std::cmp::Reverse(s.latest_timestamp()));
+
+        let recent_sessions: Vec<SessionOverview> = valid_sessions
+            .iter()
+            .take(recent_count)
+            .map(|s| {
+                let summary = SessionSummary::from_session(s, &project.name, &project.dir_path);
+                let recent_messages = extract_recent_user_messages(s, 3, 10);
+                SessionOverview {
+                    session_id: summary.session_id,
+                    title: summary.title,
+                    message_count: summary.message_count,
+                    last_activity: summary.last_activity,
+                    recent_messages,
+                }
+            })
+            .collect();
+
+        overviews.push(ProjectOverview {
+            name: project.name.clone(),
+            path: project_path,
+            description,
+            session_count: project.session_count,
+            last_activity: project.last_activity.clone(),
+            recent_sessions,
+        });
+    }
+
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&json!({
+            "total_projects": overviews.len(),
+            "projects": overviews,
+        }))?);
+    } else {
+        println!(
+            "{} projects, {} sessions\n",
+            overviews.len().to_string().cyan().bold(),
+            total_sessions.to_string().cyan(),
+        );
+
+        for (pi, proj) in overviews.iter().enumerate() {
+            let time_str = proj
+                .last_activity
+                .as_ref()
+                .map(|t| format_relative_time(t))
+                .unwrap_or_else(|| "Unknown".to_string());
+
+            if let Some(desc) = &proj.description {
+                let brief: &str = desc.lines().next().unwrap_or(desc);
+                let brief = brief.trim_start_matches('#').trim();
+                println!(
+                    "{} — {}",
+                    proj.name.bold(),
+                    truncate_chars(brief, 80).dimmed(),
+                );
+            } else {
+                println!("{}", proj.name.bold());
+            }
+            println!(
+                "  {} sessions, last: {}",
+                proj.session_count,
+                time_str.dimmed(),
+            );
+
+            let session_count = proj.recent_sessions.len();
+            for (si, sess) in proj.recent_sessions.iter().enumerate() {
+                let is_last = si == session_count - 1;
+                let branch = if is_last { "└─" } else { "├─" };
+                let sess_time = sess
+                    .last_activity
+                    .as_ref()
+                    .map(|t| format_relative_time(t))
+                    .unwrap_or_else(|| "?".to_string());
+
+                println!(
+                    "  {} {} ({} msgs, {})",
+                    branch,
+                    sess.title.replace('\n', " "),
+                    sess.message_count,
+                    sess_time.dimmed(),
+                );
+
+                let prefix = if is_last { "  " } else { "│ " };
+                for msg in &sess.recent_messages {
+                    println!("  {}  • {}", prefix, msg.dimmed());
+                }
+            }
+
+            if pi < overviews.len() - 1 {
+                println!();
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Show session details (non-interactive), with optional drill-down flags
 pub fn handle_session_show(
     session_id: &str,

@@ -548,6 +548,21 @@ enum SessionAction {
 
     /// List all projects (non-interactive)
     Projects,
+
+    /// Overview of all projects with recent session context (for agent consumption)
+    Overview {
+        /// Number of recent sessions per project (default: 3)
+        #[arg(long, default_value_t = 3)]
+        recent: usize,
+
+        /// Only show projects active within this duration (e.g., "7d", "1w")
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -1024,6 +1039,9 @@ fn main() -> Result<()> {
                 }
                 Some(SessionAction::Projects) => {
                     handle_session_projects()?;
+                }
+                Some(SessionAction::Overview { recent, since, json }) => {
+                    handle_session_overview(recent, since.as_deref(), json)?;
                 }
             }
         }
