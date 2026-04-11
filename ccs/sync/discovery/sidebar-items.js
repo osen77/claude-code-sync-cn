@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["LARGE_FILE_WARNING_THRESHOLD"],"fn":["check_directory_structure_consistency","claude_projects_dir","discover_sessions","extract_project_name","find_colliding_projects","find_local_project_by_name","list_memory_files","warn_large_files"],"struct":["DirectoryStructureCheck"]};
