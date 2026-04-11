@@ -36,4 +36,5 @@ pub use session::{
     handle_session_interactive, handle_session_list, handle_session_show,
     handle_session_rename, handle_session_delete, handle_session_search,
     handle_session_projects,
+    handle_session_overview,
 };
