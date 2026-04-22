@@ -1,5 +1,30 @@
 # 项目问题记录
 
+## 2026-04-22: Pull 无法匹配含连字符的项目名 (v0.3.8)
+
+### 问题描述
+- `use_project_name_only = true` 模式下，pull 无法将远程会话合并到本地含连字符的项目目录（如 `ux-workspace`）
+- 用户在电脑 B 上有两个 `ux-workspace` 目录（不同路径），远程同步的会话全部被跳过
+
+### 根本原因
+1. **`extract_project_name()` 对含 `-` 的项目名提取错误**：用 `rsplit('-')` 取最后一段，`-Users-abc-ux-workspace` 提取出 `workspace` 而非 `ux-workspace`。路径编码的 `-` 和项目名自带的 `-` 无法区分
+2. **`find_local_project_by_name()` 逻辑缺陷**：第一轮 dir name 匹配失败后，第二轮 JSONL cwd 匹配找到第一个就立即返回，不检查是否有多个匹配（歧义）；且多目录时直接返回 None
+
+### 解决方案
+重写 `find_local_project_by_name()` (`src/sync/discovery.rs`)：
+- 两轮匹配（dir name + JSONL cwd）**始终都跑**，收集全部结果后合并去重
+- cwd 匹配优先（精确），dir name 匹配补充
+- 多匹配时 `log::warn` 输出歧义信息并返回 None
+- 抽取 `get_project_name_from_dir()` 辅助函数，`find_colliding_projects()` 也复用以正确检测含连字符项目名的碰撞
+
+### 影响范围
+- Pull 会话匹配、Pull memory 同步匹配、碰撞检测
+- Push 不受影响（使用 `session.project_name()` 从 cwd 正确提取）
+
+### 预防措施
+- 新增 3 个测试用例覆盖含连字符项目名的匹配和歧义场景
+- memory 同步部分（`pull.rs:632`）已有注释说明不使用 `extract_project_name()`
+
 ## 2026-02-19: CI 构建失败导致 Release 无二进制文件
 
 ### 问题描述
