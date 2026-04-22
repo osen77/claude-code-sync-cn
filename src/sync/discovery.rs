@@ -143,10 +143,9 @@ pub fn extract_project_name(encoded_path: &str) -> &str {
 /// Find a local Claude project directory that matches the given project name.
 ///
 /// Scans `~/.claude/projects/` for directories that match the specified project name.
-/// First tries to match by extracting project name from encoded directory name.
-/// If that fails (e.g., for non-ASCII project names like Chinese characters),
-/// falls back to reading a JSONL file from each directory and extracting the
-/// project name from the `cwd` field.
+/// Uses two strategies and merges results:
+/// 1. Fast: extract project name from encoded directory name (unreliable for hyphenated names)
+/// 2. Precise: read JSONL files and extract project name from `cwd` field
 ///
 /// # Returns
 /// - `Some(PathBuf)` if exactly one matching project directory is found
@@ -158,8 +157,8 @@ pub fn find_local_project_by_name(claude_projects_dir: &Path, project_name: &str
         .filter(|e| e.path().is_dir())
         .collect();
 
-    // First pass: try matching by encoded directory name
-    let matches: Vec<PathBuf> = entries
+    // Pass 1 (fast): match by encoded directory name
+    let matches_from_dir: Vec<PathBuf> = entries
         .iter()
         .filter(|e| {
             e.file_name()
@@ -170,39 +169,52 @@ pub fn find_local_project_by_name(claude_projects_dir: &Path, project_name: &str
         .map(|e| e.path())
         .collect();
 
-    // Return only if exactly one match to avoid ambiguity
-    if matches.len() == 1 {
-        return Some(matches.into_iter().next().unwrap());
-    }
-
-    // Second pass: read JSONL files to get real project name from cwd field
-    // This handles non-ASCII project names (e.g., Chinese) that get encoded as dashes
+    // Pass 2 (precise): read JSONL cwd to get real project name
+    // Always run - extract_project_name is unreliable for hyphenated names
+    let mut matches_from_cwd: Vec<PathBuf> = Vec::new();
     for entry in &entries {
         let dir_path = entry.path();
-
-        // Try to find a .jsonl file with a valid project name in this directory
-        if let Ok(files) = std::fs::read_dir(&dir_path) {
-            for file_entry in files.filter_map(|f| f.ok()) {
-                let file_path = file_entry.path();
-                if file_path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-                    // Try to parse and get project name from cwd
-                    if let Ok(session) = crate::parser::ConversationSession::from_file(&file_path) {
-                        if let Some(real_name) = session.project_name() {
-                            // Found a valid project name, check if it matches
-                            if real_name == project_name {
-                                return Some(dir_path);
-                            } else {
-                                // Doesn't match, skip rest of this directory
-                                break;
-                            }
-                        }
-                        // If project_name() is None, continue to try next file
-                    }
-                }
+        if let Some(real_name) = get_project_name_from_dir(&dir_path) {
+            if real_name == project_name {
+                matches_from_cwd.push(dir_path);
             }
         }
     }
 
+    // Merge: cwd matches are authoritative, supplement with dir-name matches
+    let mut all_matches = matches_from_cwd;
+    for path in matches_from_dir {
+        if !all_matches.contains(&path) {
+            all_matches.push(path);
+        }
+    }
+
+    match all_matches.len() {
+        1 => Some(all_matches.into_iter().next().unwrap()),
+        n if n > 1 => {
+            log::warn!(
+                "Ambiguous match: {} local directories match project '{}': {:?}",
+                n, project_name, all_matches
+            );
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Extract the real project name from a local project directory by reading its JSONL files.
+fn get_project_name_from_dir(dir_path: &Path) -> Option<String> {
+    let files = std::fs::read_dir(dir_path).ok()?;
+    for file_entry in files.filter_map(|f| f.ok()) {
+        let file_path = file_entry.path();
+        if file_path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
+            if let Ok(session) = crate::parser::ConversationSession::from_file(&file_path) {
+                if let Some(real_name) = session.project_name() {
+                    return Some(real_name.to_string());
+                }
+            }
+        }
+    }
     None
 }
 
@@ -219,8 +231,15 @@ pub fn find_colliding_projects(
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
             if path.is_dir() {
-                if let Some(dir_name) = path.file_name().and_then(|n| n.to_str()) {
-                    let project_name = extract_project_name(dir_name).to_string();
+                // Prefer real project name from JSONL cwd, fall back to dir name extraction
+                let project_name = get_project_name_from_dir(&path)
+                    .unwrap_or_else(|| {
+                        path.file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|n| extract_project_name(n).to_string())
+                            .unwrap_or_default()
+                    });
+                if !project_name.is_empty() {
                     collisions.entry(project_name).or_default().push(path);
                 }
             }
@@ -538,5 +557,69 @@ mod tests {
 
         // Should have 2 sessions (no deduplication needed)
         assert_eq!(sessions.len(), 2, "Should have 2 distinct sessions");
+    }
+
+    /// Helper: create a JSONL file with a cwd field to simulate a real session
+    fn create_session_with_cwd(dir: &Path, session_id: &str, cwd: &str) {
+        let file_path = dir.join(format!("{}.jsonl", session_id));
+        let mut file = fs::File::create(&file_path).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"user","sessionId":"{session_id}","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","cwd":"{cwd}","message":{{"role":"user","content":"hello"}}}}"#,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn test_find_local_project_hyphenated_name() {
+        let temp_dir = tempdir().unwrap();
+        let projects_dir = temp_dir.path();
+
+        // "-Users-abc-ux-workspace" — extract_project_name returns "workspace", not "ux-workspace"
+        let project_dir = projects_dir.join("-Users-abc-ux-workspace");
+        fs::create_dir(&project_dir).unwrap();
+        create_session_with_cwd(&project_dir, "sess-1", "/Users/abc/ux-workspace");
+
+        let result = find_local_project_by_name(projects_dir, "ux-workspace");
+        assert!(result.is_some(), "Should match via JSONL cwd");
+        assert!(result.unwrap().ends_with("-Users-abc-ux-workspace"));
+    }
+
+    #[test]
+    fn test_find_local_project_hyphenated_multiple_dirs_ambiguous() {
+        let temp_dir = tempdir().unwrap();
+        let projects_dir = temp_dir.path();
+
+        // Two directories both resolve to project name "ux-workspace" via cwd
+        let dir1 = projects_dir.join("-Users-abc-Documents-ux-workspace");
+        fs::create_dir(&dir1).unwrap();
+        create_session_with_cwd(&dir1, "sess-1", "/Users/abc/Documents/ux-workspace");
+
+        let dir2 = projects_dir.join("-Users-abc-Coding-ux-workspace");
+        fs::create_dir(&dir2).unwrap();
+        create_session_with_cwd(&dir2, "sess-2", "/Users/abc/Coding/ux-workspace");
+
+        let result = find_local_project_by_name(projects_dir, "ux-workspace");
+        assert!(result.is_none(), "Should return None for ambiguous match");
+    }
+
+    #[test]
+    fn test_find_colliding_projects_hyphenated_names() {
+        let temp_dir = tempdir().unwrap();
+        let projects_dir = temp_dir.path();
+
+        // Two dirs with hyphenated project names that collide
+        let dir1 = projects_dir.join("-Users-abc-my-app");
+        fs::create_dir(&dir1).unwrap();
+        create_session_with_cwd(&dir1, "sess-1", "/Users/abc/my-app");
+
+        let dir2 = projects_dir.join("-Users-abc-work-my-app");
+        fs::create_dir(&dir2).unwrap();
+        create_session_with_cwd(&dir2, "sess-2", "/Users/abc/work/my-app");
+
+        let collisions = find_colliding_projects(projects_dir);
+        assert_eq!(collisions.len(), 1);
+        assert!(collisions.contains_key("my-app"));
+        assert_eq!(collisions.get("my-app").unwrap().len(), 2);
     }
 }
