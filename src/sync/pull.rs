@@ -452,9 +452,8 @@ pub fn pull_history(
                     continue; // Skip this session
                 }
             } else {
-                log::warn!(
-                    "No matching local project found for '{}'. \
-                     Open the project with Claude Code locally first, or disable use_project_name_only.",
+                log::debug!(
+                    "No matching local project found for '{}', skipping",
                     project_name
                 );
                 skipped_no_local_match += 1;
