@@ -1334,6 +1334,8 @@ struct ProjectOverview {
     session_count: usize,
     last_activity: Option<String>,
     recent_sessions: Vec<SessionOverview>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    memory: Vec<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -1366,6 +1368,82 @@ fn is_after_cutoff(timestamp: Option<&str>, cutoff: &chrono::DateTime<chrono::Ut
             .map(|dt| dt.with_timezone(&chrono::Utc) >= *cutoff)
             .unwrap_or(false)
     })
+}
+
+/// Read memory entries from the project's memory/MEMORY.md index file.
+///
+/// Supports multiple MEMORY.md formats:
+/// - List items: `- [Title](file) — description` or `- plain text`
+/// - Section headers: `## Section Title` (with optional body lines like `详见 [file]`)
+///
+/// For list items, extracts title + description. For section headers,
+/// combines the heading with the first non-empty body line as context.
+fn read_memory_entries(project_dir: &Path, max_entries: usize) -> Vec<String> {
+    let memory_file = project_dir.join("memory").join("MEMORY.md");
+    let content = match fs::read_to_string(&memory_file) {
+        Ok(c) => c,
+        Err(_) => return Vec::new(),
+    };
+
+    let lines: Vec<&str> = content.lines().collect();
+    let mut entries = Vec::new();
+    let mut i = 0;
+
+    while i < lines.len() && entries.len() < max_entries {
+        let line = lines[i];
+
+        if line.starts_with("- ") {
+            let entry = line.trim_start_matches("- ");
+            entries.push(strip_md_link(entry));
+        } else if line.starts_with("## ") {
+            let heading = line.trim_start_matches('#').trim();
+            // Look ahead for the first non-empty prose line as context
+            let mut body = None;
+            for j in (i + 1)..lines.len() {
+                let next = lines[j].trim();
+                if next.is_empty() {
+                    continue;
+                }
+                // Stop at next heading or list item (they'll be processed separately)
+                if next.starts_with('#') || next.starts_with("- ") {
+                    break;
+                }
+                // Skip code blocks, tables, and block quotes
+                if next.starts_with("```") || next.starts_with('|') || next.starts_with('>') {
+                    continue;
+                }
+                body = Some(strip_md_link(next));
+                break;
+            }
+            // Only emit heading if it has a meaningful body line
+            if let Some(desc) = body {
+                entries.push(format!("{} — {}", heading, desc));
+            }
+        }
+
+        i += 1;
+    }
+
+    entries
+}
+
+/// Strip markdown link syntax: `[Title](url) rest` → `Title rest`,
+/// `详见 [file](url) — desc` → `详见 file — desc`
+fn strip_md_link(text: &str) -> String {
+    let mut result = text.to_string();
+    while let Some(open) = result.find('[') {
+        if let Some(close) = result[open..].find("](") {
+            let close_abs = open + close;
+            if let Some(paren_end) = result[close_abs + 2..].find(')') {
+                let paren_end_abs = close_abs + 2 + paren_end;
+                let link_text = result[open + 1..close_abs].to_string();
+                result = format!("{}{}{}", &result[..open], link_text, &result[paren_end_abs + 1..]);
+                continue;
+            }
+        }
+        break;
+    }
+    result
 }
 
 /// Read project description from CLAUDE.md (priority) or README.md
@@ -1571,6 +1649,8 @@ pub fn handle_session_overview(
             })
             .collect();
 
+        let memory = read_memory_entries(&project.dir_path, 10);
+
         overviews.push(ProjectOverview {
             name: project.name.clone(),
             path: project_path,
@@ -1578,6 +1658,7 @@ pub fn handle_session_overview(
             session_count: project.session_count,
             last_activity: project.last_activity.clone(),
             recent_sessions,
+            memory,
         });
     }
 
@@ -1638,6 +1719,13 @@ pub fn handle_session_overview(
                 let prefix = if is_last { "  " } else { "│ " };
                 for msg in &sess.recent_messages {
                     println!("  {}  • {}", prefix, msg.dimmed());
+                }
+            }
+
+            if !proj.memory.is_empty() {
+                println!("  {} {}", "📝".dimmed(), "Memory:".dimmed());
+                for entry in &proj.memory {
+                    println!("     • {}", truncate_chars(entry, 70).dimmed());
                 }
             }
 
