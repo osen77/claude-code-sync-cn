@@ -28,7 +28,7 @@ fn parse_tag_name(response: &str) -> Option<String> {
     // Handle both compact JSON ("tag_name":"v1.0") and pretty JSON ("tag_name": "v1.0")
     let pos = response.find("\"tag_name\"")?;
     let rest = &response[pos + 10..]; // skip "tag_name"
-    // Skip optional whitespace and colon
+                                      // Skip optional whitespace and colon
     let rest = rest.trim_start_matches(|c: char| c == ':' || c.is_whitespace());
     // Skip opening quote
     let rest = rest.trim_start_matches('"');
@@ -39,10 +39,7 @@ fn parse_tag_name(response: &str) -> Option<String> {
 
 /// Fetch release info using gh CLI (authenticated, 5000 req/hr limit)
 fn fetch_with_gh(api_path: &str) -> Option<String> {
-    let output = Command::new("gh")
-        .args(["api", api_path])
-        .output()
-        .ok()?;
+    let output = Command::new("gh").args(["api", api_path]).output().ok()?;
 
     if !output.status.success() {
         return None;
@@ -135,8 +132,7 @@ pub fn check_for_update_silent() -> Option<String> {
     let url = format!("https://api.github.com/{}", api_path);
 
     // Try gh CLI first, fallback to curl with shorter timeout
-    let response = fetch_with_gh(&api_path)
-        .or_else(|| fetch_with_curl(&url, 5))?;
+    let response = fetch_with_gh(&api_path).or_else(|| fetch_with_curl(&url, 5))?;
 
     let latest = parse_tag_name(&response)?;
     let current = current_version();
@@ -183,13 +179,7 @@ fn download_file(url: &str, dest: &PathBuf) -> Result<()> {
     println!("{}", format!("   {}", url).cyan());
 
     let status = Command::new("curl")
-        .args([
-            "-fSL",
-            "--progress-bar",
-            "-o",
-            dest.to_str().unwrap(),
-            url,
-        ])
+        .args(["-fSL", "--progress-bar", "-o", dest.to_str().unwrap(), url])
         .status()
         .context("Failed to execute curl")?;
 
@@ -229,7 +219,12 @@ fn download_and_replace(version: &str) -> Result<()> {
     {
         // Extract tar.gz on Unix
         let status = Command::new("tar")
-            .args(["-xzf", archive_path.to_str().unwrap(), "-C", temp_dir.to_str().unwrap()])
+            .args([
+                "-xzf",
+                archive_path.to_str().unwrap(),
+                "-C",
+                temp_dir.to_str().unwrap(),
+            ])
             .status()
             .context("Failed to execute tar")?;
 
@@ -289,24 +284,39 @@ fn download_and_replace(version: &str) -> Result<()> {
 
         println!("{}", "✓ 更新完成".green());
         println!();
-        println!(
-            "{}",
-            "注意: 旧版本已保存为 .old 文件，可手动删除".yellow()
-        );
+        println!("{}", "注意: 旧版本已保存为 .old 文件，可手动删除".yellow());
     }
 
     #[cfg(not(windows))]
     {
-        // On Unix, we can replace directly
-        fs::copy(&new_binary, &current_exe).context("Failed to install new executable")?;
+        // On Unix/macOS, do not overwrite the running executable in place.
+        // macOS can kill a Mach-O binary after an in-place overwrite because
+        // code-signing state is cached by vnode/path. Install via a fresh inode.
+        let install_dir = current_exe
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Current executable has no parent directory"))?;
+        let temp_install = install_dir.join(format!(".{}.new-{}", BINARY_NAME, std::process::id()));
+        let backup_path = install_dir.join(format!("{}.old", BINARY_NAME));
 
-        // Set executable permission
+        let _ = fs::remove_file(&temp_install);
+        fs::copy(&new_binary, &temp_install).context("Failed to stage new executable")?;
+
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&current_exe, fs::Permissions::from_mode(0o755))
+            fs::set_permissions(&temp_install, fs::Permissions::from_mode(0o755))
                 .context("Failed to set executable permission")?;
         }
+
+        let _ = fs::remove_file(&backup_path);
+        fs::rename(&current_exe, &backup_path).context("Failed to move old executable aside")?;
+
+        if let Err(e) = fs::rename(&temp_install, &current_exe) {
+            let _ = fs::rename(&backup_path, &current_exe);
+            return Err(e).context("Failed to install new executable");
+        }
+
+        let _ = fs::remove_file(&backup_path);
 
         println!("{}", "✓ 更新完成".green());
     }
@@ -350,7 +360,10 @@ pub fn handle_update(check_only: bool) -> Result<()> {
     println!();
 
     if check_only {
-        println!("{}", format!("运行 '{} update' 进行更新", BINARY_NAME).cyan());
+        println!(
+            "{}",
+            format!("运行 '{} update' 进行更新", BINARY_NAME).cyan()
+        );
         return Ok(());
     }
 
@@ -385,11 +398,7 @@ pub fn print_update_notification(new_version: &str) {
     eprintln!();
     eprintln!(
         "{}",
-        format!(
-            "💡 发现新版本 {} (当前 v{})",
-            new_version, current
-        )
-        .yellow()
+        format!("💡 发现新版本 {} (当前 v{})", new_version, current).yellow()
     );
     eprintln!(
         "{}",
