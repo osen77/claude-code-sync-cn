@@ -45,6 +45,17 @@ fn source_label(source: &str) -> &str {
     }
 }
 
+fn memory_dir_name_for_source(source: &str) -> &'static str {
+    match source {
+        "codex" => ".memory",
+        _ => "memory",
+    }
+}
+
+fn memory_dir_for_source(project_dir: &Path, source: &str) -> PathBuf {
+    project_dir.join(memory_dir_name_for_source(source))
+}
+
 /// User data configuration for saving custom open commands
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
 struct UserData {
@@ -172,10 +183,16 @@ impl SessionSummary {
             title,
             project_name: project_name.to_string(),
             project_dir: session
-                .file_path
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_default(),
+                .cwd
+                .as_deref()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    session
+                        .file_path
+                        .parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_default()
+                }),
             file_path: session.file_path.clone(),
             message_count: user_count + assistant_count,
             user_message_count: user_count,
@@ -1511,7 +1528,7 @@ fn is_after_cutoff(timestamp: Option<&str>, cutoff: &chrono::DateTime<chrono::Ut
     })
 }
 
-/// Read memory entries from the project's memory/MEMORY.md index file.
+/// Read memory entries from the project's memory index file.
 ///
 /// Supports multiple MEMORY.md formats:
 /// - List items: `- [Title](file) — description` or `- plain text`
@@ -1519,8 +1536,8 @@ fn is_after_cutoff(timestamp: Option<&str>, cutoff: &chrono::DateTime<chrono::Ut
 ///
 /// For list items, extracts title + description. For section headers,
 /// combines the heading with the first non-empty body line as context.
-fn read_memory_entries(project_dir: &Path, max_entries: usize) -> Vec<String> {
-    let memory_file = project_dir.join("memory").join("MEMORY.md");
+fn read_memory_entries(project_dir: &Path, source: &str, max_entries: usize) -> Vec<String> {
+    let memory_file = memory_dir_for_source(project_dir, source).join("MEMORY.md");
     let content = match fs::read_to_string(&memory_file) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
@@ -1722,6 +1739,12 @@ pub fn handle_session_overview(
                 ConversationSession::from_file(&s.file_path)
                     .ok()
                     .and_then(|conv| conv.cwd().map(|c| c.to_string()))
+            })
+            .or_else(|| {
+                project_sessions
+                    .iter()
+                    .find(|s| s.source == "codex" && !s.project_dir.as_os_str().is_empty())
+                    .map(|s| s.project_dir.display().to_string())
             });
 
         let description = project_path
@@ -1747,8 +1770,10 @@ pub fn handle_session_overview(
 
         let memory = project_sessions
             .iter()
-            .find(|s| s.source == "claude")
-            .map(|s| read_memory_entries(&s.project_dir, 10))
+            .find_map(|s| {
+                let entries = read_memory_entries(&s.project_dir, &s.source, 10);
+                (!entries.is_empty()).then_some(entries)
+            })
             .unwrap_or_default();
 
         overviews.push(ProjectOverview {
@@ -2020,6 +2045,13 @@ struct MemorySearchResult {
     matches: Vec<MemoryMatch>,
     #[serde(skip)]
     match_mode: MatchMode,
+}
+
+#[derive(Debug, Clone)]
+struct MemorySearchRoot {
+    project: String,
+    dir_path: PathBuf,
+    source: String,
 }
 
 impl Default for MatchMode {
@@ -2316,7 +2348,7 @@ fn format_compact_relative_time(timestamp: &str) -> String {
 
 /// Search memory files (*.md) in project memory directories
 fn search_memory_files(
-    projects: &[ProjectSummary],
+    roots: &[MemorySearchRoot],
     keywords: &[&str],
     context_chars: usize,
 ) -> Vec<MemorySearchResult> {
@@ -2324,8 +2356,8 @@ fn search_memory_files(
     let multi_keyword = keywords_lower.len() > 1;
     let mut results = Vec::new();
 
-    for project in projects {
-        let memory_dir = project.dir_path.join("memory");
+    for root in roots {
+        let memory_dir = memory_dir_for_source(&root.dir_path, &root.source);
         if !memory_dir.is_dir() {
             continue;
         }
@@ -2373,11 +2405,11 @@ fn search_memory_files(
                 }
             }
 
-            let file_label = format!("memory/{}", file_name);
+            let file_label = format!("{}/{}", memory_dir_name_for_source(&root.source), file_name);
 
             if !and_matches.is_empty() {
                 results.push(MemorySearchResult {
-                    project: project.name.clone(),
+                    project: root.project.clone(),
                     file: file_label.clone(),
                     matches: and_matches,
                     match_mode: MatchMode::And,
@@ -2385,7 +2417,7 @@ fn search_memory_files(
             }
             if !or_matches.is_empty() {
                 results.push(MemorySearchResult {
-                    project: project.name.clone(),
+                    project: root.project.clone(),
                     file: file_label,
                     matches: or_matches,
                     match_mode: MatchMode::Or,
@@ -2398,6 +2430,34 @@ fn search_memory_files(
     results.sort_by(|a, b| a.match_mode.cmp(&b.match_mode));
 
     results
+}
+
+fn memory_search_roots_from_sessions(sessions: &[SessionSummary]) -> Vec<MemorySearchRoot> {
+    let mut seen = std::collections::HashSet::new();
+    let mut roots = Vec::new();
+
+    for session in sessions {
+        if session.project_dir.as_os_str().is_empty() {
+            continue;
+        }
+
+        let key = (
+            session.source.clone(),
+            session.project_name.clone(),
+            session.project_dir.clone(),
+        );
+        if !seen.insert(key) {
+            continue;
+        }
+
+        roots.push(MemorySearchRoot {
+            project: session.project_name.clone(),
+            dir_path: session.project_dir.clone(),
+            source: session.source.clone(),
+        });
+    }
+
+    roots
 }
 
 /// Search sessions across projects (both user and assistant messages).
@@ -2510,20 +2570,10 @@ pub fn handle_session_search(
         None
     };
 
-    // 2. Scan Claude projects for memory search.
-    let filtered_projects: Vec<ProjectSummary> = if source.includes_claude() {
-        let projects = scan_all_projects()?;
-        if let Some(name) = project_filter {
-            projects.into_iter().filter(|p| p.name == name).collect()
-        } else {
-            projects
-        }
-    } else {
-        Vec::new()
-    };
-
+    // 2. Scan sessions and derive project memory roots from the selected source.
     let mut all_sessions = scan_all_session_summaries(project_filter, source)?;
-    if all_sessions.is_empty() && filtered_projects.is_empty() {
+    let memory_roots = memory_search_roots_from_sessions(&all_sessions);
+    if all_sessions.is_empty() && memory_roots.is_empty() {
         if json_output {
             println!(
                 "{}",
@@ -2541,7 +2591,7 @@ pub fn handle_session_search(
     }
 
     // 3. Search memory files (no time filter - memory is persistent knowledge)
-    let memory_results = search_memory_files(&filtered_projects, keywords, context_chars);
+    let memory_results = search_memory_files(&memory_roots, keywords, context_chars);
 
     // 4. Apply time filter.
     if let Some(ref cutoff_dt) = cutoff {
@@ -2864,6 +2914,25 @@ mod tests {
         let short = session.display_title(10);
         assert!(short.chars().count() <= 10);
         assert!(short.ends_with("..."));
+    }
+
+    #[test]
+    fn test_codex_session_uses_cwd_as_project_dir() {
+        let session = CodexSession {
+            session_id: "test".to_string(),
+            entries: Vec::new(),
+            file_path: PathBuf::from("/tmp/codex/sessions/session.jsonl"),
+            cwd: Some("/tmp/demo-project".to_string()),
+        };
+
+        let summary = SessionSummary::from_codex_session(&session, "demo-project", "Demo".into());
+        assert_eq!(summary.project_dir, PathBuf::from("/tmp/demo-project"));
+    }
+
+    #[test]
+    fn test_memory_dir_name_by_source() {
+        assert_eq!(memory_dir_name_for_source("claude"), "memory");
+        assert_eq!(memory_dir_name_for_source("codex"), ".memory");
     }
 
     #[test]
