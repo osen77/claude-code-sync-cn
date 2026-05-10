@@ -1,3 +1,4 @@
+mod codex;
 mod config;
 mod conflict;
 mod filter;
@@ -14,7 +15,7 @@ mod sync;
 mod undo;
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use colored::Colorize;
 use std::path::PathBuf;
 
@@ -469,6 +470,10 @@ enum SessionAction {
         /// Show session IDs
         #[arg(long)]
         show_ids: bool,
+
+        /// Session source to query (default: all)
+        #[arg(long, value_enum, default_value_t = SessionSourceArg::All)]
+        source: SessionSourceArg,
     },
 
     /// Search sessions and memory files by keyword (multiple words = AND match)
@@ -499,6 +504,10 @@ enum SessionAction {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+
+        /// Session source to query (default: all)
+        #[arg(long, value_enum, default_value_t = SessionSourceArg::All)]
+        source: SessionSourceArg,
     },
 
     /// Show session details (supports drill-down with --tail/--head/--around)
@@ -525,6 +534,10 @@ enum SessionAction {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+
+        /// Session source to query (default: all)
+        #[arg(long, value_enum, default_value_t = SessionSourceArg::All)]
+        source: SessionSourceArg,
     },
 
     /// Rename session (change title)
@@ -547,7 +560,11 @@ enum SessionAction {
     },
 
     /// List all projects (non-interactive)
-    Projects,
+    Projects {
+        /// Session source to query (default: all)
+        #[arg(long, value_enum, default_value_t = SessionSourceArg::All)]
+        source: SessionSourceArg,
+    },
 
     /// Overview of all projects with recent session context (for agent consumption)
     Overview {
@@ -562,7 +579,28 @@ enum SessionAction {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+
+        /// Session source to query (default: all)
+        #[arg(long, value_enum, default_value_t = SessionSourceArg::All)]
+        source: SessionSourceArg,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum SessionSourceArg {
+    All,
+    Claude,
+    Codex,
+}
+
+impl From<SessionSourceArg> for handlers::session::SessionSourceFilter {
+    fn from(value: SessionSourceArg) -> Self {
+        match value {
+            SessionSourceArg::All => Self::All,
+            SessionSourceArg::Claude => Self::Claude,
+            SessionSourceArg::Codex => Self::Codex,
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -635,7 +673,14 @@ fn main() -> Result<()> {
     let is_uninstall_command = matches!(command, Commands::Uninstall { .. });
 
     // Run onboarding if needed (skip for commands that don't require sync repo)
-    if needs_onboarding && !is_init_command && !is_config_command && !is_session_command && !is_setup_command && !is_update_command && !is_uninstall_command {
+    if needs_onboarding
+        && !is_init_command
+        && !is_config_command
+        && !is_session_command
+        && !is_setup_command
+        && !is_update_command
+        && !is_uninstall_command
+    {
         log::info!("Running onboarding flow - first time setup detected");
 
         // Try non-interactive init first (from config file)
@@ -655,7 +700,12 @@ fn main() -> Result<()> {
     }
 
     match command {
-        Commands::Init { local, remote, clone, config } => {
+        Commands::Init {
+            local,
+            remote,
+            clone,
+            config,
+        } => {
             // If config file is provided, use non-interactive init
             if config.is_some() {
                 run_init_from_config(config)?;
@@ -686,10 +736,7 @@ fn main() -> Result<()> {
                     filter::FilterConfig::default().save()?;
                 }
 
-                println!(
-                    "{}",
-                    "Clone and initialization complete!".green().bold()
-                );
+                println!("{}", "Clone and initialization complete!".green().bold());
             } else if let Some(local_path) = local {
                 // Use CLI args for init (local path)
                 sync::init_sync_repo(&local_path, remote.as_deref())?;
@@ -699,7 +746,12 @@ fn main() -> Result<()> {
 
                 println!(
                     "{}",
-                    format!("Cloning from {} to {}...", remote_url, default_path.display()).cyan()
+                    format!(
+                        "Cloning from {} to {}...",
+                        remote_url,
+                        default_path.display()
+                    )
+                    .cyan()
                 );
 
                 scm::clone(&remote_url, &default_path)?;
@@ -711,10 +763,7 @@ fn main() -> Result<()> {
                     filter::FilterConfig::default().save()?;
                 }
 
-                println!(
-                    "{}",
-                    "Clone and initialization complete!".green().bold()
-                );
+                println!("{}", "Clone and initialization complete!".green().bold());
             } else {
                 // No args provided, try config file first, then fall back to setup wizard
                 if !try_init_from_config()? {
@@ -864,7 +913,11 @@ fn main() -> Result<()> {
                 sync::remove_remote(&name)?;
             }
         },
-        Commands::Undo { operation, verbose, quiet } => {
+        Commands::Undo {
+            operation,
+            verbose,
+            quiet,
+        } => {
             // Determine verbosity level
             let verbosity = if verbose {
                 VerbosityLevel::Verbose
@@ -882,7 +935,7 @@ fn main() -> Result<()> {
                     handle_undo_push(preview, verbosity)?;
                 }
             }
-        },
+        }
         Commands::History { action } => match action {
             HistoryAction::List { limit } => {
                 handle_history_list(limit)?;
@@ -988,10 +1041,14 @@ fn main() -> Result<()> {
                     // Interactive mode
                     handle_session_interactive(project.as_deref())?;
                 }
-                Some(SessionAction::List { project: list_project, show_ids }) => {
+                Some(SessionAction::List {
+                    project: list_project,
+                    show_ids,
+                    source,
+                }) => {
                     // Use subcommand project filter if provided, otherwise use global
                     let filter = list_project.as_deref().or(project.as_deref());
-                    handle_session_list(filter, show_ids)?;
+                    handle_session_list(filter, show_ids, source.into())?;
                 }
                 Some(SessionAction::Search {
                     keyword,
@@ -1001,6 +1058,7 @@ fn main() -> Result<()> {
                     limit,
                     user_only,
                     json,
+                    source,
                 }) => {
                     let filter = search_project.as_deref().or(project.as_deref());
                     let keywords: Vec<&str> = keyword.iter().map(|s| s.as_str()).collect();
@@ -1012,6 +1070,7 @@ fn main() -> Result<()> {
                         limit,
                         user_only,
                         json,
+                        source.into(),
                     )?;
                 }
                 Some(SessionAction::Show {
@@ -1021,6 +1080,7 @@ fn main() -> Result<()> {
                     around,
                     num,
                     json,
+                    source,
                 }) => {
                     handle_session_show(
                         &session_id,
@@ -1029,6 +1089,7 @@ fn main() -> Result<()> {
                         around.as_deref(),
                         num,
                         json,
+                        source.into(),
                     )?;
                 }
                 Some(SessionAction::Rename { session_id, title }) => {
@@ -1037,11 +1098,16 @@ fn main() -> Result<()> {
                 Some(SessionAction::Delete { session_id, force }) => {
                     handle_session_delete(&session_id, force)?;
                 }
-                Some(SessionAction::Projects) => {
-                    handle_session_projects()?;
+                Some(SessionAction::Projects { source }) => {
+                    handle_session_projects(source.into())?;
                 }
-                Some(SessionAction::Overview { recent, since, json }) => {
-                    handle_session_overview(recent, since.as_deref(), json)?;
+                Some(SessionAction::Overview {
+                    recent,
+                    since,
+                    json,
+                    source,
+                }) => {
+                    handle_session_overview(recent, since.as_deref(), json, source.into())?;
                 }
             }
         }
