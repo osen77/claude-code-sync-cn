@@ -11,10 +11,39 @@ use serde_json::json;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::codex::{
+    codex_history_path, codex_sessions_dir, discover_codex_sessions, load_codex_history_titles,
+    CodexSession,
+};
+use crate::config::ConfigManager;
 use crate::filter::FilterConfig;
 use crate::parser::ConversationSession;
 use crate::sync::discovery::{claude_projects_dir, discover_sessions, extract_project_name};
-use crate::config::ConfigManager;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionSourceFilter {
+    All,
+    Claude,
+    Codex,
+}
+
+impl SessionSourceFilter {
+    fn includes_claude(self) -> bool {
+        matches!(self, Self::All | Self::Claude)
+    }
+
+    fn includes_codex(self) -> bool {
+        matches!(self, Self::All | Self::Codex)
+    }
+}
+
+fn source_label(source: &str) -> &str {
+    match source {
+        "claude" => "CC",
+        "codex" => "CX",
+        _ => "??",
+    }
+}
 
 /// User data configuration for saving custom open commands
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default)]
@@ -37,6 +66,7 @@ pub struct ProjectSummary {
 /// Session summary for listing and operations
 #[derive(Debug, Clone)]
 pub struct SessionSummary {
+    pub source: String,
     pub session_id: String,
     pub title: String,
     pub project_name: String,
@@ -54,7 +84,11 @@ impl SessionSummary {
     /// Create a SessionSummary from a ConversationSession.
     /// Message counts use "turn" granularity: consecutive assistant entries
     /// between two user messages count as one assistant turn.
-    pub fn from_session(session: &ConversationSession, project_name: &str, project_dir: &Path) -> Self {
+    pub fn from_session(
+        session: &ConversationSession,
+        project_name: &str,
+        project_dir: &Path,
+    ) -> Self {
         let file_size = fs::metadata(&session.file_path)
             .map(|m| m.len())
             .unwrap_or(0);
@@ -85,6 +119,7 @@ impl SessionSummary {
         }
 
         SessionSummary {
+            source: "claude".to_string(),
             session_id: session.session_id.clone(),
             title: session.title().unwrap_or_else(|| "(No title)".to_string()),
             project_name: project_name.to_string(),
@@ -118,6 +153,37 @@ impl SessionSummary {
             .as_ref()
             .map(|ts| format_relative_time(ts))
             .unwrap_or_else(|| "Unknown".to_string())
+    }
+}
+
+impl SessionSummary {
+    /// Create a SessionSummary from a Codex session.
+    pub fn from_codex_session(session: &CodexSession, project_name: &str, title: String) -> Self {
+        let file_size = fs::metadata(&session.file_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let messages = session.display_messages(false);
+        let user_count = messages.iter().filter(|m| m.role == "user").count();
+        let assistant_count = messages.iter().filter(|m| m.role == "assistant").count();
+
+        SessionSummary {
+            source: "codex".to_string(),
+            session_id: session.session_id.clone(),
+            title,
+            project_name: project_name.to_string(),
+            project_dir: session
+                .file_path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_default(),
+            file_path: session.file_path.clone(),
+            message_count: user_count + assistant_count,
+            user_message_count: user_count,
+            assistant_message_count: assistant_count,
+            first_timestamp: session.first_timestamp(),
+            last_activity: session.latest_timestamp(),
+            file_size,
+        }
     }
 }
 
@@ -244,10 +310,7 @@ pub fn scan_all_projects() -> Result<Vec<ProjectSummary>> {
             .unwrap_or_else(|| extract_project_name(dir_name).to_string());
 
         // Count only valid sessions (with messages and real titles)
-        let valid_session_count = sessions
-            .iter()
-            .filter(|s| is_valid_session(s))
-            .count();
+        let valid_session_count = sessions.iter().filter(|s| is_valid_session(s)).count();
 
         // Skip projects with no valid sessions
         if valid_session_count == 0 {
@@ -286,7 +349,9 @@ fn is_valid_session_summary(summary: &SessionSummary) -> bool {
 }
 
 /// Scan sessions for a specific project, returns (valid_sessions, filtered_count)
-pub fn scan_project_sessions_with_filtered(project: &ProjectSummary) -> Result<(Vec<SessionSummary>, usize)> {
+pub fn scan_project_sessions_with_filtered(
+    project: &ProjectSummary,
+) -> Result<(Vec<SessionSummary>, usize)> {
     // Use a filter with no file size limit for session listing
     let mut filter = FilterConfig::default();
     filter.max_file_size_bytes = u64::MAX;
@@ -317,6 +382,55 @@ pub fn scan_project_sessions(project: &ProjectSummary) -> Result<Vec<SessionSumm
     Ok(sessions)
 }
 
+fn scan_codex_session_summaries() -> Result<Vec<SessionSummary>> {
+    let sessions_dir = codex_sessions_dir()?;
+    let history_path = codex_history_path()?;
+    let titles = load_codex_history_titles(&history_path).unwrap_or_default();
+    let sessions = discover_codex_sessions(&sessions_dir)?;
+
+    let mut summaries: Vec<SessionSummary> = sessions
+        .iter()
+        .map(|session| {
+            let project_name = session.project_name().unwrap_or("codex");
+            let title = session.title(titles.get(&session.session_id).map(String::as_str));
+            SessionSummary::from_codex_session(session, project_name, title)
+        })
+        .filter(|s| is_valid_session_summary(s))
+        .collect();
+
+    summaries.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+    Ok(summaries)
+}
+
+fn scan_all_session_summaries(
+    project_filter: Option<&str>,
+    source: SessionSourceFilter,
+) -> Result<Vec<SessionSummary>> {
+    let mut summaries = Vec::new();
+
+    if source.includes_claude() {
+        let projects = scan_all_projects()?;
+        for project in projects {
+            if project_filter.is_some_and(|name| project.name != name) {
+                continue;
+            }
+            summaries.extend(scan_project_sessions(&project)?);
+        }
+    }
+
+    if source.includes_codex() {
+        for session in scan_codex_session_summaries()? {
+            if project_filter.is_some_and(|name| session.project_name != name) {
+                continue;
+            }
+            summaries.push(session);
+        }
+    }
+
+    summaries.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+    Ok(summaries)
+}
+
 /// Get filtered (invalid) sessions for cleanup
 pub fn get_filtered_sessions(project: &ProjectSummary) -> Result<Vec<SessionSummary>> {
     let mut filter = FilterConfig::default();
@@ -335,10 +449,7 @@ pub fn get_filtered_sessions(project: &ProjectSummary) -> Result<Vec<SessionSumm
 /// Detect if current directory corresponds to a Claude project
 pub fn detect_current_project() -> Result<Option<ProjectSummary>> {
     let cwd = std::env::current_dir()?;
-    let project_name = cwd
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or_default();
+    let project_name = cwd.file_name().and_then(|n| n.to_str()).unwrap_or_default();
 
     if project_name.is_empty() {
         return Ok(None);
@@ -397,10 +508,7 @@ fn show_project_menu(projects: &[ProjectSummary]) -> Result<ProjectMenuChoice> {
                 .as_ref()
                 .map(|t| format_relative_time(t))
                 .unwrap_or_else(|| "Unknown".to_string());
-            format!(
-                "{:<30} {:>3} sessions  {}",
-                p.name, p.session_count, time
-            )
+            format!("{:<30} {:>3} sessions  {}", p.name, p.session_count, time)
         })
         .collect();
 
@@ -505,7 +613,10 @@ fn show_session_menu(
 }
 
 /// Search sessions by keyword in user messages (delegates to search_sessions_full)
-fn search_sessions(sessions: &[SessionSummary], keyword: &str) -> Vec<(SessionSummary, Vec<String>)> {
+fn search_sessions(
+    sessions: &[SessionSummary],
+    keyword: &str,
+) -> Vec<(SessionSummary, Vec<String>)> {
     // Split input into multiple keywords for AND matching
     let keywords: Vec<&str> = keyword.split_whitespace().collect();
     search_sessions_full(sessions, &keywords, 60, true)
@@ -539,7 +650,11 @@ fn extract_match_snippet(text: &str, keyword_lower: &str, max_len: usize) -> Str
     let half = max_len / 2;
     let start = match_pos.saturating_sub(half);
     let end = (start + max_len).min(total);
-    let start = if end == total { end.saturating_sub(max_len) } else { start };
+    let start = if end == total {
+        end.saturating_sub(max_len)
+    } else {
+        start
+    };
 
     let snippet: String = text_chars[start..end].iter().collect();
     let snippet = snippet.replace('\n', " ");
@@ -598,13 +713,7 @@ fn show_search_results(
     let mut options: Vec<String> = results
         .iter()
         .enumerate()
-        .map(|(i, (s, _))| {
-            format!(
-                "[{:>2}] {}",
-                i + 1,
-                s.display_title(50),
-            )
-        })
+        .map(|(i, (s, _))| format!("[{:>2}] {}", i + 1, s.display_title(50),))
         .collect();
     options.push(back_option.clone());
 
@@ -776,8 +885,8 @@ fn load_user_data() -> Result<UserData> {
 /// Save user data configuration to file
 fn save_user_data(data: &UserData) -> Result<()> {
     let path = ConfigManager::user_data_path()?;
-    let content = serde_json::to_string_pretty(data)
-        .with_context(|| "Failed to serialize user data")?;
+    let content =
+        serde_json::to_string_pretty(data).with_context(|| "Failed to serialize user data")?;
     fs::write(&path, content)
         .with_context(|| format!("Failed to write user data: {}", path.display()))?;
     Ok(())
@@ -828,9 +937,16 @@ fn open_in_claude(session: &SessionSummary) -> Result<bool> {
                     if data.command_template.is_some() {
                         data.command_template = None;
                         if let Err(e) = save_user_data(&data) {
-                            println!("{} Failed to clear saved command: {}", "WARNING:".yellow(), e);
+                            println!(
+                                "{} Failed to clear saved command: {}",
+                                "WARNING:".yellow(),
+                                e
+                            );
                         } else {
-                            println!("{} Saved command cleared, using default next time", "INFO:".cyan());
+                            println!(
+                                "{} Saved command cleared, using default next time",
+                                "INFO:".cyan()
+                            );
                         }
                     }
                 }
@@ -1078,7 +1194,9 @@ fn cleanup_sessions_interactive(project: &ProjectSummary) -> Result<usize> {
 pub fn handle_session_interactive(project_filter: Option<&str>) -> Result<()> {
     // Check if running in interactive terminal
     if !atty::is(atty::Stream::Stdout) {
-        anyhow::bail!("Interactive mode requires a terminal. Use subcommands for non-interactive use.");
+        anyhow::bail!(
+            "Interactive mode requires a terminal. Use subcommands for non-interactive use."
+        );
     }
 
     println!();
@@ -1229,41 +1347,50 @@ pub fn handle_session_interactive(project_filter: Option<&str>) -> Result<()> {
 // ============================================================================
 
 /// List sessions (non-interactive)
-pub fn handle_session_list(project_filter: Option<&str>, show_ids: bool) -> Result<()> {
-    let projects = scan_all_projects()?;
+pub fn handle_session_list(
+    project_filter: Option<&str>,
+    show_ids: bool,
+    source: SessionSourceFilter,
+) -> Result<()> {
+    let sessions = scan_all_session_summaries(project_filter, source)?;
 
-    let filtered_projects: Vec<_> = if let Some(name) = project_filter {
-        projects.into_iter().filter(|p| p.name == name).collect()
-    } else {
-        projects
-    };
-
-    if filtered_projects.is_empty() {
+    if sessions.is_empty() {
         if project_filter.is_some() {
             println!("{}", "No matching project found.".yellow());
         } else {
-            println!("{}", "No projects found.".yellow());
+            println!("{}", "No sessions found.".yellow());
         }
         return Ok(());
     }
 
-    for project in &filtered_projects {
+    let mut groups: Vec<(String, Vec<SessionSummary>)> = Vec::new();
+    for session in sessions {
+        if let Some((_, existing)) = groups
+            .iter_mut()
+            .find(|(name, _)| name == &session.project_name)
+        {
+            existing.push(session);
+        } else {
+            groups.push((session.project_name.clone(), vec![session]));
+        }
+    }
+
+    for (project_name, sessions) in &groups {
         println!();
         println!(
             "{} {} ({} sessions)",
             "Project:".cyan().bold(),
-            project.name.bold(),
-            project.session_count
+            project_name.bold(),
+            sessions.len()
         );
         println!("{}", "-".repeat(60));
-
-        let sessions = scan_project_sessions(project)?;
 
         for (i, session) in sessions.iter().enumerate() {
             if show_ids {
                 println!(
-                    "[{:>2}] {} | {} | {} msgs | {}",
+                    "[{:>2}] [{}] {} | {} | {} msgs | {}",
                     i + 1,
+                    source_label(&session.source),
                     session.session_id.dimmed(),
                     session.display_title(40),
                     session.message_count,
@@ -1271,8 +1398,9 @@ pub fn handle_session_list(project_filter: Option<&str>, show_ids: bool) -> Resu
                 );
             } else {
                 println!(
-                    "[{:>2}] {} | {} msgs | {}",
+                    "[{:>2}] [{}] {} | {} msgs | {}",
                     i + 1,
+                    source_label(&session.source),
                     session.display_title(50),
                     session.message_count,
                     session.relative_time()
@@ -1285,22 +1413,34 @@ pub fn handle_session_list(project_filter: Option<&str>, show_ids: bool) -> Resu
 }
 
 /// List all projects (non-interactive)
-pub fn handle_session_projects() -> Result<()> {
-    let mut projects = scan_all_projects()?;
+pub fn handle_session_projects(source: SessionSourceFilter) -> Result<()> {
+    let sessions = scan_all_session_summaries(None, source)?;
 
-    if projects.is_empty() {
+    if sessions.is_empty() {
         println!("{}", "No projects found.".yellow());
         return Ok(());
     }
 
-    // Sort by last activity (most recent first)
+    let mut projects: Vec<ProjectSummary> = Vec::new();
+    for session in sessions {
+        if let Some(project) = projects.iter_mut().find(|p| p.name == session.project_name) {
+            project.session_count += 1;
+            if session.last_activity > project.last_activity {
+                project.last_activity = session.last_activity;
+            }
+        } else {
+            projects.push(ProjectSummary {
+                name: session.project_name.clone(),
+                dir_path: session.project_dir.clone(),
+                session_count: 1,
+                last_activity: session.last_activity.clone(),
+            });
+        }
+    }
+
     projects.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
 
-    println!(
-        "{} ({} projects)",
-        "Projects".cyan().bold(),
-        projects.len()
-    );
+    println!("{} ({} projects)", "Projects".cyan().bold(), projects.len());
     println!("{}", "-".repeat(60));
 
     for (i, project) in projects.iter().enumerate() {
@@ -1340,6 +1480,7 @@ struct ProjectOverview {
 
 #[derive(serde::Serialize)]
 struct SessionOverview {
+    source: String,
     session_id: String,
     title: String,
     message_count: usize,
@@ -1437,7 +1578,12 @@ fn strip_md_link(text: &str) -> String {
             if let Some(paren_end) = result[close_abs + 2..].find(')') {
                 let paren_end_abs = close_abs + 2 + paren_end;
                 let link_text = result[open + 1..close_abs].to_string();
-                result = format!("{}{}{}", &result[..open], link_text, &result[paren_end_abs + 1..]);
+                result = format!(
+                    "{}{}{}",
+                    &result[..open],
+                    link_text,
+                    &result[paren_end_abs + 1..]
+                );
                 continue;
             }
         }
@@ -1522,92 +1668,30 @@ fn extract_recent_user_messages(
     messages
 }
 
-/// Scan all projects with their parsed sessions in one pass (avoids double JSONL parsing)
-fn scan_all_projects_with_sessions() -> Result<Vec<(ProjectSummary, Vec<ConversationSession>)>> {
-    let claude_dir = claude_projects_dir()?;
-
-    if !claude_dir.exists() {
-        return Ok(Vec::new());
-    }
-
-    let mut results = Vec::new();
-    let filter = FilterConfig {
-        max_file_size_bytes: u64::MAX,
-        ..FilterConfig::default()
-    };
-
-    for entry in fs::read_dir(&claude_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if !path.is_dir() {
-            continue;
-        }
-
-        let dir_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
-
-        if dir_name.starts_with('.') {
-            continue;
-        }
-
-        let sessions = discover_sessions(&path, &filter).unwrap_or_default();
-        if sessions.is_empty() {
-            continue;
-        }
-
-        let project_name = sessions
-            .iter()
-            .find_map(|s| s.project_name().map(|n| n.to_string()))
-            .unwrap_or_else(|| extract_project_name(dir_name).to_string());
-
-        let valid_session_count = sessions.iter().filter(|s| is_valid_session(s)).count();
-        if valid_session_count == 0 {
-            continue;
-        }
-
-        let last_activity = sessions
-            .iter()
-            .filter(|s| s.message_count() > 0)
-            .filter_map(|s| s.latest_timestamp())
-            .max();
-
-        let summary = ProjectSummary {
-            name: project_name,
-            dir_path: path,
-            session_count: valid_session_count,
-            last_activity,
-        };
-
-        results.push((summary, sessions));
-    }
-
-    results.sort_by(|a, b| b.0.last_activity.cmp(&a.0.last_activity));
-    Ok(results)
-}
-
 /// Overview of all projects with recent session context
 pub fn handle_session_overview(
     recent_count: usize,
     since: Option<&str>,
     json_output: bool,
+    source: SessionSourceFilter,
 ) -> Result<()> {
     let since_cutoff = since.map(parse_duration_filter).transpose()?;
 
-    let mut project_sessions = scan_all_projects_with_sessions()?;
+    let mut sessions = scan_all_session_summaries(None, source)?;
 
     if let Some(ref cutoff) = since_cutoff {
-        project_sessions.retain(|(p, _)| is_after_cutoff(p.last_activity.as_deref(), cutoff));
+        sessions.retain(|s| is_after_cutoff(s.last_activity.as_deref(), cutoff));
     }
 
-    if project_sessions.is_empty() {
+    if sessions.is_empty() {
         if json_output {
-            println!("{}", serde_json::to_string_pretty(&json!({
-                "total_projects": 0,
-                "projects": []
-            }))?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&json!({
+                    "total_projects": 0,
+                    "projects": []
+                }))?
+            );
         } else {
             println!("{}", "No projects found.".yellow());
         }
@@ -1615,58 +1699,79 @@ pub fn handle_session_overview(
     }
 
     let mut overviews = Vec::new();
-    let total_sessions: usize = project_sessions.iter().map(|(p, _)| p.session_count).sum();
+    let total_sessions = sessions.len();
 
-    for (project, sessions) in &project_sessions {
-        let project_path = sessions
+    let mut groups: Vec<(String, Vec<SessionSummary>)> = Vec::new();
+    for session in sessions {
+        if let Some((_, existing)) = groups
+            .iter_mut()
+            .find(|(name, _)| name == &session.project_name)
+        {
+            existing.push(session);
+        } else {
+            groups.push((session.project_name.clone(), vec![session]));
+        }
+    }
+
+    for (project_name, mut project_sessions) in groups {
+        project_sessions.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+        let project_path = project_sessions
             .iter()
-            .find_map(|s| s.cwd().map(|c| c.to_string()));
+            .find(|s| s.source == "claude")
+            .and_then(|s| {
+                ConversationSession::from_file(&s.file_path)
+                    .ok()
+                    .and_then(|conv| conv.cwd().map(|c| c.to_string()))
+            });
 
         let description = project_path
             .as_deref()
             .and_then(|p| get_project_description(Path::new(p), 300));
 
-        let mut valid_sessions: Vec<&ConversationSession> = sessions
-            .iter()
-            .filter(|s| is_valid_session(s))
-            .collect();
-        valid_sessions.sort_by_key(|s| std::cmp::Reverse(s.latest_timestamp()));
-
-        let recent_sessions: Vec<SessionOverview> = valid_sessions
+        let recent_sessions: Vec<SessionOverview> = project_sessions
             .iter()
             .take(recent_count)
             .map(|s| {
-                let summary = SessionSummary::from_session(s, &project.name, &project.dir_path);
-                let title = summary.display_title(50);
-                let recent_messages = extract_recent_user_messages(s, 3, 10);
+                let title = s.display_title(50);
+                let recent_messages = extract_recent_messages_for_summary(s, 3, 10);
                 SessionOverview {
-                    session_id: summary.session_id,
+                    source: s.source.clone(),
+                    session_id: s.session_id.clone(),
                     title,
-                    message_count: summary.message_count,
-                    last_activity: summary.last_activity,
+                    message_count: s.message_count,
+                    last_activity: s.last_activity.clone(),
                     recent_messages,
                 }
             })
             .collect();
 
-        let memory = read_memory_entries(&project.dir_path, 10);
+        let memory = project_sessions
+            .iter()
+            .find(|s| s.source == "claude")
+            .map(|s| read_memory_entries(&s.project_dir, 10))
+            .unwrap_or_default();
 
         overviews.push(ProjectOverview {
-            name: project.name.clone(),
+            name: project_name,
             path: project_path,
             description,
-            session_count: project.session_count,
-            last_activity: project.last_activity.clone(),
+            session_count: project_sessions.len(),
+            last_activity: project_sessions
+                .first()
+                .and_then(|s| s.last_activity.clone()),
             recent_sessions,
             memory,
         });
     }
 
     if json_output {
-        println!("{}", serde_json::to_string_pretty(&json!({
-            "total_projects": overviews.len(),
-            "projects": overviews,
-        }))?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "total_projects": overviews.len(),
+                "projects": overviews,
+            }))?
+        );
     } else {
         println!(
             "{} projects, {} sessions\n",
@@ -1709,8 +1814,9 @@ pub fn handle_session_overview(
                     .unwrap_or_else(|| "?".to_string());
 
                 println!(
-                    "  {} {} ({} msgs, {})",
+                    "  {} [{}] {} ({} msgs, {})",
                     branch,
+                    source_label(&sess.source),
                     sess.title,
                     sess.message_count,
                     sess_time.dimmed(),
@@ -1746,129 +1852,133 @@ pub fn handle_session_show(
     around: Option<&str>,
     num: usize,
     json: bool,
+    source: SessionSourceFilter,
 ) -> Result<()> {
-    let projects = scan_all_projects()?;
+    let sessions = scan_all_session_summaries(None, source)?;
 
-    for project in &projects {
-        let sessions = scan_project_sessions(project)?;
+    if let Some(session) = sessions.iter().find(|s| s.session_id == session_id) {
+        // If no drill-down flags and not json, use interactive view
+        if session.source == "claude"
+            && tail.is_none()
+            && head.is_none()
+            && around.is_none()
+            && !json
+        {
+            show_session_details(session)?;
+            return Ok(());
+        }
 
-        if let Some(session) = sessions.iter().find(|s| s.session_id == session_id) {
-            // If no drill-down flags and not json, use interactive view
-            if tail.is_none() && head.is_none() && around.is_none() && !json {
-                show_session_details(session)?;
-                return Ok(());
-            }
+        // Drill-down mode: parse and filter messages
+        // JSON output uses full content (no truncation); terminal uses simplified
+        let messages = collect_display_messages_for_summary(session, json);
 
-            // Drill-down mode: parse and filter messages
-            let conv = ConversationSession::from_file(&session.file_path)?;
-            // JSON output uses full content (no truncation); terminal uses simplified
-            let messages = collect_display_messages(&conv, json);
-
-            if messages.is_empty() {
-                if json {
-                    println!(
-                        "{}",
-                        serde_json::to_string(&serde_json::json!({
-                            "session_id": session.session_id,
-                            "project": session.project_name,
-                            "title": session.title,
-                            "message_count": 0,
-                            "messages": []
-                        }))?
-                    );
-                } else {
-                    println!("(No messages found)");
-                }
-                return Ok(());
-            }
-
-            // Determine slice range
-            let total = messages.len();
-            let (start, end, showing) = if let Some(keyword) = around {
-                let keyword_lower = keyword.to_lowercase();
-                let pos = messages
-                    .iter()
-                    .position(|m| m.content.to_lowercase().contains(&keyword_lower))
-                    .unwrap_or(0);
-                let s = pos.saturating_sub(num);
-                let e = (pos + num + 1).min(total);
-                (s, e, format!("around:\"{}\":{}", keyword, num))
-            } else if let Some(n) = tail {
-                let s = total.saturating_sub(n);
-                (s, total, format!("tail:{}", n))
-            } else if let Some(n) = head {
-                (0, n.min(total), format!("head:{}", n))
-            } else {
-                (0, total, "all".to_string())
-            };
-
-            let slice = &messages[start..end];
-
+        if messages.is_empty() {
             if json {
-                let json_msgs: Vec<serde_json::Value> = slice
-                    .iter()
-                    .map(|m| {
-                        serde_json::json!({
-                            "index": m.index,
-                            "role": m.role,
-                            "timestamp": m.timestamp,
-                            "content": m.content,
-                        })
-                    })
-                    .collect();
-
                 println!(
                     "{}",
                     serde_json::to_string(&serde_json::json!({
+                        "source": session.source,
                         "session_id": session.session_id,
                         "project": session.project_name,
                         "title": session.title,
-                        "message_count": session.message_count,
-                        "showing": showing,
-                        "messages": json_msgs,
+                        "message_count": 0,
+                        "messages": []
                     }))?
                 );
             } else {
-                let is_tty = atty::is(atty::Stream::Stdout);
-                println!(
-                    "--- {} | {} | {} | {} msgs | showing {} ---",
-                    session.session_id,
-                    session.project_name,
-                    session.display_title(40),
-                    session.message_count,
-                    showing,
-                );
-                println!();
-                for m in slice {
-                    let role_tag = if m.role == "user" { "U" } else { "A" };
-                    let time_str = m
-                        .timestamp
-                        .as_ref()
-                        .map(|t| format_compact_relative_time(t))
-                        .unwrap_or_default();
-                    if is_tty {
-                        println!(
-                            "[{}] [{}] {}",
-                            format!("{}", m.index).cyan(),
-                            if m.role == "user" {
-                                role_tag.green().bold().to_string()
-                            } else {
-                                role_tag.blue().bold().to_string()
-                            },
-                            time_str.dimmed()
-                        );
-                    } else {
-                        println!("[{}] [{}] {}", m.index, role_tag, time_str);
-                    }
-                    for line in m.content.lines() {
-                        println!("  {}", line);
-                    }
-                    println!();
-                }
+                println!("(No messages found)");
             }
-
             return Ok(());
         }
+
+        // Determine slice range
+        let total = messages.len();
+        let (start, end, showing) = if let Some(keyword) = around {
+            let keyword_lower = keyword.to_lowercase();
+            let pos = messages
+                .iter()
+                .position(|m| m.content.to_lowercase().contains(&keyword_lower))
+                .unwrap_or(0);
+            let s = pos.saturating_sub(num);
+            let e = (pos + num + 1).min(total);
+            (s, e, format!("around:\"{}\":{}", keyword, num))
+        } else if let Some(n) = tail {
+            let s = total.saturating_sub(n);
+            (s, total, format!("tail:{}", n))
+        } else if let Some(n) = head {
+            (0, n.min(total), format!("head:{}", n))
+        } else {
+            (0, total, "all".to_string())
+        };
+
+        let slice = &messages[start..end];
+
+        if json {
+            let json_msgs: Vec<serde_json::Value> = slice
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                    "index": m.index,
+                    "role": m.role,
+                    "timestamp": m.timestamp,
+                        "content": m.content,
+                    })
+                })
+                .collect();
+
+            println!(
+                "{}",
+                serde_json::to_string(&serde_json::json!({
+                    "source": session.source,
+                    "session_id": session.session_id,
+                    "project": session.project_name,
+                    "title": session.title,
+                    "message_count": session.message_count,
+                    "showing": showing,
+                    "messages": json_msgs,
+                }))?
+            );
+        } else {
+            let is_tty = atty::is(atty::Stream::Stdout);
+            println!(
+                "--- [{}] {} | {} | {} | {} msgs | showing {} ---",
+                source_label(&session.source),
+                session.session_id,
+                session.project_name,
+                session.display_title(40),
+                session.message_count,
+                showing,
+            );
+            println!();
+            for m in slice {
+                let role_tag = if m.role == "user" { "U" } else { "A" };
+                let time_str = m
+                    .timestamp
+                    .as_ref()
+                    .map(|t| format_compact_relative_time(t))
+                    .unwrap_or_default();
+                if is_tty {
+                    println!(
+                        "[{}] [{}] {}",
+                        format!("{}", m.index).cyan(),
+                        if m.role == "user" {
+                            role_tag.green().bold().to_string()
+                        } else {
+                            role_tag.blue().bold().to_string()
+                        },
+                        time_str.dimmed()
+                    );
+                } else {
+                    println!("[{}] [{}] {}", m.index, role_tag, time_str);
+                }
+                for line in m.content.lines() {
+                    println!("  {}", line);
+                }
+                println!();
+            }
+        }
+
+        return Ok(());
     }
 
     anyhow::bail!("Session not found: {}", session_id)
@@ -2014,6 +2124,62 @@ fn collect_display_messages(conv: &ConversationSession, full_content: bool) -> V
     messages
 }
 
+fn collect_display_messages_for_summary(
+    session: &SessionSummary,
+    full_content: bool,
+) -> Vec<DisplayMessage> {
+    if session.source == "codex" {
+        let Ok(conv) = CodexSession::from_file(&session.file_path) else {
+            return Vec::new();
+        };
+        return conv
+            .display_messages(full_content)
+            .into_iter()
+            .enumerate()
+            .map(|(idx, message)| DisplayMessage {
+                index: idx + 1,
+                role: message.role,
+                timestamp: message.timestamp,
+                content: message.content,
+            })
+            .collect();
+    }
+
+    ConversationSession::from_file(&session.file_path)
+        .map(|conv| collect_display_messages(&conv, full_content))
+        .unwrap_or_default()
+}
+
+fn extract_recent_messages_for_summary(
+    session: &SessionSummary,
+    count: usize,
+    min_chars: usize,
+) -> Vec<String> {
+    if session.source == "codex" {
+        let Ok(conv) = CodexSession::from_file(&session.file_path) else {
+            return Vec::new();
+        };
+        let mut messages: Vec<String> = conv
+            .display_messages(false)
+            .into_iter()
+            .rev()
+            .filter(|m| m.role == "user")
+            .filter_map(|m| {
+                let text = m.content.replace('\n', " ");
+                let text = text.trim().to_string();
+                (text.chars().count() >= min_chars).then(|| truncate_chars(&text, 100))
+            })
+            .take(count)
+            .collect();
+        messages.reverse();
+        return messages;
+    }
+
+    ConversationSession::from_file(&session.file_path)
+        .map(|conv| extract_recent_user_messages(&conv, count, min_chars))
+        .unwrap_or_default()
+}
+
 /// Flush accumulated assistant texts and tools into a single DisplayMessage.
 fn flush_assistant_turn(
     messages: &mut Vec<DisplayMessage>,
@@ -2077,7 +2243,10 @@ fn parse_duration_filter(since: &str) -> Result<chrono::DateTime<chrono::Utc>> {
 
     let since = since.trim().to_lowercase();
     if since.len() < 2 {
-        anyhow::bail!("Invalid duration: '{}'. Use format like '1d', '3h', '1w'", since);
+        anyhow::bail!(
+            "Invalid duration: '{}'. Use format like '1d', '3h', '1w'",
+            since
+        );
     }
     let (num_str, unit) = since.split_at(since.len() - 1);
     let num: i64 = num_str
@@ -2245,67 +2414,40 @@ fn search_sessions_full(
     let mut results = Vec::new();
 
     for session in sessions {
-        let Ok(conv) = ConversationSession::from_file(&session.file_path) else {
-            continue;
-        };
-
         let mut and_matches = Vec::new();
         let mut or_matches = Vec::new();
         const MAX_MATCHES_PER_SESSION: usize = 20;
 
-        for entry in &conv.entries {
+        for message in collect_display_messages_for_summary(session, true) {
             if and_matches.len() + or_matches.len() >= MAX_MATCHES_PER_SESSION {
                 break;
             }
 
-            let is_user = entry.entry_type == "user";
-            let is_assistant = entry.entry_type == "assistant";
-
-            if !is_user && !is_assistant {
+            if user_only && message.role != "user" {
                 continue;
             }
 
-            if user_only && is_assistant {
+            let text_lower = message.content.to_lowercase();
+            let matched_kws: Vec<&String> = keywords_lower
+                .iter()
+                .filter(|kw| text_lower.contains(kw.as_str()))
+                .collect();
+
+            if matched_kws.is_empty() {
                 continue;
             }
 
-            if ConversationSession::is_tool_result_entry(entry) {
-                continue;
-            }
+            let is_and = matched_kws.len() == keywords_lower.len();
+            let snippet = extract_match_snippet(&message.content, matched_kws[0], context_chars);
+            let m = SearchMatch {
+                role: message.role,
+                snippet,
+            };
 
-            if let Some(msg) = entry.message.as_ref() {
-                let text = if is_user {
-                    ConversationSession::extract_user_text(msg)
-                } else {
-                    ConversationSession::extract_display_content_full(msg, false)
-                };
-
-                if let Some(text) = text {
-                    let text_lower = text.to_lowercase();
-                    let matched_kws: Vec<&String> = keywords_lower
-                        .iter()
-                        .filter(|kw| text_lower.contains(kw.as_str()))
-                        .collect();
-
-                    if matched_kws.is_empty() {
-                        continue;
-                    }
-
-                    let is_and = matched_kws.len() == keywords_lower.len();
-                    // Center snippet on first matched keyword
-                    let snippet =
-                        extract_match_snippet(&text, matched_kws[0], context_chars);
-                    let m = SearchMatch {
-                        role: if is_user { "user".to_string() } else { "assistant".to_string() },
-                        snippet,
-                    };
-
-                    if is_and {
-                        and_matches.push(m);
-                    } else if multi_keyword {
-                        or_matches.push(m);
-                    }
-                }
+            if is_and {
+                and_matches.push(m);
+            } else if multi_keyword {
+                or_matches.push(m);
             }
         }
 
@@ -2338,13 +2480,11 @@ fn search_sessions_full(
 
     // Sort: AND first, then by score within each group
     results.sort_by(|a, b| {
-        a.match_mode
-            .cmp(&b.match_mode)
-            .then_with(|| {
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+        a.match_mode.cmp(&b.match_mode).then_with(|| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     });
 
     results
@@ -2359,6 +2499,7 @@ pub fn handle_session_search(
     limit: usize,
     user_only: bool,
     json_output: bool,
+    source: SessionSourceFilter,
 ) -> Result<()> {
     let query_display = keywords.join(" ");
 
@@ -2369,15 +2510,20 @@ pub fn handle_session_search(
         None
     };
 
-    // 2. Scan and filter projects
-    let projects = scan_all_projects()?;
-    let filtered_projects: Vec<_> = if let Some(name) = project_filter {
-        projects.into_iter().filter(|p| p.name == name).collect()
+    // 2. Scan Claude projects for memory search.
+    let filtered_projects: Vec<ProjectSummary> = if source.includes_claude() {
+        let projects = scan_all_projects()?;
+        if let Some(name) = project_filter {
+            projects.into_iter().filter(|p| p.name == name).collect()
+        } else {
+            projects
+        }
     } else {
-        projects
+        Vec::new()
     };
 
-    if filtered_projects.is_empty() {
+    let mut all_sessions = scan_all_session_summaries(project_filter, source)?;
+    if all_sessions.is_empty() && filtered_projects.is_empty() {
         if json_output {
             println!(
                 "{}",
@@ -2397,24 +2543,16 @@ pub fn handle_session_search(
     // 3. Search memory files (no time filter - memory is persistent knowledge)
     let memory_results = search_memory_files(&filtered_projects, keywords, context_chars);
 
-    // 4. Collect sessions with time filter
-    let mut all_sessions = Vec::new();
-    for project in &filtered_projects {
-        let sessions = scan_project_sessions(project)?;
-        for session in sessions {
-            if let Some(ref cutoff_dt) = cutoff {
-                if let Some(ref ts) = session.last_activity {
-                    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
-                        if dt.with_timezone(&chrono::Utc) < *cutoff_dt {
-                            continue;
-                        }
-                    }
-                } else {
-                    continue;
+    // 4. Apply time filter.
+    if let Some(ref cutoff_dt) = cutoff {
+        all_sessions.retain(|session| {
+            if let Some(ref ts) = session.last_activity {
+                if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(ts) {
+                    return dt.with_timezone(&chrono::Utc) >= *cutoff_dt;
                 }
             }
-            all_sessions.push(session);
-        }
+            false
+        });
     }
 
     // 5. Search sessions
@@ -2432,6 +2570,7 @@ pub fn handle_session_search(
             .map(|r| {
                 serde_json::json!({
                     "session_id": r.summary.session_id,
+                    "source": r.summary.source,
                     "project": r.summary.project_name,
                     "title": r.summary.title,
                     "last_activity": r.summary.last_activity,
@@ -2570,7 +2709,8 @@ pub fn handle_session_search(
                 .unwrap_or_else(|| "?".to_string());
 
             let header = format!(
-                "--- {} | {} | {} | {} | {} msgs ---",
+                "--- [{}] {} | {} | {} | {} | {} msgs ---",
+                source_label(&result.summary.source),
                 result.summary.session_id,
                 result.summary.project_name,
                 result.summary.display_title(40),
@@ -2685,6 +2825,7 @@ mod tests {
     #[test]
     fn test_display_title_truncation() {
         let session = SessionSummary {
+            source: "claude".to_string(),
             session_id: "test".to_string(),
             title: "This is a very long title that should be truncated".to_string(),
             project_name: "test".to_string(),
@@ -2706,6 +2847,7 @@ mod tests {
     #[test]
     fn test_display_title_unicode() {
         let session = SessionSummary {
+            source: "claude".to_string(),
             session_id: "test".to_string(),
             title: "这是一个很长的中文标题需要截断".to_string(),
             project_name: "test".to_string(),

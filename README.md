@@ -11,6 +11,7 @@
 - **自动同步** - 启动时自动拉取，退出时自动推送，无需手动操作
 - **多设备同步** - 在不同电脑间保持对话历史一致
 - **配置同步** - 同步 settings.json、CLAUDE.md 等配置文件，支持跨平台适配
+- **跨 Agent 查询** - `ccs session` 可同时查询 Claude Code 与 Codex 历史会话
 - **智能合并** - 自动合并非冲突的对话变更
 - **交互式配置** - 首次运行向导引导完成所有配置
 - **自动更新** - 启动时检查新版本，支持一键更新
@@ -97,6 +98,8 @@ ccs uninstall
 | `ccs automate` | 配置自动同步 |
 | `ccs status` | 查看同步状态 |
 | `ccs session` | 会话管理 |
+| `ccs session search <关键词>` | 跨 Claude Code / Codex 搜索历史会话 |
+| `ccs session overview --since 7d` | 查看最近项目会话概览 |
 | `ccs config-sync push` | 推送配置到远程 |
 | `ccs config-sync apply <device>` | 应用其他设备配置 |
 | `ccs update` | 更新到最新版本 |
@@ -104,9 +107,39 @@ ccs uninstall
 
 更多命令请参阅 [用户指南](docs/user-guide.md)。
 
+## 会话查询
+
+`ccs session` 默认会同时查询两个来源：
+
+- `CC` - Claude Code，会话文件来自 `~/.claude/projects/`
+- `CX` - Codex，会话文件来自 `~/.codex/sessions/`
+
+常用示例：
+
+```bash
+# 跨 Agent 搜索
+ccs session search "关键词" -n 5
+
+# 只搜索 Codex
+ccs session search "关键词" --source codex -n 5
+
+# 查看 Codex 会话列表
+ccs session list --source codex --show-ids
+
+# 查看最近 7 天概览
+ccs session overview --since 7d --recent 5
+
+# 查看某个 Codex 会话详情
+ccs session show <session-id> --source codex --tail 10
+```
+
+`--source` 支持 `all`、`claude`、`codex`，默认是 `all`。`overview --since` 支持 `m`、`h`、`d`、`w`，例如 `30m`、`24h`、`7d`、`2w`。
+
 ## 工作原理
 
 Claude Code 将对话历史存储在 `~/.claude/projects/` 目录下的 JSONL 文件中。
+
+Codex 历史会话以只读方式从 `~/.codex/sessions/` 读取，用于 `session list/search/show/overview`。同步和写操作仍只针对 Claude Code 历史。
 
 `ccs` 的工作流程：
 1. 发现本地 Claude Code 历史中的所有对话文件

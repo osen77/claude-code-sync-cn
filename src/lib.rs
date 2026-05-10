@@ -48,6 +48,9 @@ pub const BINARY_NAME: &str = "ccs";
 /// AppData on Windows).
 pub mod config;
 
+/// Read-only parsing for Codex CLI session history.
+pub mod codex;
+
 /// Conflict detection and resolution for conversation synchronization.
 ///
 /// Detects when the same conversation has diverged between local and remote copies
