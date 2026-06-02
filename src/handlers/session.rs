@@ -884,38 +884,36 @@ fn show_session_details(session: &SessionSummary) -> Result<()> {
     println!("{}", "Conversation".cyan().bold());
     println!("{}", "-".repeat(60).cyan());
 
-    if let Ok(conv) = ConversationSession::from_file(&session.file_path) {
-        let messages = collect_display_messages(&conv, false);
+    let messages = collect_display_messages_for_summary(session, false);
 
-        if messages.is_empty() {
+    if messages.is_empty() {
+        println!();
+        println!("{}", "(No messages found)".dimmed());
+    } else {
+        for m in &messages {
             println!();
-            println!("{}", "(No messages found)".dimmed());
-        } else {
-            for m in &messages {
-                println!();
 
-                let time_str = m
-                    .timestamp
-                    .as_ref()
-                    .map(|t| format_relative_time(t))
-                    .unwrap_or_default();
+            let time_str = m
+                .timestamp
+                .as_ref()
+                .map(|t| format_relative_time(t))
+                .unwrap_or_default();
 
-                let role_label = if m.role == "user" {
-                    "[User]".green().bold()
-                } else {
-                    "[Claude]".blue().bold()
-                };
+            let role_label = match m.role.as_str() {
+                "user" => "[User]".green().bold(),
+                "assistant" => "[Assistant]".blue().bold(),
+                _ => format!("[{}]", m.role).normal(),
+            };
 
-                println!(
-                    "{} {} {}",
-                    format!("[{}]", m.index).cyan(),
-                    role_label,
-                    time_str.dimmed()
-                );
+            println!(
+                "{} {} {}",
+                format!("[{}]", m.index).cyan(),
+                role_label,
+                time_str.dimmed()
+            );
 
-                for line in m.content.lines() {
-                    println!("  {}", line);
-                }
+            for line in m.content.lines() {
+                println!("  {}", line);
             }
         }
     }
