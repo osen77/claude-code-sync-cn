@@ -463,6 +463,35 @@ pub fn get_filtered_sessions(project: &ProjectSummary) -> Result<Vec<SessionSumm
     Ok(filtered)
 }
 
+/// Build project summaries by grouping sessions by project_name
+fn build_projects_from_sessions(sessions: &[SessionSummary]) -> Vec<ProjectSummary> {
+    let mut map: std::collections::HashMap<String, (PathBuf, usize, Option<String>)> =
+        std::collections::HashMap::new();
+
+    for s in sessions {
+        let entry = map
+            .entry(s.project_name.clone())
+            .or_insert_with(|| (s.project_dir.clone(), 0, None));
+        entry.1 += 1;
+        if s.last_activity > entry.2 {
+            entry.2 = s.last_activity.clone();
+        }
+    }
+
+    let mut projects: Vec<ProjectSummary> = map
+        .into_iter()
+        .map(|(name, (dir_path, count, last))| ProjectSummary {
+            name,
+            dir_path,
+            session_count: count,
+            last_activity: last,
+        })
+        .collect();
+
+    projects.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+    projects
+}
+
 /// Detect if current directory corresponds to a Claude project
 pub fn detect_current_project() -> Result<Option<ProjectSummary>> {
     let cwd = std::env::current_dir()?;
@@ -585,14 +614,26 @@ fn show_session_menu(
     let mut options: Vec<String> = Vec::with_capacity(sessions.len() + 4);
     options.push(search_option.clone());
 
+    let has_mixed_sources = sessions.iter().any(|s| s.source != sessions[0].source);
     for (i, s) in sessions.iter().enumerate() {
-        options.push(format!(
-            "[{:>2}] {:<40} {:>3} msgs  {}",
-            i + 1,
-            s.display_title(40),
-            s.message_count,
-            s.relative_time()
-        ));
+        if has_mixed_sources {
+            options.push(format!(
+                "[{:>2}] {} {:<37} {:>3} msgs  {}",
+                i + 1,
+                source_label(&s.source),
+                s.display_title(37),
+                s.message_count,
+                s.relative_time()
+            ));
+        } else {
+            options.push(format!(
+                "[{:>2}] {:<40} {:>3} msgs  {}",
+                i + 1,
+                s.display_title(40),
+                s.message_count,
+                s.relative_time()
+            ));
+        }
     }
 
     options.push(cleanup_option.clone());
@@ -766,13 +807,17 @@ fn show_action_menu(session: &SessionSummary) -> Result<ActionChoice> {
     );
     println!();
 
-    let options = vec![
-        "Open in Claude",
-        "View details",
-        "Rename session",
-        "Delete session",
-        "Back to session list",
-    ];
+    let is_codex = session.source == "codex";
+    let mut options = Vec::new();
+    if !is_codex {
+        options.push("Open in Claude");
+    }
+    options.push("View details");
+    if !is_codex {
+        options.push("Rename session");
+    }
+    options.push("Delete session");
+    options.push("Back to session list");
 
     let selection = Select::new("Choose an action:", options.clone())
         .with_help_message("Use arrow keys to navigate, Enter to select")
@@ -1208,7 +1253,10 @@ fn cleanup_sessions_interactive(project: &ProjectSummary) -> Result<usize> {
 // ============================================================================
 
 /// Main interactive session management handler
-pub fn handle_session_interactive(project_filter: Option<&str>) -> Result<()> {
+pub fn handle_session_interactive(
+    project_filter: Option<&str>,
+    source: SessionSourceFilter,
+) -> Result<()> {
     // Check if running in interactive terminal
     if !atty::is(atty::Stream::Stdout) {
         anyhow::bail!(
@@ -1220,14 +1268,15 @@ pub fn handle_session_interactive(project_filter: Option<&str>) -> Result<()> {
     println!("{}", "Session Manager".cyan().bold());
     println!("{}", "=".repeat(40).cyan());
 
-    // Load all projects
-    let mut projects = scan_all_projects()?;
+    // Load all sessions (Claude + Codex) and group into projects
+    let mut all_sessions = scan_all_session_summaries(None, source)?;
+    let mut projects = build_projects_from_sessions(&all_sessions);
 
     if projects.is_empty() {
-        println!("{}", "No Claude Code projects found.".yellow());
+        println!("{}", "No sessions found.".yellow());
         println!(
             "{}",
-            "Run Claude Code in a project directory first.".dimmed()
+            "Run Claude Code or Codex in a project directory first.".dimmed()
         );
         return Ok(());
     }
@@ -1253,21 +1302,34 @@ pub fn handle_session_interactive(project_filter: Option<&str>) -> Result<()> {
 
     loop {
         if let Some(ref project) = current_project {
-            // Show sessions for this project
-            let (sessions, filtered_count) = scan_project_sessions_with_filtered(project)?;
+            // Filter sessions for this project from the pre-loaded list
+            let sessions: Vec<SessionSummary> = all_sessions
+                .iter()
+                .filter(|s| s.project_name == project.name)
+                .cloned()
+                .collect();
+
+            // Cleanup count is only meaningful for Claude projects
+            let filtered_count = if source.includes_claude() {
+                scan_all_projects()?
+                    .iter()
+                    .find(|p| p.name == project.name)
+                    .map(|p| get_filtered_sessions(p).map(|f| f.len()).unwrap_or(0))
+                    .unwrap_or(0)
+            } else {
+                0
+            };
 
             match show_session_menu(project, &sessions, filtered_count)? {
                 SessionMenuChoice::Select(session) => {
-                    // Enter session action loop
                     let mut session = session;
+                    let mut deleted = false;
                     loop {
                         match show_action_menu(&session)? {
                             ActionChoice::OpenClaude => {
                                 if open_in_claude(&session)? {
-                                    // Executed command, exit program
                                     return Ok(());
                                 }
-                                // Cancelled, continue to action menu
                             }
                             ActionChoice::ViewDetails => {
                                 show_session_details(&session)?;
@@ -1277,7 +1339,7 @@ pub fn handle_session_interactive(project_filter: Option<&str>) -> Result<()> {
                             }
                             ActionChoice::Delete => {
                                 if delete_session_interactive(&session)? {
-                                    // Session deleted, break to refresh list
+                                    deleted = true;
                                     break;
                                 }
                             }
@@ -1285,6 +1347,9 @@ pub fn handle_session_interactive(project_filter: Option<&str>) -> Result<()> {
                                 break;
                             }
                         }
+                    }
+                    if deleted {
+                        all_sessions = scan_all_session_summaries(None, source)?;
                     }
                 }
                 SessionMenuChoice::Search => {
@@ -1322,14 +1387,24 @@ pub fn handle_session_interactive(project_filter: Option<&str>) -> Result<()> {
                                         }
                                     }
                                 }
-                                _ => {} // Back to session list
+                                _ => {}
                             }
                         }
                     }
                 }
                 SessionMenuChoice::Cleanup => {
-                    cleanup_sessions_interactive(project)?;
-                    // Continue to refresh the session list
+                    if let Some(claude_project) = scan_all_projects()?
+                        .iter()
+                        .find(|p| p.name == project.name)
+                    {
+                        cleanup_sessions_interactive(claude_project)?;
+                    } else {
+                        println!(
+                            "{}",
+                            "Cleanup is only available for Claude sessions.".yellow()
+                        );
+                    }
+                    all_sessions = scan_all_session_summaries(None, source)?;
                 }
                 SessionMenuChoice::SwitchProject => {
                     current_project = None;
@@ -1339,9 +1414,9 @@ pub fn handle_session_interactive(project_filter: Option<&str>) -> Result<()> {
                 }
             }
         } else {
-            // Show project list
-            // Refresh projects list
-            projects = scan_all_projects()?;
+            // Refresh sessions and projects
+            all_sessions = scan_all_session_summaries(None, source)?;
+            projects = build_projects_from_sessions(&all_sessions);
 
             match show_project_menu(&projects)? {
                 ProjectMenuChoice::Select(project) => {
