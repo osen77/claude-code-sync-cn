@@ -339,6 +339,10 @@ enum Commands {
         /// Filter by project name (skip project selection)
         #[arg(short, long, global = true)]
         project: Option<String>,
+
+        /// Filter by session source (all, claude, codex)
+        #[arg(short, long, global = true, default_value = "all")]
+        source: SessionSourceArg,
     },
 }
 
@@ -1035,11 +1039,15 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Session { action, project } => {
+        Commands::Session {
+            action,
+            project,
+            source,
+        } => {
             match action {
                 None => {
                     // Interactive mode
-                    handle_session_interactive(project.as_deref())?;
+                    handle_session_interactive(project.as_deref(), source.into())?;
                 }
                 Some(SessionAction::List {
                     project: list_project,
