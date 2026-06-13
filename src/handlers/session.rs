@@ -884,7 +884,7 @@ fn show_session_details(session: &SessionSummary) -> Result<()> {
     println!("{}", "Conversation".cyan().bold());
     println!("{}", "-".repeat(60).cyan());
 
-    let messages = collect_display_messages_for_summary(session, false);
+    let messages = collect_display_messages_for_summary(session, true);
 
     if messages.is_empty() {
         println!();
@@ -1950,6 +1950,7 @@ pub fn handle_session_show(
     around: Option<&str>,
     num: usize,
     json: bool,
+    full: bool,
     source: SessionSourceFilter,
 ) -> Result<()> {
     let sessions = scan_all_session_summaries(None, source)?;
@@ -1967,8 +1968,8 @@ pub fn handle_session_show(
         }
 
         // Drill-down mode: parse and filter messages
-        // JSON output uses full content (no truncation); terminal uses simplified
-        let messages = collect_display_messages_for_summary(session, json);
+        // JSON or --full uses full content (no truncation); terminal uses simplified
+        let messages = collect_display_messages_for_summary(session, json || full);
 
         if messages.is_empty() {
             if json {
