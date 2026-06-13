@@ -539,6 +539,10 @@ enum SessionAction {
         #[arg(long)]
         json: bool,
 
+        /// Show full content without truncation (default for interactive detail view)
+        #[arg(long)]
+        full: bool,
+
         /// Session source to query (default: all)
         #[arg(long, value_enum, default_value_t = SessionSourceArg::All)]
         source: SessionSourceArg,
@@ -1088,6 +1092,7 @@ fn main() -> Result<()> {
                     around,
                     num,
                     json,
+                    full,
                     source,
                 }) => {
                     handle_session_show(
@@ -1097,6 +1102,7 @@ fn main() -> Result<()> {
                         around.as_deref(),
                         num,
                         json,
+                        full,
                         source.into(),
                     )?;
                 }
