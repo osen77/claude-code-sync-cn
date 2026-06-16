@@ -277,6 +277,17 @@ impl Default for FilterConfig {
 }
 
 impl FilterConfig {
+    /// Create a default config with no file-size limit.
+    ///
+    /// Useful for session scanning where we want to read all files
+    /// regardless of size.
+    pub fn no_size_limit() -> Self {
+        FilterConfig {
+            max_file_size_bytes: u64::MAX,
+            ..Self::default()
+        }
+    }
+
     /// Load configuration from file
     pub fn load() -> Result<Self> {
         let config_path = Self::config_path()?;

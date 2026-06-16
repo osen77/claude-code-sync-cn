@@ -138,6 +138,7 @@ pub mod sync;
 /// Snapshots enable undoing pull operations (by restoring files) and push operations
 /// (by resetting Git commits). Includes validation and security checks for safe restoration.
 pub mod undo;
+pub mod session_cache;
 
 /// Command handlers for CLI operations.
 ///
