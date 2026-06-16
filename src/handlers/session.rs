@@ -12,12 +12,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::codex::{
-    codex_history_path, codex_sessions_dir, discover_codex_sessions, load_codex_history_titles,
-    CodexSession,
+    codex_history_path, codex_sessions_dir, load_codex_history_titles, CodexSession,
 };
 use crate::config::ConfigManager;
 use crate::filter::FilterConfig;
 use crate::parser::ConversationSession;
+use crate::session_cache::{mtime_secs, SessionIndexCache};
 use crate::sync::discovery::{claude_projects_dir, discover_sessions, extract_project_name};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -291,8 +291,7 @@ pub fn scan_all_projects() -> Result<Vec<ProjectSummary>> {
 
     let mut projects = Vec::new();
     // Use a filter with no file size limit for session listing
-    let mut filter = FilterConfig::default();
-    filter.max_file_size_bytes = u64::MAX;
+    let filter = FilterConfig::no_size_limit();
 
     for entry in fs::read_dir(&claude_dir)? {
         let entry = entry?;
@@ -370,8 +369,7 @@ pub fn scan_project_sessions_with_filtered(
     project: &ProjectSummary,
 ) -> Result<(Vec<SessionSummary>, usize)> {
     // Use a filter with no file size limit for session listing
-    let mut filter = FilterConfig::default();
-    filter.max_file_size_bytes = u64::MAX;
+    let filter = FilterConfig::no_size_limit();
     let sessions = discover_sessions(&project.dir_path, &filter)?;
 
     let all_summaries: Vec<SessionSummary> = sessions
@@ -399,59 +397,244 @@ pub fn scan_project_sessions(project: &ProjectSummary) -> Result<Vec<SessionSumm
     Ok(sessions)
 }
 
-fn scan_codex_session_summaries() -> Result<Vec<SessionSummary>> {
-    let sessions_dir = codex_sessions_dir()?;
-    let history_path = codex_history_path()?;
-    let titles = load_codex_history_titles(&history_path).unwrap_or_default();
-    let sessions = discover_codex_sessions(&sessions_dir)?;
-
-    let mut summaries: Vec<SessionSummary> = sessions
-        .iter()
-        .map(|session| {
-            let project_name = session.project_name().unwrap_or("codex");
-            let title = session.title(titles.get(&session.session_id).map(String::as_str));
-            SessionSummary::from_codex_session(session, project_name, title)
-        })
-        .filter(|s| is_valid_session_summary(s))
-        .collect();
-
-    summaries.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
-    Ok(summaries)
-}
-
 fn scan_all_session_summaries(
     project_filter: Option<&str>,
     source: SessionSourceFilter,
 ) -> Result<Vec<SessionSummary>> {
+    let config_dir = ConfigManager::config_dir().unwrap_or_default();
+    let mut cache = SessionIndexCache::load(&config_dir);
+    let mut seen_paths = std::collections::HashSet::new();
     let mut summaries = Vec::new();
 
     if source.includes_claude() {
-        let projects = scan_all_projects()?;
-        for project in projects {
-            if project_filter.is_some_and(|name| project.name != name) {
-                continue;
-            }
-            summaries.extend(scan_project_sessions(&project)?);
-        }
+        scan_claude_summaries_cached(
+            &mut cache,
+            &mut seen_paths,
+            &mut summaries,
+            project_filter,
+        )?;
     }
 
     if source.includes_codex() {
-        for session in scan_codex_session_summaries()? {
-            if project_filter.is_some_and(|name| session.project_name != name) {
-                continue;
-            }
-            summaries.push(session);
-        }
+        scan_codex_summaries_cached(
+            &mut cache,
+            &mut seen_paths,
+            &mut summaries,
+            project_filter,
+        )?;
     }
+
+    // Prune stale entries and persist
+    cache.retain_existing(&seen_paths);
+    cache.save(&config_dir);
 
     summaries.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
     Ok(summaries)
 }
 
+/// Scan Claude Code sessions with index cache.
+///
+/// For each JSONL file: stat() for size+mtime → cache lookup.
+/// Hit: use cached SessionSummary. Miss: full parse via ConversationSession::from_file().
+fn scan_claude_summaries_cached(
+    cache: &mut SessionIndexCache,
+    seen_paths: &mut std::collections::HashSet<String>,
+    summaries: &mut Vec<SessionSummary>,
+    project_filter: Option<&str>,
+) -> Result<()> {
+    use walkdir::WalkDir;
+
+    let claude_dir = claude_projects_dir()?;
+    if !claude_dir.exists() {
+        return Ok(());
+    }
+
+    let filter = FilterConfig::no_size_limit();
+
+    // Collect per-session-id dedup map (same logic as discover_sessions)
+    let mut session_map: std::collections::HashMap<String, SessionSummary> =
+        std::collections::HashMap::new();
+
+    for dir_entry in fs::read_dir(&claude_dir)? {
+        let dir_entry = dir_entry?;
+        let project_path = dir_entry.path();
+
+        if !project_path.is_dir() {
+            continue;
+        }
+
+        let dir_name = project_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or_default();
+
+        if dir_name.starts_with('.') {
+            continue;
+        }
+
+        // We need to determine the project_name for this directory.
+        // The cache stores project_name per file, so on cache hit we use that.
+        // On cache miss we derive it from the parsed session (cwd field) or dir name.
+        let mut dir_project_name: Option<String> = None;
+
+        for file_entry in WalkDir::new(&project_path)
+            .follow_links(false)
+            .into_iter()
+            .filter_map(|e| e.ok())
+        {
+            let file_path = file_entry.path();
+            if file_path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+                continue;
+            }
+            if !filter.should_include(file_path) {
+                continue;
+            }
+
+            let meta = match fs::metadata(file_path) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let file_size = meta.len();
+            let mtime = mtime_secs(&meta).unwrap_or(0);
+            let path_key = file_path.to_string_lossy().to_string();
+            seen_paths.insert(path_key.clone());
+
+            // Try cache first
+            if let Some(summary) = cache.lookup(&path_key, file_path, file_size, mtime) {
+                // Use the cached project_name if we haven't determined one yet
+                if dir_project_name.is_none() {
+                    dir_project_name = Some(summary.project_name.clone());
+                }
+                // Dedup by session_id — keep the one with more messages
+                session_map
+                    .entry(summary.session_id.clone())
+                    .and_modify(|existing| {
+                        if summary.message_count > existing.message_count {
+                            *existing = summary.clone();
+                        }
+                    })
+                    .or_insert(summary);
+            } else {
+                // Cache miss — full parse
+                match ConversationSession::from_file(file_path) {
+                    Ok(session) => {
+                        // Determine project name from session cwd if not yet known
+                        if dir_project_name.is_none() {
+                            if let Some(name) = session.project_name() {
+                                dir_project_name = Some(name.to_string());
+                            }
+                        }
+                        let project_name = dir_project_name
+                            .clone()
+                            .unwrap_or_else(|| extract_project_name(dir_name).to_string());
+
+                        let summary =
+                            SessionSummary::from_session(&session, &project_name, &project_path);
+                        cache.insert(path_key, file_size, mtime, &summary);
+
+                        session_map
+                            .entry(summary.session_id.clone())
+                            .and_modify(|existing| {
+                                if summary.message_count > existing.message_count {
+                                    *existing = summary.clone();
+                                }
+                            })
+                            .or_insert(summary);
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to parse {}: {}", file_path.display(), e);
+                    }
+                }
+            }
+        }
+    }
+
+    // Apply project filter and validity check
+    for summary in session_map.into_values() {
+        if project_filter.is_some_and(|name| summary.project_name != name) {
+            continue;
+        }
+        if is_valid_session_summary(&summary) {
+            summaries.push(summary);
+        }
+    }
+
+    Ok(())
+}
+
+/// Scan Codex sessions with index cache.
+fn scan_codex_summaries_cached(
+    cache: &mut SessionIndexCache,
+    seen_paths: &mut std::collections::HashSet<String>,
+    summaries: &mut Vec<SessionSummary>,
+    project_filter: Option<&str>,
+) -> Result<()> {
+    use walkdir::WalkDir;
+
+    let sessions_dir = codex_sessions_dir()?;
+    if !sessions_dir.exists() {
+        return Ok(());
+    }
+
+    let history_path = codex_history_path()?;
+    let titles = load_codex_history_titles(&history_path).unwrap_or_default();
+
+    for file_entry in WalkDir::new(&sessions_dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let file_path = file_entry.path();
+        if file_path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+
+        let meta = match fs::metadata(file_path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let file_size = meta.len();
+        let mtime = mtime_secs(&meta).unwrap_or(0);
+        let path_key = file_path.to_string_lossy().to_string();
+        seen_paths.insert(path_key.clone());
+
+        if let Some(summary) = cache.lookup(&path_key, file_path, file_size, mtime) {
+            if project_filter.is_some_and(|name| summary.project_name != name) {
+                continue;
+            }
+            if is_valid_session_summary(&summary) {
+                summaries.push(summary);
+            }
+        } else {
+            match CodexSession::from_file(file_path) {
+                Ok(session) => {
+                    let project_name = session.project_name().unwrap_or("codex");
+                    let title =
+                        session.title(titles.get(&session.session_id).map(String::as_str));
+                    let summary =
+                        SessionSummary::from_codex_session(&session, project_name, title);
+                    cache.insert(path_key, file_size, mtime, &summary);
+
+                    if project_filter.is_some_and(|name| summary.project_name != name) {
+                        continue;
+                    }
+                    if is_valid_session_summary(&summary) {
+                        summaries.push(summary);
+                    }
+                }
+                Err(e) => {
+                    log::warn!("Failed to parse Codex session {}: {}", file_path.display(), e);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Get filtered (invalid) sessions for cleanup
 pub fn get_filtered_sessions(project: &ProjectSummary) -> Result<Vec<SessionSummary>> {
-    let mut filter = FilterConfig::default();
-    filter.max_file_size_bytes = u64::MAX;
+    let filter = FilterConfig::no_size_limit();
     let sessions = discover_sessions(&project.dir_path, &filter)?;
 
     let filtered: Vec<SessionSummary> = sessions

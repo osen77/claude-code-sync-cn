@@ -133,7 +133,19 @@ ccs session overview --since 7d --recent 5
 ccs session show <session-id> --source codex --tail 10
 ```
 
-`--source` 支持 `all`、`claude`、`codex`，默认是 `all`。`overview --since` 支持 `m`、`h`、`d`、`w`，例如 `30m`、`24h`、`7d`、`2w`。
+`--source` 支持 `all`、`claude`、`codex`，默认是 `all`。`--since` 支持 `30m`、`24h`、`7d`、`2w`。
+
+### AI Agent 系统提示词参考
+
+在 `CLAUDE.md` 等系统提示词中添加以下内容，让 Agent 自主检索历史对话：
+
+```markdown
+## 跨会话上下文检索
+
+需要回忆历史或查找其他项目实现时，用 `ccs session` 检索 Claude Code / Codex 历史。
+典型流程：`overview --json` 速览全貌 → `search "关键词" --json` 找 session_id → `show <id> --around/--tail --json` 钻取上下文。
+各子命令详见 `ccs session <subcommand> --help`。
+```
 
 ## 工作原理
 

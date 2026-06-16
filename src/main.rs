@@ -11,6 +11,7 @@ mod onboarding;
 mod parser;
 mod report;
 mod scm;
+mod session_cache;
 mod sync;
 mod undo;
 
@@ -634,8 +635,18 @@ fn main() -> Result<()> {
     // Check if this is the update command (skip notification for update command)
     let is_update_command = matches!(cli.command, Some(Commands::Update { .. }));
 
-    // Print update notification if available (and not running update command)
-    if !is_update_command {
+    // Commands that are local-only and shouldn't block on network update check
+    let is_local_command = matches!(
+        cli.command,
+        Some(Commands::Session { .. })
+            | Some(Commands::Config { .. })
+            | Some(Commands::Status { .. })
+            | Some(Commands::Report { .. })
+            | Some(Commands::History { .. })
+    );
+
+    // Print update notification if available (and not running update/local commands)
+    if !is_update_command && !is_local_command {
         if let Ok(Some(new_version)) = update_check_handle.join() {
             print_update_notification(&new_version);
         }
