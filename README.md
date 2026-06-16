@@ -142,9 +142,12 @@ ccs session show <session-id> --source codex --tail 10
 ```markdown
 ## 跨会话上下文检索
 
-需要回忆历史或查找其他项目实现时，用 `ccs session` 检索 Claude Code / Codex 历史。
-典型流程：`overview --json` 速览全貌 → `search "关键词" --json` 找 session_id → `show <id> --around/--tail --json` 钻取上下文。
-各子命令详见 `ccs session <subcommand> --help`。
+需要回忆历史或查找其他项目实现时，用 `ccs session` 检索 Claude Code / Codex 历史（各参数详见 `--help`）。
+典型流程：`overview` 速览全貌 → `search` 找 session_id → `show --around/--tail` 钻取上下文。
+
+ccs session overview --json --since 7d                          # 速览最近 7 天项目动态
+ccs session search "<关键词>" -p <项目名> --json                # 搜索特定项目的实现
+ccs session show <session_id> --around "<关键词>" -n 5 --json  # 钻取匹配位置上下文
 ```
 
 ## 工作原理
