@@ -7,8 +7,26 @@ mod git;
 mod hg;
 pub mod lfs;
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Error, Result};
 use std::path::Path;
+
+/// Classified git push failures.
+#[derive(Debug)]
+pub enum PushError {
+    /// Remote rejected the push because local history is behind.
+    NonFastForward,
+    /// Any other push failure with source context preserved.
+    Other(Error),
+}
+
+/// Rebase command outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebaseOutcome {
+    /// Rebase completed successfully.
+    Completed,
+    /// Rebase still requires user or programmatic resolution.
+    InProgress,
+}
 
 pub use git::GitScm;
 pub use hg::HgScm;
@@ -85,6 +103,36 @@ pub trait Scm: Send + Sync {
 
     /// Push to a remote repository.
     fn push(&self, remote: &str, branch: &str) -> Result<()>;
+
+    /// Push to a remote repository and classify recoverable failures.
+    fn push_classified(&self, remote: &str, branch: &str) -> std::result::Result<(), PushError> {
+        self.push(remote, branch).map_err(PushError::Other)
+    }
+
+    /// Fetch remote changes without updating the working tree.
+    fn fetch(&self, _remote: &str) -> Result<()> {
+        Err(anyhow!("fetch is not supported by this SCM backend"))
+    }
+
+    /// Rebase onto an upstream reference.
+    fn rebase(&self, _upstream: &str) -> Result<RebaseOutcome> {
+        Err(anyhow!("rebase is not supported by this SCM backend"))
+    }
+
+    /// Continue an in-progress rebase.
+    fn rebase_continue(&self) -> Result<RebaseOutcome> {
+        Err(anyhow!("rebase continue is not supported by this SCM backend"))
+    }
+
+    /// Abort an in-progress rebase.
+    fn rebase_abort(&self) -> Result<()> {
+        Err(anyhow!("rebase abort is not supported by this SCM backend"))
+    }
+
+    /// Check whether a rebase is currently in progress.
+    fn is_rebase_in_progress(&self) -> Result<bool> {
+        Ok(false)
+    }
 
     /// Pull from a remote repository (fetch + merge/update).
     fn pull(&self, remote: &str, branch: &str) -> Result<()>;
