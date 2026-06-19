@@ -160,14 +160,19 @@ pub fn find_local_project_by_name(
         .filter(|e| e.path().is_dir())
         .collect();
 
-    // Pass 1 (fast): match by encoded directory name
+    // Pass 1 (fast): match by encoded directory name.
+    // Skip directories whose name ends with '-' : Claude Code encodes each
+    // non-ASCII char (e.g. Chinese) as a single '-', so a dir like
+    // "-Users-mini-Documents-Projects-----" (cwd .../Projects/安装环境) ends with
+    // dashes and extract_project_name() would misread the PARENT segment
+    // ("Projects") as the project name, causing a false collision with a real
+    // sibling of that name. Such dirs are left to the precise Pass 2 (cwd).
     let matches_from_dir: Vec<PathBuf> = entries
         .iter()
         .filter(|e| {
-            e.file_name()
-                .to_str()
-                .map(|name| extract_project_name(name) == project_name)
-                .unwrap_or(false)
+            e.file_name().to_str().map_or(false, |name| {
+                !name.ends_with('-') && extract_project_name(name) == project_name
+            })
         })
         .map(|e| e.path())
         .collect();
@@ -608,6 +613,42 @@ mod tests {
     }
 
     #[test]
+    fn test_find_local_project_non_ascii_sibling_no_false_ambiguity() {
+        // Regression: a project whose name contains non-ASCII chars (e.g. Chinese
+        // "安装环境") is encoded by Claude Code as trailing dashes in the directory
+        // name. extract_project_name() then misreads the PARENT segment as the
+        // project name, falsely colliding with a real sibling project of that name.
+        //
+        // Real layout that triggered this on the user's machine:
+        //   -Users-mini-Documents-Projects            cwd=/Users/mini/Documents/Projects
+        //   -Users-mini-Documents-Projects-----       cwd=/Users/mini/Documents/Projects/安装环境
+        // Looking up "Projects" must resolve to the first dir only, NOT None.
+        let temp_dir = tempdir().unwrap();
+        let projects_dir = temp_dir.path();
+
+        let real_projects = projects_dir.join("-Users-mini-Documents-Projects");
+        fs::create_dir(&real_projects).unwrap();
+        create_session_with_cwd(&real_projects, "sess-1", "/Users/mini/Documents/Projects");
+
+        // Non-ASCII project name "安装环境" (4 chars) -> 4 trailing dashes after the
+        // separator dash, so the encoded dir name ends with "Projects-----".
+        let non_ascii_sibling = projects_dir.join("-Users-mini-Documents-Projects-----");
+        fs::create_dir(&non_ascii_sibling).unwrap();
+        create_session_with_cwd(
+            &non_ascii_sibling,
+            "sess-2",
+            "/Users/mini/Documents/Projects/安装环境",
+        );
+
+        let result = find_local_project_by_name(projects_dir, "Projects");
+        assert!(
+            result.is_some(),
+            "Non-ASCII sibling must not cause false ambiguity with parent-named project"
+        );
+        assert!(result.unwrap().ends_with("-Users-mini-Documents-Projects"));
+    }
+
+    #[test]
     fn test_find_colliding_projects_hyphenated_names() {
         let temp_dir = tempdir().unwrap();
         let projects_dir = temp_dir.path();
@@ -625,5 +666,33 @@ mod tests {
         assert_eq!(collisions.len(), 1);
         assert!(collisions.contains_key("my-app"));
         assert_eq!(collisions.get("my-app").unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_find_colliding_projects_non_ascii_sibling_no_false_collision() {
+        // Companion to test_find_local_project_non_ascii_sibling_no_false_ambiguity:
+        // a non-ASCII project (cwd known) must NOT be grouped under the parent
+        // project name by find_colliding_projects. "安装环境" is distinct from
+        // "Projects", so no collision should be reported.
+        let temp_dir = tempdir().unwrap();
+        let projects_dir = temp_dir.path();
+
+        let real_projects = projects_dir.join("-Users-mini-Documents-Projects");
+        fs::create_dir(&real_projects).unwrap();
+        create_session_with_cwd(&real_projects, "sess-1", "/Users/mini/Documents/Projects");
+
+        let non_ascii_sibling = projects_dir.join("-Users-mini-Documents-Projects-----");
+        fs::create_dir(&non_ascii_sibling).unwrap();
+        create_session_with_cwd(
+            &non_ascii_sibling,
+            "sess-2",
+            "/Users/mini/Documents/Projects/安装环境",
+        );
+
+        let collisions = find_colliding_projects(projects_dir);
+        assert!(
+            collisions.is_empty(),
+            "Non-ASCII sibling with known cwd must not collide with parent-named project"
+        );
     }
 }

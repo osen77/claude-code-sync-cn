@@ -144,3 +144,29 @@ GitHub Actions workflow 配置问题：
 ### 预防措施
 - 后续改进
 ```
+
+## 2026-06-19: Non-ASCII project name causes false ambiguity in find_local_project_by_name
+
+### 问题描述
+- `ccs pull` 时，若本地 `~/.claude/projects/` 存在名字含非 ASCII 字符（如中文「安装环境」）的项目目录，会与同名的真实项目产生**假歧义**，导致远程会话无法合并（`Merged 0 sessions`），日志刷屏 `Ambiguous match: 2 local directories match project 'Projects'`。
+- 实际触发场景：mini 本地同时有 `-Users-mini-Documents-Projects`（cwd=`/Users/mini/Documents/Projects`）和 `-Users-mini-Documents-Projects-----`（cwd=`/Users/mini/Documents/Projects/安装环境`），pull byte 的 `Projects` 会话时被判定为歧义而全部跳过。
+
+### 根本原因
+- `src/sync/discovery.rs` 的 `find_local_project_by_name` Pass 1（目录名快速匹配）无条件调用 `extract_project_name`，该函数用 `rsplit('-')` 取最后一个非空段。
+- Claude Code 路径编码把每个非 ASCII 字符替换为单个 `-`。「安装环境」4 字 → 4 个 `-`，目录名变成 `-Users-mini-Documents-Projects-----`，`rsplit` 跳过末尾空段后误取上一级段 `Projects`，把「安装环境」误判成 `Projects`。
+- Pass 2（读 JSONL cwd 精确匹配）是权威的，从未误判；但 Pass 1 的误匹配被合并进结果集，使匹配数从 1 变 2，触发歧义返回 `None`。
+
+### 解决方案
+- Pass 1 增加判据：目录名以 `-` 结尾时跳过 dir-name 匹配（ASCII 项目名编码后绝不会以 `-` 结尾，任何以 `-` 结尾都意味着末尾有被编码的非 ASCII 字符，dir-name 提取必然误取上一级名，不可信），交由 Pass 2 cwd 处理。
+- 代码：`src/sync/discovery.rs` `find_local_project_by_name` Pass 1 filter 增加 `!name.ends_with('-')` 条件。
+- 新增回归测试：`test_find_local_project_non_ascii_sibling_no_false_ambiguity`（复现并锁定主 bug）、`test_find_colliding_projects_non_ascii_sibling_no_false_collision`（确认 `find_colliding_projects` 因优先用 cwd 不受影响）。
+
+### 影响范围
+- 版本号：0.3.18（未 bump，修复随下次发布）
+- 相关模块：`src/sync/discovery.rs`（`find_local_project_by_name`）
+- 不影响 `extract_project_name` 既有语义与 `session.rs` 两处 fallback（仅当无 cwd 时用，影响仅限显示名）
+
+### 预防措施
+- `find_colliding_projects` 在「无 cwd 的中文目录」边缘情况下仍可能误报碰撞警告（仅警告、不影响数据），优先级低，暂不修。
+- 路径编码相关匹配逻辑今后凡用 `extract_project_name`，均需考虑非 ASCII 末尾 `-` 场景。
+
