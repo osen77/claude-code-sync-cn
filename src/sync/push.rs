@@ -792,6 +792,10 @@ pub fn push_history(
             println!("  {} Committed: {}", "✓".green(), message);
         }
 
+        // Track whether push failed so we can propagate the error
+        // after saving the operation record (undo information).
+        let mut push_error: Option<anyhow::Error> = None;
+
         // Push to remote if configured
         if push_remote && state.has_remote {
             if verbosity != VerbosityLevel::Quiet {
@@ -826,6 +830,7 @@ pub fn push_history(
                     if verbosity != VerbosityLevel::Quiet {
                         println!("  {} Failed to push: {}", "⚠".yellow(), e);
                     }
+                    push_error = Some(e);
                 }
             }
         }
@@ -856,6 +861,12 @@ pub fn push_history(
         if let Err(e) = history.add_operation(operation_record) {
             log::warn!("Failed to save operation to history: {}", e);
             log::info!("Push completed successfully, but history was not updated.");
+        }
+
+        // If push failed, propagate the error so the process exits with non-zero code.
+        // The operation record is already saved above, preserving undo capability.
+        if let Some(e) = push_error {
+            return Err(e);
         }
     } else {
         if verbosity != VerbosityLevel::Quiet {
