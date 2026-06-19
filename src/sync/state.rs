@@ -42,6 +42,10 @@ pub struct SyncState {
     /// may already have existing content and history.
     #[serde(default)]
     pub is_cloned_repo: bool,
+
+    /// Last commit hash that was synced, used for incremental push detection
+    #[serde(default)]
+    pub last_synced_commit: Option<String>,
 }
 
 impl SyncState {
@@ -105,6 +109,7 @@ impl SyncState {
                         sync_repo_path: active.sync_repo_path.clone(),
                         has_remote: active.has_remote,
                         is_cloned_repo: active.is_cloned_repo,
+                        last_synced_commit: None,
                     });
                 } else {
                     return Err(anyhow!(
@@ -316,5 +321,21 @@ impl MultiRepoState {
     /// Get list of all repo names
     pub fn repo_names(&self) -> Vec<&String> {
         self.repos.keys().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sync_state_deserializes_without_last_synced_commit() {
+        let json = r#"{
+            "sync_repo_path": "/tmp/repo",
+            "has_remote": true,
+            "is_cloned_repo": false
+        }"#;
+        let state: SyncState = serde_json::from_str(json).unwrap();
+        assert_eq!(state.last_synced_commit, None);
     }
 }

@@ -91,6 +91,7 @@ mod tests {
             sync_repo_path: repo_path.clone(),
             has_remote: false,
             is_cloned_repo: false,
+            last_synced_commit: None,
         };
 
         let state_file = crate::config::ConfigManager::state_file_path().unwrap();
