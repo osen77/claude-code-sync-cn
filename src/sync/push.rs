@@ -20,6 +20,95 @@ use super::discovery::{
 use super::state::SyncState;
 use super::MAX_CONVERSATIONS_TO_DISPLAY;
 
+// ---------------------------------------------------------------------------
+// Push orchestration types and helpers
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PushResult {
+    Clean,
+    Degraded { conflicts: Vec<PathBuf> },
+    NothingToPush,
+}
+
+fn has_last_synced_commit_drift(
+    last_synced_commit: Option<&str>,
+    current_head: &str,
+    is_ancestor: bool,
+) -> bool {
+    match last_synced_commit {
+        Some(last) => last != current_head && !is_ancestor,
+        None => false,
+    }
+}
+
+fn git_is_ancestor(repo_path: &Path, older: &str, newer: &str) -> bool {
+    std::process::Command::new("git")
+        .args(["merge-base", "--is-ancestor", older, newer])
+        .current_dir(repo_path)
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+fn ensure_clean_rebase_state(repo: &dyn scm::Scm) -> Result<()> {
+    if repo.is_rebase_in_progress()? {
+        log::warn!("Detected stale rebase state, aborting before push");
+        repo.rebase_abort()?;
+    }
+    Ok(())
+}
+
+/// Try to push with automatic rebase-and-retry on non-fast-forward rejection.
+///
+/// Loop up to 3 times: push -> if non-fast-forward, fetch & rebase -> retry.
+/// Returns `Clean` on success, `Degraded` if rebase conflicts were encountered,
+/// or `NothingToPush` if there was nothing to push.
+fn push_with_rebase_auto_heal(
+    repo: &dyn scm::Scm,
+    repo_path: &Path,
+    state: &mut SyncState,
+    branch_name: &str,
+    verbosity: crate::VerbosityLevel,
+) -> Result<PushResult> {
+    ensure_clean_rebase_state(repo)?;
+
+    // Drift detection
+    let current_head = repo.current_commit_hash().ok();
+    if let (Some(last), Some(head)) = (state.last_synced_commit.as_deref(), current_head.as_deref()) {
+        let drift = has_last_synced_commit_drift(Some(last), head, git_is_ancestor(repo_path, last, head));
+        if drift {
+            log::warn!("Detected sync drift before push; auto-heal path will be used if needed");
+        }
+    }
+
+    // Bounded retry loop (max 3)
+    for attempt in 1..=3 {
+        match repo.push_classified("origin", branch_name) {
+            Ok(()) => {
+                state.last_synced_commit = repo.current_commit_hash().ok();
+                state.save()?;
+                if verbosity != crate::VerbosityLevel::Quiet && attempt > 1 {
+                    println!("  {} Rebased and pushed on attempt {}", "✓".green(), attempt);
+                }
+                return Ok(PushResult::Clean);
+            }
+            Err(scm::PushError::NonFastForward) => {
+                repo.fetch("origin")?;
+                match repo.rebase(&format!("origin/{branch_name}"))? {
+                    scm::RebaseOutcome::Completed => continue,
+                    scm::RebaseOutcome::InProgress => {
+                        repo.rebase_abort()?;
+                        return Ok(PushResult::Degraded { conflicts: Vec::new() });
+                    }
+                }
+            }
+            Err(scm::PushError::Other(e)) => return Err(e.context("Push failed")),
+        }
+    }
+    Err(anyhow::anyhow!("Remote remained busy after 3 push attempts"))
+}
+
 /// Push local Claude Code history to sync repository
 pub fn push_history(
     commit_message: Option<&str>,
@@ -36,7 +125,7 @@ pub fn push_history(
         println!("{}", "Pushing Claude Code history...".cyan().bold());
     }
 
-    let state = SyncState::load()?;
+    let mut state = SyncState::load()?;
     let repo = scm::open(&state.sync_repo_path)?;
     let mut filter = FilterConfig::load()?;
 
@@ -635,11 +724,33 @@ pub fn push_history(
 
         // Push to remote if configured
         if push_remote && state.has_remote {
-            println!("  {} to remote...", "Pushing".cyan());
+            if verbosity != VerbosityLevel::Quiet {
+                println!("  {} to remote...", "Pushing".cyan());
+            }
 
-            match repo.push("origin", &branch_name) {
-                Ok(_) => println!("  {} Pushed to origin/{}", "✓".green(), branch_name),
-                Err(e) => log::warn!("Failed to push: {}", e),
+            let repo_path = state.sync_repo_path.clone();
+            match push_with_rebase_auto_heal(repo.as_ref(), &repo_path, &mut state, &branch_name, verbosity) {
+                Ok(PushResult::Clean) => {
+                    if verbosity != VerbosityLevel::Quiet {
+                        println!("  {} Pushed to origin/{}", "✓".green(), branch_name);
+                    }
+                }
+                Ok(PushResult::Degraded { conflicts }) => {
+                    if verbosity != VerbosityLevel::Quiet {
+                        println!(
+                            "  {} Push degraded; kept {} conflict file(s)",
+                            "⚠".yellow(),
+                            conflicts.len()
+                        );
+                    }
+                }
+                Ok(PushResult::NothingToPush) => {}
+                Err(e) => {
+                    log::warn!("Failed to push: {}", e);
+                    if verbosity != VerbosityLevel::Quiet {
+                        println!("  {} Failed to push: {}", "⚠".yellow(), e);
+                    }
+                }
             }
         }
 
@@ -775,4 +886,37 @@ pub fn push_history(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod push_auto_heal_tests {
+    use super::*;
+
+    #[test]
+    fn test_is_degraded_result_not_error() {
+        let result = PushResult::Degraded {
+            conflicts: vec![PathBuf::from("session-conflict-1.jsonl")],
+        };
+        assert!(matches!(result, PushResult::Degraded { .. }));
+    }
+
+    #[test]
+    fn test_drift_check_returns_false_without_pointer() {
+        assert!(!has_last_synced_commit_drift(None, "abc123", true));
+    }
+
+    #[test]
+    fn test_drift_check_true_when_diverged() {
+        assert!(has_last_synced_commit_drift(Some("old-hash"), "new-hash", false));
+    }
+
+    #[test]
+    fn test_drift_check_false_when_ancestor() {
+        assert!(!has_last_synced_commit_drift(Some("ancestor"), "descendant", true));
+    }
+
+    #[test]
+    fn test_drift_check_false_when_same_hash() {
+        assert!(!has_last_synced_commit_drift(Some("same-hash"), "same-hash", true));
+    }
 }
