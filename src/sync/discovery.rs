@@ -241,10 +241,16 @@ pub fn find_colliding_projects(
         for entry in entries.filter_map(|e| e.ok()) {
             let path = entry.path();
             if path.is_dir() {
-                // Prefer real project name from JSONL cwd, fall back to dir name extraction
+                // Prefer real project name from JSONL cwd, fall back to dir name extraction.
+                // Skip the fallback when the dir name ends with '-': a non-ASCII
+                // project name (e.g. Chinese) encodes to trailing dashes, and
+                // extract_project_name would misread the PARENT segment as the
+                // project name, producing a false collision with a real sibling.
+                // Without a reliable name such a dir cannot be grouped at all.
                 let project_name = get_project_name_from_dir(&path).unwrap_or_else(|| {
                     path.file_name()
                         .and_then(|n| n.to_str())
+                        .filter(|n| !n.ends_with('-'))
                         .map(|n| extract_project_name(n).to_string())
                         .unwrap_or_default()
                 });
@@ -579,6 +585,19 @@ mod tests {
         .unwrap();
     }
 
+    /// Helper: create a JSONL file WITHOUT a cwd field (e.g. a snapshot/summary
+    /// file). Such files make get_project_name_from_dir fall back to the
+    /// encoded directory name.
+    fn create_session_without_cwd(dir: &Path, session_id: &str) {
+        let file_path = dir.join(format!("{}.jsonl", session_id));
+        let mut file = fs::File::create(&file_path).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"user","sessionId":"{session_id}","uuid":"u1","timestamp":"2025-01-01T00:00:00Z","message":{{"role":"user","content":"hello"}}}}"#,
+        )
+        .unwrap();
+    }
+
     #[test]
     fn test_find_local_project_hyphenated_name() {
         let temp_dir = tempdir().unwrap();
@@ -693,6 +712,34 @@ mod tests {
         assert!(
             collisions.is_empty(),
             "Non-ASCII sibling with known cwd must not collide with parent-named project"
+        );
+    }
+
+    #[test]
+    fn test_find_colliding_projects_non_ascii_no_cwd_no_false_collision() {
+        // When a non-ASCII project dir has NO cwd (only snapshot/summary files),
+        // get_project_name_from_dir returns None and the code falls back to
+        // extract_project_name(dir_name). For "...-Projects-----" (安装环境) that
+        // misreads the parent segment "Projects" as the project name, falsely
+        // colliding with a real sibling project of that name and producing a
+        // spurious push warning. A dir whose real name cannot be determined
+        // must not be grouped under a misread parent name.
+        let temp_dir = tempdir().unwrap();
+        let projects_dir = temp_dir.path();
+
+        let real_projects = projects_dir.join("-Users-mini-Documents-Projects");
+        fs::create_dir(&real_projects).unwrap();
+        create_session_with_cwd(&real_projects, "sess-1", "/Users/mini/Documents/Projects");
+
+        // Non-ASCII sibling whose only JSONL has no cwd -> triggers the fallback.
+        let non_ascii_sibling = projects_dir.join("-Users-mini-Documents-Projects-----");
+        fs::create_dir(&non_ascii_sibling).unwrap();
+        create_session_without_cwd(&non_ascii_sibling, "sess-2");
+
+        let collisions = find_colliding_projects(projects_dir);
+        assert!(
+            collisions.is_empty(),
+            "Non-ASCII dir without cwd must not collide with parent-named project via fallback"
         );
     }
 }
