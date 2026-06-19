@@ -158,15 +158,17 @@ GitHub Actions workflow 配置问题：
 
 ### 解决方案
 - Pass 1 增加判据：目录名以 `-` 结尾时跳过 dir-name 匹配（ASCII 项目名编码后绝不会以 `-` 结尾，任何以 `-` 结尾都意味着末尾有被编码的非 ASCII 字符，dir-name 提取必然误取上一级名，不可信），交由 Pass 2 cwd 处理。
-- 代码：`src/sync/discovery.rs` `find_local_project_by_name` Pass 1 filter 增加 `!name.ends_with('-')` 条件。
-- 新增回归测试：`test_find_local_project_non_ascii_sibling_no_false_ambiguity`（复现并锁定主 bug）、`test_find_colliding_projects_non_ascii_sibling_no_false_collision`（确认 `find_colliding_projects` 因优先用 cwd 不受影响）。
+- 同时修复了无 cwd 文件（快照/summary）场景下的同类 fallback 误判：
+  - `find_colliding_projects`（避免 push 时产生假碰撞警告）
+  - `handlers/session.rs`（避免交互菜单里中文无 cwd 会话被错误归入父级项目）
+- 代码：上述调用点在 fallback 到 `extract_project_name` 前增加 `!name.ends_with('-')` 保护。
+- 新增回归测试：`test_find_local_project_non_ascii_sibling_no_false_ambiguity`（复现并锁定主 bug）、`test_find_colliding_projects_non_ascii_sibling_no_false_collision` 和 `test_find_colliding_projects_non_ascii_no_cwd_no_false_collision`。
 
 ### 影响范围
 - 版本号：0.3.18（未 bump，修复随下次发布）
-- 相关模块：`src/sync/discovery.rs`（`find_local_project_by_name`）
-- 不影响 `extract_project_name` 既有语义与 `session.rs` 两处 fallback（仅当无 cwd 时用，影响仅限显示名）
+- 相关模块：`src/sync/discovery.rs`、`src/handlers/session.rs`
 
 ### 预防措施
-- `find_colliding_projects` 在「无 cwd 的中文目录」边缘情况下仍可能误报碰撞警告（仅警告、不影响数据），优先级低，暂不修。
 - 路径编码相关匹配逻辑今后凡用 `extract_project_name`，均需考虑非 ASCII 末尾 `-` 场景。
+
 
