@@ -431,15 +431,22 @@ pub fn handle_stop() -> Result<()> {
         {
             let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
             match &push_result {
-                Ok(status) => {
+                Ok(status) if status.success() => {
                     let _ = writeln!(
                         file,
                         "[{}] Stop push completed: exit code {}",
                         timestamp, status
                     );
                 }
+                Ok(status) => {
+                    let _ = writeln!(
+                        file,
+                        "[{}] Stop push FAILED: exit code {}",
+                        timestamp, status
+                    );
+                }
                 Err(e) => {
-                    let _ = writeln!(file, "[{}] Stop push failed: {}", timestamp, e);
+                    let _ = writeln!(file, "[{}] Stop push failed to execute: {}", timestamp, e);
                 }
             }
         }
