@@ -20,6 +20,49 @@ use super::discovery::{
 use super::state::SyncState;
 use super::MAX_CONVERSATIONS_TO_DISPLAY;
 
+/// Scan the repo worktree for jsonl files containing git conflict markers.
+///
+/// Called while a rebase is in progress (before aborting it), so the working
+/// tree still has the conflict markers embedded.  After this scan the caller
+/// should abort the rebase to restore a clean working tree.
+fn find_rebase_conflict_files(repo_path: &Path) -> Vec<PathBuf> {
+    let mut conflicts = Vec::new();
+    let dirs_to_scan = vec![repo_path.to_path_buf()];
+
+    for dir in dirs_to_scan {
+        scan_for_conflict_files(&dir, repo_path, &mut conflicts);
+    }
+
+    conflicts
+}
+
+fn scan_for_conflict_files(dir: &Path, base: &Path, conflicts: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_dir() {
+            // Skip hidden directories (.git, etc.)
+            let is_hidden = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.starts_with('.'))
+                .unwrap_or(false);
+            if !is_hidden {
+                scan_for_conflict_files(&path, base, conflicts);
+            }
+        } else if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if content.contains("<<<<<<<") || content.contains(">>>>>>>") {
+                    log::info!("Found rebase conflict file: {}", path.display());
+                    conflicts.push(path.to_path_buf());
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Push orchestration types and helpers
 // ---------------------------------------------------------------------------
@@ -98,8 +141,11 @@ fn push_with_rebase_auto_heal(
                 match repo.rebase(&format!("origin/{branch_name}"))? {
                     scm::RebaseOutcome::Completed => continue,
                     scm::RebaseOutcome::InProgress => {
+                        // Scan for conflict markers while the rebase is still
+                        // in progress (aborting would remove them from disk).
+                        let conflicts = find_rebase_conflict_files(repo_path);
                         repo.rebase_abort()?;
-                        return Ok(PushResult::Degraded { conflicts: Vec::new() });
+                        return Ok(PushResult::Degraded { conflicts });
                     }
                 }
             }
@@ -918,5 +964,56 @@ mod push_auto_heal_tests {
     #[test]
     fn test_drift_check_false_when_same_hash() {
         assert!(!has_last_synced_commit_drift(Some("same-hash"), "same-hash", true));
+    }
+
+    #[test]
+    fn test_find_rebase_conflict_files_detects_markers() {
+        let dir = tempfile::TempDir::new().unwrap();
+
+        // File with conflict markers
+        let conflict_file = dir.path().join("session.jsonl");
+        std::fs::write(&conflict_file, "<<<<<<< HEAD\nline1\n=======\nline2\n>>>>>>> branch\n").unwrap();
+
+        // Normal file without markers
+        let normal_file = dir.path().join("other.jsonl");
+        std::fs::write(&normal_file, "{\"key\": \"value\"}\n").unwrap();
+
+        // Non-jsonl file with markers (should be skipped)
+        let txt_file = dir.path().join("notes.txt");
+        std::fs::write(&txt_file, "<<<<<<< HEAD\nconflict\n").unwrap();
+
+        let conflicts = find_rebase_conflict_files(dir.path());
+        assert_eq!(conflicts.len(), 1, "should find exactly one conflict file");
+        assert_eq!(conflicts[0], conflict_file, "should find the jsonl file with conflict markers");
+    }
+
+    #[test]
+    fn test_find_rebase_conflict_files_empty_when_no_conflicts() {
+        let dir = tempfile::TempDir::new().unwrap();
+
+        let normal_file = dir.path().join("session.jsonl");
+        std::fs::write(&normal_file, "{\"key\": \"value\"}\n").unwrap();
+
+        let conflicts = find_rebase_conflict_files(dir.path());
+        assert!(conflicts.is_empty(), "should find no conflict files");
+    }
+
+    #[test]
+    fn test_find_rebase_conflict_files_skips_hidden_dirs() {
+        let dir = tempfile::TempDir::new().unwrap();
+
+        // File in .git dir with conflict markers (should be skipped)
+        let git_dir = dir.path().join(".git");
+        std::fs::create_dir_all(&git_dir).unwrap();
+        std::fs::write(git_dir.join("conflict.jsonl"), "<<<<<<< HEAD\nconflict\n").unwrap();
+
+        // File in normal dir with conflict markers (should be found)
+        let nested = dir.path().join("projects").join("my-project");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("session.jsonl"), "<<<<<<< HEAD\nconflict\n").unwrap();
+
+        let conflicts = find_rebase_conflict_files(dir.path());
+        assert_eq!(conflicts.len(), 1, "should skip .git but find conflict in projects dir");
+        assert!(conflicts[0].ends_with("session.jsonl"));
     }
 }
