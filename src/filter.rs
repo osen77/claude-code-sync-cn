@@ -397,7 +397,10 @@ impl FilterConfig {
         match self.scm_backend.to_lowercase().as_str() {
             "git" => Ok(Backend::Git),
             "mercurial" | "hg" => Ok(Backend::Mercurial),
-            other => bail!("Unknown SCM backend: '{}'. Use 'git' or 'mercurial'.", other),
+            other => bail!(
+                "Unknown SCM backend: '{}'. Use 'git' or 'mercurial'.",
+                other
+            ),
         }
     }
 
@@ -498,10 +501,7 @@ pub fn update_config(
 
     if let Some(exclude_att) = exclude_attachments {
         config.exclude_attachments = exclude_att;
-        println!(
-            "{}",
-            format!("Exclude attachments: {exclude_att}").green()
-        );
+        println!("{}", format!("Exclude attachments: {exclude_att}").green());
     }
 
     if let Some(lfs) = enable_lfs {
@@ -527,7 +527,10 @@ pub fn update_config(
     if let Some(backend) = scm_backend {
         let backend_lower = backend.to_lowercase();
         if backend_lower != "git" && backend_lower != "mercurial" && backend_lower != "hg" {
-            bail!("Invalid SCM backend: '{}'. Use 'git' or 'mercurial'.", backend);
+            bail!(
+                "Invalid SCM backend: '{}'. Use 'git' or 'mercurial'.",
+                backend
+            );
         }
         config.scm_backend = backend_lower;
         println!(
@@ -574,9 +577,7 @@ pub fn update_config(
                     "-Users-.../".dimmed()
                 );
                 println!();
-                println!(
-                    "建议：手动清理同步仓库中的完整路径格式目录，避免数据重复。"
-                );
+                println!("建议：手动清理同步仓库中的完整路径格式目录，避免数据重复。");
             } else {
                 // Switching to single-device mode
                 println!(
@@ -596,9 +597,7 @@ pub fn update_config(
                     "n8n-workflow/".green()
                 );
                 println!();
-                println!(
-                    "注意：此模式不支持跨设备同步（路径不同会被视为不同项目）。"
-                );
+                println!("注意：此模式不支持跨设备同步（路径不同会被视为不同项目）。");
             }
             println!("{}", "─".repeat(50).dimmed());
             println!();
@@ -683,11 +682,7 @@ pub fn show_config() -> Result<()> {
             "Disabled".yellow()
         }
     );
-    println!(
-        "  {}: {}",
-        "SCM backend".cyan(),
-        config.scm_backend.green()
-    );
+    println!("  {}: {}", "SCM backend".cyan(), config.scm_backend.green());
     println!(
         "  {}: {}",
         "Sync subdirectory".cyan(),
@@ -733,22 +728,38 @@ pub fn show_config() -> Result<()> {
         println!(
             "  {}: {}",
             "Sync settings.json".cyan(),
-            if config.config_sync.sync_settings { "Yes" } else { "No" }
+            if config.config_sync.sync_settings {
+                "Yes"
+            } else {
+                "No"
+            }
         );
         println!(
             "  {}: {}",
             "Sync CLAUDE.md".cyan(),
-            if config.config_sync.sync_claude_md { "Yes" } else { "No" }
+            if config.config_sync.sync_claude_md {
+                "Yes"
+            } else {
+                "No"
+            }
         );
         println!(
             "  {}: {}",
             "Sync hooks".cyan(),
-            if config.config_sync.sync_hooks { "Yes" } else { "No" }
+            if config.config_sync.sync_hooks {
+                "Yes"
+            } else {
+                "No"
+            }
         );
         println!(
             "  {}: {}",
             "Sync skills list".cyan(),
-            if config.config_sync.sync_skills_list { "Yes" } else { "No" }
+            if config.config_sync.sync_skills_list {
+                "Yes"
+            } else {
+                "No"
+            }
         );
     }
 

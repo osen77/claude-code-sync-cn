@@ -121,7 +121,9 @@ pub trait Scm: Send + Sync {
 
     /// Continue an in-progress rebase.
     fn rebase_continue(&self) -> Result<RebaseOutcome> {
-        Err(anyhow!("rebase continue is not supported by this SCM backend"))
+        Err(anyhow!(
+            "rebase continue is not supported by this SCM backend"
+        ))
     }
 
     /// Abort an in-progress rebase.

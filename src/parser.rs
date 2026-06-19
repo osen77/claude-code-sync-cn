@@ -288,17 +288,13 @@ impl ConversationSession {
             .and_then(|cwd| {
                 // Split by both / and \ to handle cross-platform paths
                 // Take the last non-empty component
-                cwd.split(&['/', '\\'])
-                    .filter(|s| !s.is_empty())
-                    .last()
+                cwd.split(&['/', '\\']).filter(|s| !s.is_empty()).last()
             })
     }
 
     /// Get the full cwd path from the first entry that has it
     pub fn cwd(&self) -> Option<&str> {
-        self.entries
-            .iter()
-            .find_map(|e| e.cwd.as_deref())
+        self.entries.iter().find_map(|e| e.cwd.as_deref())
     }
 
     /// Get the session title
@@ -390,7 +386,10 @@ impl ConversationSession {
 
     /// Get the first timestamp from the conversation (creation time)
     pub fn first_timestamp(&self) -> Option<String> {
-        self.entries.iter().filter_map(|e| e.timestamp.clone()).next()
+        self.entries
+            .iter()
+            .filter_map(|e| e.timestamp.clone())
+            .next()
     }
 
     /// Try to extract tool info from a tool-only message (all blocks are tool_use).
@@ -442,10 +441,7 @@ impl ConversationSession {
                 }
             }
             "tool_result" => {
-                let content_str = block
-                    .get("content")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("");
+                let content_str = block.get("content").and_then(|c| c.as_str()).unwrap_or("");
                 if is_user_interaction_result(content_str) {
                     Some(format_user_interaction(content_str))
                 } else {
@@ -473,10 +469,7 @@ impl ConversationSession {
                     if block.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
                         return false;
                     }
-                    let content = block
-                        .get("content")
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("");
+                    let content = block.get("content").and_then(|c| c.as_str()).unwrap_or("");
                     !is_user_interaction_result(content)
                 });
             }
@@ -573,10 +566,8 @@ impl ConversationSession {
                             }
                         }
                         "tool_result" => {
-                            let content_str = block
-                                .get("content")
-                                .and_then(|c| c.as_str())
-                                .unwrap_or("");
+                            let content_str =
+                                block.get("content").and_then(|c| c.as_str()).unwrap_or("");
                             if is_user_interaction_result(content_str) {
                                 Some(format_user_interaction(content_str))
                             } else {
@@ -869,10 +860,9 @@ mod tests {
 
     #[test]
     fn test_title_uses_last_custom_title() {
-        let user_entry: ConversationEntry = serde_json::from_str(
-            r#"{"type":"user","uuid":"1","message":{"content":"Hello"}}"#,
-        )
-        .unwrap();
+        let user_entry: ConversationEntry =
+            serde_json::from_str(r#"{"type":"user","uuid":"1","message":{"content":"Hello"}}"#)
+                .unwrap();
         let ct1: ConversationEntry = serde_json::from_str(
             r#"{"type":"custom-title","customTitle":"first-rename","sessionId":"s1"}"#,
         )
@@ -1087,7 +1077,8 @@ mod tests {
 
     #[test]
     fn test_format_user_interaction_answer() {
-        let content = "User has answered your questions: \"Which lang?\"=\"English\". You can now continue.";
+        let content =
+            "User has answered your questions: \"Which lang?\"=\"English\". You can now continue.";
         let result = format_user_interaction(content);
         assert!(result.starts_with("[User answered:"));
         assert!(result.contains("Which lang?"));
@@ -1150,7 +1141,11 @@ mod tests {
         let file_path = temp_dir.path().join("test.jsonl");
 
         let mut file = File::create(&file_path).unwrap();
-        writeln!(file, r#"{{"type":"user","sessionId":"s1","uuid":"1","timestamp":"2025-01-01T00:00:00Z"}}"#).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"user","sessionId":"s1","uuid":"1","timestamp":"2025-01-01T00:00:00Z"}}"#
+        )
+        .unwrap();
         writeln!(file, r#"THIS IS NOT VALID JSON"#).unwrap();
         writeln!(file, r#"{{"type":"assistant","sessionId":"s1","uuid":"2","timestamp":"2025-01-01T00:01:00Z"}}"#).unwrap();
 
@@ -1169,7 +1164,11 @@ mod tests {
         let file_path = temp_dir.path().join("test.jsonl");
 
         let mut file = File::create(&file_path).unwrap();
-        writeln!(file, r#"{{"type":"user","sessionId":"s1","uuid":"1","timestamp":"2025-01-01T00:00:00Z"}}"#).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"user","sessionId":"s1","uuid":"1","timestamp":"2025-01-01T00:00:00Z"}}"#
+        )
+        .unwrap();
         // Two JSON objects concatenated on one line (real corruption pattern)
         writeln!(file, r#"{{"type":"assistant","uuid":"2","message":{{"content":"partial"}}}}{{"type":"user","uuid":"3"}}"#).unwrap();
         writeln!(file, r#"{{"type":"assistant","sessionId":"s1","uuid":"4","timestamp":"2025-01-01T00:02:00Z"}}"#).unwrap();
@@ -1208,10 +1207,22 @@ mod tests {
         let file_path = temp_dir.path().join("test.jsonl");
 
         let mut file = File::create(&file_path).unwrap();
-        writeln!(file, r#"{{"type":"user","sessionId":"s1","uuid":"1","timestamp":"2025-01-01T00:00:00Z"}}"#).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"user","sessionId":"s1","uuid":"1","timestamp":"2025-01-01T00:00:00Z"}}"#
+        )
+        .unwrap();
         // Truncated JSON (write interrupted)
-        writeln!(file, r#"{{"type":"assistant","uuid":"2","message":{{"content":"hello wor"#).unwrap();
-        writeln!(file, r#"{{"type":"user","sessionId":"s1","uuid":"3","timestamp":"2025-01-01T00:02:00Z"}}"#).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant","uuid":"2","message":{{"content":"hello wor"#
+        )
+        .unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"user","sessionId":"s1","uuid":"3","timestamp":"2025-01-01T00:02:00Z"}}"#
+        )
+        .unwrap();
 
         let session = ConversationSession::from_file(&file_path).unwrap();
         assert_eq!(session.entries.len(), 2);

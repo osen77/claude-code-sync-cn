@@ -133,11 +133,7 @@ fn install_unix_wrapper(wrapper_path: &PathBuf, force: bool) -> Result<()> {
     perms.set_mode(0o755);
     std::fs::set_permissions(wrapper_path, perms)?;
 
-    println!(
-        "  {} Created: {}",
-        "✓".green(),
-        wrapper_path.display()
-    );
+    println!("  {} Created: {}", "✓".green(), wrapper_path.display());
 
     Ok(())
 }

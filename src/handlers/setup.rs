@@ -89,7 +89,12 @@ fn install_gh_cli() -> Result<()> {
         "macos" => {
             println!("{}", "   使用 Homebrew 安装...".cyan());
             // Check if brew is installed
-            if !Command::new("brew").arg("--version").output().map(|o| o.status.success()).unwrap_or(false) {
+            if !Command::new("brew")
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
                 return Err(anyhow::anyhow!(
                     "未安装 Homebrew。请先安装: /bin/bash -c \"$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)\""
                 ));
@@ -98,7 +103,12 @@ fn install_gh_cli() -> Result<()> {
         }
         "linux" => {
             // Try to detect package manager
-            if Command::new("apt-get").arg("--version").output().map(|o| o.status.success()).unwrap_or(false) {
+            if Command::new("apt-get")
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
                 println!("{}", "   使用 apt 安装...".cyan());
                 // Need to add GitHub's apt repository first
                 println!("{}", "   添加 GitHub APT 源...".cyan());
@@ -122,10 +132,20 @@ fn install_gh_cli() -> Result<()> {
                 // Update and install
                 let _ = Command::new("sudo").args(["apt-get", "update"]).status();
                 ("sudo", vec!["apt-get", "install", "-y", "gh"])
-            } else if Command::new("dnf").arg("--version").output().map(|o| o.status.success()).unwrap_or(false) {
+            } else if Command::new("dnf")
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
                 println!("{}", "   使用 dnf 安装...".cyan());
                 ("sudo", vec!["dnf", "install", "-y", "gh"])
-            } else if Command::new("pacman").arg("--version").output().map(|o| o.status.success()).unwrap_or(false) {
+            } else if Command::new("pacman")
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
                 println!("{}", "   使用 pacman 安装...".cyan());
                 ("sudo", vec!["pacman", "-S", "--noconfirm", "github-cli"])
             } else {
@@ -136,10 +156,20 @@ fn install_gh_cli() -> Result<()> {
         }
         "windows" => {
             // Try winget first, then scoop
-            if Command::new("winget").arg("--version").output().map(|o| o.status.success()).unwrap_or(false) {
+            if Command::new("winget")
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
                 println!("{}", "   使用 winget 安装...".cyan());
                 ("winget", vec!["install", "--id", "GitHub.cli", "-e"])
-            } else if Command::new("scoop").arg("--version").output().map(|o| o.status.success()).unwrap_or(false) {
+            } else if Command::new("scoop")
+                .arg("--version")
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+            {
                 println!("{}", "   使用 scoop 安装...".cyan());
                 ("scoop", vec!["install", "gh"])
             } else {
@@ -172,7 +202,10 @@ fn install_gh_cli() -> Result<()> {
 fn authenticate_gh() -> Result<()> {
     println!();
     println!("{}", "🔐 需要登录 GitHub 账号".cyan().bold());
-    println!("{}", "   将打开浏览器进行认证，请在浏览器中完成登录。".cyan());
+    println!(
+        "{}",
+        "   将打开浏览器进行认证，请在浏览器中完成登录。".cyan()
+    );
     println!();
 
     let status = Command::new("gh")
@@ -194,7 +227,13 @@ fn create_github_repo(repo_name: &str, private: bool) -> Result<String> {
     println!("{}", format!("📦 正在创建仓库 {}...", repo_name).cyan());
 
     let output = Command::new("gh")
-        .args(["repo", "create", repo_name, if private { "--private" } else { "--public" }, "--clone=false"])
+        .args([
+            "repo",
+            "create",
+            repo_name,
+            if private { "--private" } else { "--public" },
+            "--clone=false",
+        ])
         .output()
         .context("创建仓库失败")?;
 
@@ -217,7 +256,9 @@ fn create_github_repo(repo_name: &str, private: bool) -> Result<String> {
             .args(["api", "user", "-q", ".login"])
             .output()
             .context("获取用户名失败")?;
-        let username = String::from_utf8_lossy(&username_output.stdout).trim().to_string();
+        let username = String::from_utf8_lossy(&username_output.stdout)
+            .trim()
+            .to_string();
         return Ok(format!("https://github.com/{}/{}.git", username, repo_name));
     }
 
@@ -336,11 +377,19 @@ fn handle_clone_failure(error: &anyhow::Error, remote_url: &str) -> Result<()> {
     println!("{}", "❌ 克隆仓库失败".red().bold());
     println!();
 
-    if error_msg.contains("no such file or directory") || error_msg.contains("not recognized") || error_msg.contains("command not found") {
+    if error_msg.contains("no such file or directory")
+        || error_msg.contains("not recognized")
+        || error_msg.contains("command not found")
+    {
         // Git not installed (shouldn't happen if pre-flight check passes, but just in case)
         println!("{}", "💡 未找到 git 命令。请先安装 Git:".yellow());
         print_git_install_instructions();
-    } else if error_msg.contains("authentication") || error_msg.contains("auth") || error_msg.contains("permission") || error_msg.contains("403") || error_msg.contains("401") {
+    } else if error_msg.contains("authentication")
+        || error_msg.contains("auth")
+        || error_msg.contains("permission")
+        || error_msg.contains("403")
+        || error_msg.contains("401")
+    {
         // Authentication error
         println!("{}", "💡 这可能是认证问题。解决方案:".yellow());
         println!();
@@ -362,7 +411,10 @@ fn handle_clone_failure(error: &anyhow::Error, remote_url: &str) -> Result<()> {
             ensure_gh_ready()?;
             return Ok(()); // Signal to retry clone
         }
-    } else if error_msg.contains("not found") || error_msg.contains("404") || error_msg.contains("does not exist") {
+    } else if error_msg.contains("not found")
+        || error_msg.contains("404")
+        || error_msg.contains("does not exist")
+    {
         // Repository not found — could be genuinely missing OR a private repo without access
         // (GitHub returns "not found" for unauthorized access to private repos)
         println!("{}", "💡 仓库不存在或无访问权限。".yellow());
@@ -377,11 +429,7 @@ fn handle_clone_failure(error: &anyhow::Error, remote_url: &str) -> Result<()> {
 
         let action = Select::new(
             "请选择:",
-            vec![
-                "先登录 GitHub 再重试 (私有仓库推荐)",
-                "创建新仓库",
-                "取消",
-            ],
+            vec!["先登录 GitHub 再重试 (私有仓库推荐)", "创建新仓库", "取消"],
         )
         .prompt()
         .unwrap_or("取消");
@@ -419,10 +467,7 @@ fn print_git_install_instructions() {
 /// Run the interactive setup wizard
 pub fn handle_setup(skip_sync: bool) -> Result<()> {
     println!();
-    println!(
-        "{}",
-        "🔧 Claude Code Sync 配置向导".cyan().bold()
-    );
+    println!("{}", "🔧 Claude Code Sync 配置向导".cyan().bold());
     println!("{}", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━".cyan());
     println!();
 
@@ -464,7 +509,11 @@ pub fn handle_setup(skip_sync: bool) -> Result<()> {
                 "单设备备份"
             };
 
-            println!("当前配置: {} → 新选择: {}", old_mode.cyan(), new_mode.green());
+            println!(
+                "当前配置: {} → 新选择: {}",
+                old_mode.cyan(),
+                new_mode.green()
+            );
             println!();
             println!(
                 "{}",
@@ -557,7 +606,15 @@ pub fn handle_setup(skip_sync: bool) -> Result<()> {
 
     // Show configuration summary
     println!("{}", "📋 配置摘要".cyan().bold());
-    println!("   {} {}", "模式:".cyan(), if use_project_name_only { "多设备同步" } else { "单设备备份" });
+    println!(
+        "   {} {}",
+        "模式:".cyan(),
+        if use_project_name_only {
+            "多设备同步"
+        } else {
+            "单设备备份"
+        }
+    );
     println!("   {} {}", "远程:".cyan(), remote_url);
     println!("   {} {}", "本地:".cyan(), local_path.display());
     println!();
@@ -583,11 +640,14 @@ pub fn handle_setup(skip_sync: bool) -> Result<()> {
             let existing_scm = scm::open(&local_path).context("无法打开已有仓库")?;
             let existing_remote = existing_scm.get_remote_url("origin").unwrap_or_default();
 
-            let remote_matches = normalize_git_url(&existing_remote) == normalize_git_url(&remote_url);
+            let remote_matches =
+                normalize_git_url(&existing_remote) == normalize_git_url(&remote_url);
 
             if remote_matches {
                 println!("{}", "📦 检测到已有仓库，正在拉取最新变更...".cyan());
-                let branch = existing_scm.current_branch().unwrap_or_else(|_| "main".to_string());
+                let branch = existing_scm
+                    .current_branch()
+                    .unwrap_or_else(|_| "main".to_string());
                 existing_scm.pull("origin", &branch).ok(); // best-effort pull
             } else {
                 println!("{}", "⚠️  目标目录已存在一个不同的仓库".yellow().bold());
@@ -595,13 +655,20 @@ pub fn handle_setup(skip_sync: bool) -> Result<()> {
                 println!("   新的远程: {}", remote_url);
                 println!();
 
-                if !confirm_overwrite_and_clone(&local_path, &remote_url, "是否删除已有仓库并重新克隆?")? {
+                if !confirm_overwrite_and_clone(
+                    &local_path,
+                    &remote_url,
+                    "是否删除已有仓库并重新克隆?",
+                )? {
                     return Ok(());
                 }
             }
         } else {
             // Directory exists but is not a git repo
-            let is_empty = local_path.read_dir().map(|mut d| d.next().is_none()).unwrap_or(false);
+            let is_empty = local_path
+                .read_dir()
+                .map(|mut d| d.next().is_none())
+                .unwrap_or(false);
             if is_empty {
                 // Empty directory — remove it so clone can proceed
                 std::fs::remove_dir(&local_path).ok();
@@ -612,7 +679,11 @@ pub fn handle_setup(skip_sync: bool) -> Result<()> {
                 println!("   路径: {}", local_path.display());
                 println!();
 
-                if !confirm_overwrite_and_clone(&local_path, &remote_url, "是否删除该目录并重新克隆?")? {
+                if !confirm_overwrite_and_clone(
+                    &local_path,
+                    &remote_url,
+                    "是否删除该目录并重新克隆?",
+                )? {
                     return Ok(());
                 }
             }
@@ -673,19 +744,17 @@ pub fn handle_setup(skip_sync: bool) -> Result<()> {
             println!();
             println!("{}", "🔄 正在同步...".cyan());
 
-            match sync::sync_bidirectional(
-                None,
-                None,
-                false,
-                false,
-                crate::VerbosityLevel::Normal,
-            ) {
+            match sync::sync_bidirectional(None, None, false, false, crate::VerbosityLevel::Normal)
+            {
                 Ok(()) => {
                     println!("{}", "✓ 同步完成".green());
                 }
                 Err(e) => {
                     println!("{} {}", "⚠️  同步时出现问题:".yellow(), e);
-                    println!("{}", format!("   可以稍后使用 '{} sync' 重试", BINARY_NAME).yellow());
+                    println!(
+                        "{}",
+                        format!("   可以稍后使用 '{} sync' 重试", BINARY_NAME).yellow()
+                    );
                 }
             }
         }
@@ -746,10 +815,11 @@ pub fn handle_setup(skip_sync: bool) -> Result<()> {
         println!();
         println!("{}", "选择需要同步的配置项:".cyan());
 
-        filter_config.config_sync.sync_settings = Confirm::new("  同步 settings.json (权限、模型配置)?")
-            .with_default(true)
-            .prompt()
-            .unwrap_or(true);
+        filter_config.config_sync.sync_settings =
+            Confirm::new("  同步 settings.json (权限、模型配置)?")
+                .with_default(true)
+                .prompt()
+                .unwrap_or(true);
 
         filter_config.config_sync.sync_claude_md = Confirm::new("  同步 CLAUDE.md (用户指令)?")
             .with_default(true)
@@ -781,8 +851,14 @@ pub fn handle_setup(skip_sync: bool) -> Result<()> {
         println!("{}", "自动同步已启用，使用 claude-sync 启动即可。".cyan());
         println!();
         println!("{}", "管理命令:".cyan());
-        println!("   {} - 查看自动同步状态", format!("{} automate --status", BINARY_NAME).bold());
-        println!("   {} - 卸载自动同步", format!("{} automate --uninstall", BINARY_NAME).bold());
+        println!(
+            "   {} - 查看自动同步状态",
+            format!("{} automate --status", BINARY_NAME).bold()
+        );
+        println!(
+            "   {} - 卸载自动同步",
+            format!("{} automate --uninstall", BINARY_NAME).bold()
+        );
     } else {
         println!("{}", "常用命令:".cyan());
         println!("   {} - 双向同步", format!("{} sync", BINARY_NAME).bold());
@@ -790,7 +866,10 @@ pub fn handle_setup(skip_sync: bool) -> Result<()> {
         println!("   {} - 拉取到本地", format!("{} pull", BINARY_NAME).bold());
         println!("   {} - 查看状态", format!("{} status", BINARY_NAME).bold());
         println!();
-        println!("{}", format!("提示: 运行 '{} automate' 可配置自动同步", BINARY_NAME).dimmed());
+        println!(
+            "{}",
+            format!("提示: 运行 '{} automate' 可配置自动同步", BINARY_NAME).dimmed()
+        );
     }
     println!();
 

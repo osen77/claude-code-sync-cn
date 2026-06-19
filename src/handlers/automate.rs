@@ -9,7 +9,9 @@ use colored::Colorize;
 use crate::BINARY_NAME;
 
 use super::hooks::{are_hooks_installed, handle_hooks_install, handle_hooks_uninstall};
-use super::wrapper::{get_wrapper_path, handle_wrapper_install, handle_wrapper_uninstall, is_wrapper_installed};
+use super::wrapper::{
+    get_wrapper_path, handle_wrapper_install, handle_wrapper_uninstall, is_wrapper_installed,
+};
 
 /// Set up automatic synchronization (one-click setup)
 pub fn handle_automate_setup() -> Result<()> {
@@ -83,7 +85,12 @@ pub fn handle_automate_status() -> Result<()> {
 
 /// Remove all automation configuration
 pub fn handle_automate_uninstall() -> Result<()> {
-    println!("{}", "Removing Claude Code auto-sync configuration...".cyan().bold());
+    println!(
+        "{}",
+        "Removing Claude Code auto-sync configuration..."
+            .cyan()
+            .bold()
+    );
     println!();
 
     // Remove hooks
@@ -121,7 +128,10 @@ fn print_success_message(wrapper_path: &std::path::Path) -> Result<()> {
         );
         println!();
         println!("  2. Or add an alias to your shell profile (~/.bashrc or ~/.zshrc):");
-        println!("     {}", format!("alias claude='{}'", wrapper_path.display()).cyan());
+        println!(
+            "     {}",
+            format!("alias claude='{}'", wrapper_path.display()).cyan()
+        );
     }
 
     #[cfg(windows)]
@@ -137,8 +147,14 @@ fn print_success_message(wrapper_path: &std::path::Path) -> Result<()> {
 
     println!();
     println!("{}", "What happens:".bold());
-    println!("  {} On startup: Pull latest conversation history from remote", "•".cyan());
-    println!("  {} New project: Detect and pull remote history on first message", "•".cyan());
+    println!(
+        "  {} On startup: Pull latest conversation history from remote",
+        "•".cyan()
+    );
+    println!(
+        "  {} New project: Detect and pull remote history on first message",
+        "•".cyan()
+    );
     println!("  {} On exit: Sync conversations to remote", "•".cyan());
     println!();
 

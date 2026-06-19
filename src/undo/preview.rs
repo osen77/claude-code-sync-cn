@@ -1,8 +1,8 @@
 use anyhow::{anyhow, Result};
 use std::path::PathBuf;
 
-use crate::history::{OperationHistory, OperationType};
 use super::snapshot::Snapshot;
+use crate::history::{OperationHistory, OperationType};
 
 /// Preview information for an undo operation
 #[derive(Debug)]
@@ -43,7 +43,10 @@ impl UndoPreview {
                     OperationType::Pull => "Pull",
                     OperationType::Push => "Push",
                 };
-                println!("Undo {}: {} conversations affected", op_type, self.conversation_count);
+                println!(
+                    "Undo {}: {} conversations affected",
+                    op_type, self.conversation_count
+                );
                 if !self.affected_files.is_empty() {
                     println!("  {} files will be restored", self.affected_files.len());
                 }
@@ -148,7 +151,12 @@ impl UndoPreview {
                     } else {
                         commit.as_str()
                     };
-                    println!("{} {} (full: {})", "Will reset to:".bold(), short_hash.yellow(), commit.dimmed());
+                    println!(
+                        "{} {} (full: {})",
+                        "Will reset to:".bold(),
+                        short_hash.yellow(),
+                        commit.dimmed()
+                    );
                 }
 
                 println!(
@@ -158,7 +166,11 @@ impl UndoPreview {
                 );
 
                 if !self.affected_files.is_empty() {
-                    println!("\n{} ({} total)", "Files to be restored:".bold(), self.affected_files.len());
+                    println!(
+                        "\n{} ({} total)",
+                        "Files to be restored:".bold(),
+                        self.affected_files.len()
+                    );
                     for (idx, file) in self.affected_files.iter().enumerate() {
                         println!("  {}. {}", idx + 1, file);
 
@@ -183,9 +195,12 @@ impl UndoPreview {
                 let days = time_diff.num_days();
                 let hours = time_diff.num_hours() % 24;
                 let mins = time_diff.num_minutes() % 60;
-                println!("  {} {} days, {} hours, {} minutes ago",
+                println!(
+                    "  {} {} days, {} hours, {} minutes ago",
                     "Age:".dimmed(),
-                    days, hours, mins
+                    days,
+                    hours,
+                    mins
                 );
 
                 println!("{}", "=".repeat(80).yellow());

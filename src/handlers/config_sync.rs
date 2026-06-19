@@ -197,7 +197,10 @@ pub fn handle_config_list() -> Result<()> {
 
     if !configs.exists() {
         println!("{}", "没有找到配置同步目录".yellow());
-        println!("运行 {} 推送当前设备配置", format!("{} config push", BINARY_NAME).cyan());
+        println!(
+            "运行 {} 推送当前设备配置",
+            format!("{} config push", BINARY_NAME).cyan()
+        );
         return Ok(());
     }
 
@@ -240,7 +243,12 @@ pub fn handle_config_list() -> Result<()> {
 
         // Show available files
         let dir = entry.path();
-        let files = ["settings.json", "settings-full.json", "CLAUDE.md", "installed_skills.json"];
+        let files = [
+            "settings.json",
+            "settings-full.json",
+            "CLAUDE.md",
+            "installed_skills.json",
+        ];
         let mut available = Vec::new();
         for file in files {
             if dir.join(file).exists() {
@@ -260,7 +268,10 @@ pub fn handle_config_list() -> Result<()> {
     if !found_any {
         println!("{}", "  没有找到设备配置".dimmed());
         println!();
-        println!("运行 {} 推送当前设备配置", format!("{} config push", BINARY_NAME).cyan());
+        println!(
+            "运行 {} 推送当前设备配置",
+            format!("{} config push", BINARY_NAME).cyan()
+        );
     }
 
     Ok(())
@@ -278,7 +289,8 @@ pub fn handle_config_apply(
     if !source_dir.exists() {
         return Err(anyhow::anyhow!(
             "设备配置不存在: {}\n运行 `{} config list` 查看可用配置",
-            source_device, BINARY_NAME
+            source_device,
+            BINARY_NAME
         ));
     }
 
@@ -286,10 +298,7 @@ pub fn handle_config_apply(
     let current_platform = Platform::current();
     let mut applied_files = Vec::new();
 
-    println!(
-        "{}",
-        format!("从 {} 应用配置...", source_device).cyan()
-    );
+    println!("{}", format!("从 {} 应用配置...", source_device).cyan());
 
     // Apply settings.json
     if settings.sync_settings {
@@ -327,7 +336,9 @@ pub fn handle_config_apply(
 
                 // Merge: source settings + local hooks
                 let mut merged = source_json.clone();
-                if let (Some(merged_obj), Some(target_obj)) = (merged.as_object_mut(), target_json.as_object()) {
+                if let (Some(merged_obj), Some(target_obj)) =
+                    (merged.as_object_mut(), target_json.as_object())
+                {
                     if let Some(hooks) = target_obj.get("hooks") {
                         merged_obj.insert("hooks".to_string(), hooks.clone());
                     }
@@ -337,7 +348,15 @@ pub fn handle_config_apply(
                 fs::write(&target_settings, merged_content)?;
             }
 
-            applied_files.push(format!("{} ({})", "settings.json", if with_hooks { "含 hooks" } else { "保留本地 hooks" }));
+            applied_files.push(format!(
+                "{} ({})",
+                "settings.json",
+                if with_hooks {
+                    "含 hooks"
+                } else {
+                    "保留本地 hooks"
+                }
+            ));
         }
     }
 
@@ -362,7 +381,9 @@ pub fn handle_config_apply(
             };
 
             // Merge: source common content + target's current platform block
-            let final_content = if has_platform_blocks(&source_content) || has_platform_blocks(&target_content) {
+            let final_content = if has_platform_blocks(&source_content)
+                || has_platform_blocks(&target_content)
+            {
                 let merged = merge_claude_md(&source_content, &target_content, current_platform);
                 println!(
                     "  {} 已合并 CLAUDE.md（保留本地 {} 平台内容）",
@@ -405,7 +426,10 @@ pub fn handle_config_apply(
             applied_files.push("hooks/".to_string());
 
             println!();
-            println!("{}", "⚠️  Hooks 已应用，请检查以下路径是否适用于本设备:".yellow());
+            println!(
+                "{}",
+                "⚠️  Hooks 已应用，请检查以下路径是否适用于本设备:".yellow()
+            );
             println!("    - ~/.claude/hooks/ 中的脚本内容");
             println!("    - settings.json 中的 hooks 命令路径");
         }
@@ -480,7 +504,11 @@ pub fn handle_config_status(settings: &ConfigSyncSettings) -> Result<()> {
     ];
 
     for (name, path) in files {
-        let status = if path.exists() { "✓".green() } else { "✗".red() };
+        let status = if path.exists() {
+            "✓".green()
+        } else {
+            "✗".red()
+        };
         println!("  {} {}", status, name);
     }
 
@@ -499,23 +527,43 @@ pub fn handle_config_status(settings: &ConfigSyncSettings) -> Result<()> {
     println!("{}", "同步设置:".bold());
     println!(
         "  配置同步: {}",
-        if settings.enabled { "启用".green() } else { "禁用".red() }
+        if settings.enabled {
+            "启用".green()
+        } else {
+            "禁用".red()
+        }
     );
     println!(
         "  同步 settings.json: {}",
-        if settings.sync_settings { "是".green() } else { "否".dimmed() }
+        if settings.sync_settings {
+            "是".green()
+        } else {
+            "否".dimmed()
+        }
     );
     println!(
         "  同步 CLAUDE.md: {}",
-        if settings.sync_claude_md { "是".green() } else { "否".dimmed() }
+        if settings.sync_claude_md {
+            "是".green()
+        } else {
+            "否".dimmed()
+        }
     );
     println!(
         "  同步 hooks: {}",
-        if settings.sync_hooks { "是".green() } else { "否".dimmed() }
+        if settings.sync_hooks {
+            "是".green()
+        } else {
+            "否".dimmed()
+        }
     );
     println!(
         "  同步 skills 列表: {}",
-        if settings.sync_skills_list { "是".green() } else { "否".dimmed() }
+        if settings.sync_skills_list {
+            "是".green()
+        } else {
+            "否".dimmed()
+        }
     );
 
     Ok(())
@@ -624,10 +672,7 @@ fn find_latest_device_config_with_time(
 }
 
 /// Get the sync timestamp of a specific device from its .sync-info.json.
-fn get_device_sync_time(
-    sync_repo: &Path,
-    device: &str,
-) -> Option<chrono::DateTime<chrono::Utc>> {
+fn get_device_sync_time(sync_repo: &Path, device: &str) -> Option<chrono::DateTime<chrono::Utc>> {
     let info_path = device_config_dir(sync_repo, device).join(".sync-info.json");
     let content = fs::read_to_string(&info_path).ok()?;
     let info: DeviceSyncInfo = serde_json::from_str(&content).ok()?;

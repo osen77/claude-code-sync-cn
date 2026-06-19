@@ -94,8 +94,10 @@ pub fn handle_undo_push(preview_only: bool, verbosity: crate::VerbosityLevel) ->
     }
 
     // Load sync state to get repository path
-    let state = sync::SyncState::load()
-        .context(format!("Sync not initialized. Run '{} init' first.", BINARY_NAME))?;
+    let state = sync::SyncState::load().context(format!(
+        "Sync not initialized. Run '{} init' first.",
+        BINARY_NAME
+    ))?;
 
     // Always show preview
     let preview = undo::preview_undo_push(None).context("Failed to preview undo operation")?;

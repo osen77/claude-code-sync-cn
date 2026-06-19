@@ -331,10 +331,7 @@ fn test_init_sync_repo_with_remote_creates_filter_config() -> Result<()> {
     // Config env already set by setup_test_config_env()
 
     // Initialize with remote URL using init_sync_repo (simulates --repo --remote flags)
-    claude_code_sync::sync::init_sync_repo(
-        &repo_path,
-        Some("https://github.com/user/repo.git"),
-    )?;
+    claude_code_sync::sync::init_sync_repo(&repo_path, Some("https://github.com/user/repo.git"))?;
 
     // Verify state was saved with remote
     let state = SyncState::load()?;
@@ -414,10 +411,18 @@ fn test_clone_with_invalid_url_fails() -> Result<()> {
 #[serial]
 fn test_clone_creates_parent_directories() -> Result<()> {
     let temp_dir = setup_test_config_env()?;
-    let nested_path = temp_dir.path().join("deeply").join("nested").join("path").join("repo");
+    let nested_path = temp_dir
+        .path()
+        .join("deeply")
+        .join("nested")
+        .join("path")
+        .join("repo");
 
     // Even though clone will fail (invalid URL), it should create parent directories
-    let result = scm::clone("https://invalid-url-that-wont-work.example.com/repo.git", &nested_path);
+    let result = scm::clone(
+        "https://invalid-url-that-wont-work.example.com/repo.git",
+        &nested_path,
+    );
 
     // Clone fails but parent directory should be created
     assert!(result.is_err());
@@ -450,7 +455,10 @@ fn test_init_from_onboarding_sets_is_cloned_flag() -> Result<()> {
     let state = SyncState::load()?;
     assert_eq!(state.sync_repo_path, repo_path);
     assert!(state.has_remote);
-    assert!(state.is_cloned_repo, "is_cloned_repo should be true for cloned repos");
+    assert!(
+        state.is_cloned_repo,
+        "is_cloned_repo should be true for cloned repos"
+    );
 
     // Clean up env var
     cleanup_test_config_env();
@@ -472,16 +480,17 @@ fn test_init_from_onboarding_local_repo_not_cloned() -> Result<()> {
 
     // Test init_from_onboarding with is_cloned = false (local repo)
     claude_code_sync::sync::init_from_onboarding(
-        &repo_path,
-        None,
-        false, // not cloned
+        &repo_path, None, false, // not cloned
     )?;
 
     // Verify state was saved with is_cloned_repo = false
     let state = SyncState::load()?;
     assert_eq!(state.sync_repo_path, repo_path);
     assert!(!state.has_remote);
-    assert!(!state.is_cloned_repo, "is_cloned_repo should be false for local repos");
+    assert!(
+        !state.is_cloned_repo,
+        "is_cloned_repo should be false for local repos"
+    );
 
     // Clean up env var
     cleanup_test_config_env();

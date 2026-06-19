@@ -27,17 +27,29 @@ fn test_second_push_rebases_instead_of_silently_failing() {
 
     git(device_a.path(), &["init", "-b", "master"]);
     git(device_a.path(), &["config", "user.name", "test"]);
-    git(device_a.path(), &["config", "user.email", "test@example.com"]);
-    git(device_a.path(), &["remote", "add", "origin", remote.path().to_str().unwrap()]);
+    git(
+        device_a.path(),
+        &["config", "user.email", "test@example.com"],
+    );
+    git(
+        device_a.path(),
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
 
     fs::write(device_a.path().join("session.jsonl"), "a\n").unwrap();
     git(device_a.path(), &["add", "."]);
     git(device_a.path(), &["commit", "-m", "a1"]);
     git(device_a.path(), &["push", "-u", "origin", "master"]);
 
-    git(device_b.path(), &["clone", remote.path().to_str().unwrap(), "."]);
+    git(
+        device_b.path(),
+        &["clone", remote.path().to_str().unwrap(), "."],
+    );
     git(device_b.path(), &["config", "user.name", "test"]);
-    git(device_b.path(), &["config", "user.email", "test@example.com"]);
+    git(
+        device_b.path(),
+        &["config", "user.email", "test@example.com"],
+    );
 
     fs::write(device_a.path().join("session-a.jsonl"), "a2\n").unwrap();
     git(device_a.path(), &["add", "."]);
@@ -54,5 +66,8 @@ fn test_second_push_rebases_instead_of_silently_failing() {
         .output()
         .unwrap();
 
-    assert!(!push.status.success(), "plain git push should reject without auto-heal");
+    assert!(
+        !push.status.success(),
+        "plain git push should reject without auto-heal"
+    );
 }
