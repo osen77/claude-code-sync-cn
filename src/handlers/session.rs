@@ -319,11 +319,18 @@ pub fn scan_all_projects() -> Result<Vec<ProjectSummary>> {
         }
 
         // Get project name from session's cwd field (more accurate than directory name)
-        // Fall back to extract_project_name if no cwd is available
+        // Fall back to extract_project_name if no cwd is available, unless it's a
+        // non-ASCII encoded dir ending in '-'
         let project_name = sessions
             .iter()
             .find_map(|s| s.project_name().map(|n| n.to_string()))
-            .unwrap_or_else(|| extract_project_name(dir_name).to_string());
+            .unwrap_or_else(|| {
+                if dir_name.ends_with('-') {
+                    dir_name.to_string()
+                } else {
+                    extract_project_name(dir_name).to_string()
+                }
+            });
 
         // Count only valid sessions (with messages and real titles)
         let valid_session_count = sessions.iter().filter(|s| is_valid_session(s)).count();
@@ -514,9 +521,13 @@ fn scan_claude_summaries_cached(
                                 dir_project_name = Some(name.to_string());
                             }
                         }
-                        let project_name = dir_project_name
-                            .clone()
-                            .unwrap_or_else(|| extract_project_name(dir_name).to_string());
+                        let project_name = dir_project_name.clone().unwrap_or_else(|| {
+                            if dir_name.ends_with('-') {
+                                dir_name.to_string()
+                            } else {
+                                extract_project_name(dir_name).to_string()
+                            }
+                        });
 
                         let summary =
                             SessionSummary::from_session(&session, &project_name, &project_path);
