@@ -46,7 +46,15 @@ pub fn sync_bidirectional(
     }
 
     // Then, push local changes (sync_config = true by default)
-    push_history(commit_message, true, branch, exclude_attachments, true, interactive, verbosity)?;
+    push_history(
+        commit_message,
+        true,
+        branch,
+        exclude_attachments,
+        true,
+        interactive,
+        verbosity,
+    )?;
 
     if verbosity == VerbosityLevel::Quiet {
         println!("Sync complete");

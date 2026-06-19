@@ -118,8 +118,10 @@ fn push_with_rebase_auto_heal(
 
     // Drift detection
     let current_head = repo.current_commit_hash().ok();
-    if let (Some(last), Some(head)) = (state.last_synced_commit.as_deref(), current_head.as_deref()) {
-        let drift = has_last_synced_commit_drift(Some(last), head, git_is_ancestor(repo_path, last, head));
+    if let (Some(last), Some(head)) = (state.last_synced_commit.as_deref(), current_head.as_deref())
+    {
+        let drift =
+            has_last_synced_commit_drift(Some(last), head, git_is_ancestor(repo_path, last, head));
         if drift {
             log::warn!("Detected sync drift before push; auto-heal path will be used if needed");
         }
@@ -132,7 +134,11 @@ fn push_with_rebase_auto_heal(
                 state.last_synced_commit = repo.current_commit_hash().ok();
                 state.save()?;
                 if verbosity != crate::VerbosityLevel::Quiet && attempt > 1 {
-                    println!("  {} Rebased and pushed on attempt {}", "✓".green(), attempt);
+                    println!(
+                        "  {} Rebased and pushed on attempt {}",
+                        "✓".green(),
+                        attempt
+                    );
                 }
                 return Ok(PushResult::Clean);
             }
@@ -152,7 +158,9 @@ fn push_with_rebase_auto_heal(
             Err(scm::PushError::Other(e)) => return Err(e.context("Push failed")),
         }
     }
-    Err(anyhow::anyhow!("Remote remained busy after 3 push attempts"))
+    Err(anyhow::anyhow!(
+        "Remote remained busy after 3 push attempts"
+    ))
 }
 
 /// Push local Claude Code history to sync repository
@@ -199,11 +207,13 @@ pub fn push_history(
 
         if !structure_check.is_consistent {
             if let Some(warning) = &structure_check.warning {
-                println!();
-                println!("{}", "⚠️  目录结构不一致警告".yellow().bold());
-                println!("{}", "─".repeat(50).dimmed());
-                println!("{}", warning.yellow());
-                println!();
+                if verbosity != VerbosityLevel::Quiet {
+                    println!();
+                    println!("{}", "⚠️  目录结构不一致警告".yellow().bold());
+                    println!("{}", "─".repeat(50).dimmed());
+                    println!("{}", warning.yellow());
+                    println!();
+                }
 
                 if interactive && interactive_conflict::is_interactive() {
                     let proceed = Confirm::new("是否继续推送？")
@@ -216,7 +226,11 @@ pub fn push_history(
                         println!("\n{}", "推送已取消。".yellow());
                         println!(
                             "提示：使用 '{}' 可以切换同步模式",
-                            format!("{} config --use-project-name-only <true|false>", BINARY_NAME).cyan()
+                            format!(
+                                "{} config --use-project-name-only <true|false>",
+                                BINARY_NAME
+                            )
+                            .cyan()
                         );
                         return Ok(());
                     }
@@ -237,23 +251,30 @@ pub fn push_history(
         .unwrap_or_else(|| "main".to_string());
 
     // Discover all sessions
-    println!("  {} conversation sessions...", "Discovering".cyan());
+    if verbosity != VerbosityLevel::Quiet {
+        println!("  {} conversation sessions...", "Discovering".cyan());
+    }
     let sessions = discover_sessions(&claude_dir, &filter)?;
-    println!("  {} {} sessions", "Found".green(), sessions.len());
+    if verbosity != VerbosityLevel::Quiet {
+        println!("  {} {} sessions", "Found".green(), sessions.len());
+    }
 
     // Check for project name collisions when using project-name-only mode
     if filter.use_project_name_only {
         let collisions = find_colliding_projects(&claude_dir);
-        if !collisions.is_empty() {
+        if !collisions.is_empty() && verbosity != VerbosityLevel::Quiet {
             println!();
             println!(
                 "{}",
-                "Warning: Multiple projects map to the same name:".yellow().bold()
+                "Warning: Multiple projects map to the same name:"
+                    .yellow()
+                    .bold()
             );
             for (name, paths) in &collisions {
                 println!("  {} -> {} locations:", name.cyan(), paths.len());
                 for path in paths.iter().take(3) {
-                    let display_path = path.file_name()
+                    let display_path = path
+                        .file_name()
                         .and_then(|n| n.to_str())
                         .unwrap_or("unknown");
                     println!("    - {}", display_path);
@@ -278,7 +299,9 @@ pub fn push_history(
     fs::create_dir_all(&projects_dir)?;
 
     // Discover existing sessions in sync repo to determine operation type
-    println!("  {} sessions to sync repository...", "Copying".cyan());
+    if verbosity != VerbosityLevel::Quiet {
+        println!("  {} sessions to sync repository...", "Copying".cyan());
+    }
     let existing_sessions = discover_sessions(&projects_dir, &filter)?;
     let existing_map: HashMap<_, _> = existing_sessions
         .iter()
@@ -298,25 +321,24 @@ pub fn push_history(
     let mut project_dir_to_sync: HashMap<PathBuf, PathBuf> = HashMap::new();
 
     // Closure to compute the relative path for a session, respecting use_project_name_only
-    let compute_relative_path =
-        |session: &crate::parser::ConversationSession| -> Option<PathBuf> {
-            if filter.use_project_name_only {
-                let full_relative = Path::new(&session.file_path)
-                    .strip_prefix(&claude_dir)
-                    .unwrap_or(Path::new(&session.file_path));
+    let compute_relative_path = |session: &crate::parser::ConversationSession| -> Option<PathBuf> {
+        if filter.use_project_name_only {
+            let full_relative = Path::new(&session.file_path)
+                .strip_prefix(&claude_dir)
+                .unwrap_or(Path::new(&session.file_path));
 
-                let filename = full_relative.file_name()?;
-                let project_name = session.project_name()?;
-                Some(PathBuf::from(project_name).join(filename))
-            } else {
-                Some(
-                    Path::new(&session.file_path)
-                        .strip_prefix(&claude_dir)
-                        .unwrap_or(Path::new(&session.file_path))
-                        .to_path_buf(),
-                )
-            }
-        };
+            let filename = full_relative.file_name()?;
+            let project_name = session.project_name()?;
+            Some(PathBuf::from(project_name).join(filename))
+        } else {
+            Some(
+                Path::new(&session.file_path)
+                    .strip_prefix(&claude_dir)
+                    .unwrap_or(Path::new(&session.file_path))
+                    .to_path_buf(),
+            )
+        }
+    };
 
     for session in &sessions {
         let relative_path = match compute_relative_path(session) {
@@ -369,11 +391,7 @@ pub fn push_history(
             operation,
         ) {
             Ok(summary) => pushed_conversations.push(summary),
-            Err(e) => log::warn!(
-                "Failed to create summary for {}: {}",
-                relative_path_str,
-                e
-            ),
+            Err(e) => log::warn!("Failed to create summary for {}: {}", relative_path_str, e),
         }
     }
 
@@ -640,8 +658,10 @@ pub fn push_history(
         let mut synced_count = 0;
         // Collect local memory file names per sync project during copy,
         // so we can detect deletions without re-scanning directories.
-        let mut local_memory_by_sync: HashMap<PathBuf, std::collections::HashSet<std::ffi::OsString>> =
-            HashMap::new();
+        let mut local_memory_by_sync: HashMap<
+            PathBuf,
+            std::collections::HashSet<std::ffi::OsString>,
+        > = HashMap::new();
         for (local_dir, sync_project) in &project_dir_to_sync {
             let local_memory = local_dir.join("memory");
             if !local_memory.is_dir() {
@@ -688,7 +708,11 @@ pub fn push_history(
 
         if synced_count > 0 {
             if verbosity != VerbosityLevel::Quiet {
-                println!("  {} Synced {} memory directories", "✓".green(), synced_count);
+                println!(
+                    "  {} Synced {} memory directories",
+                    "✓".green(),
+                    synced_count
+                );
             }
         } else if verbosity == VerbosityLevel::Verbose {
             println!("  {} No memory directories found", "ℹ".dimmed());
@@ -744,11 +768,7 @@ pub fn push_history(
 
         if let Some(ref hash) = commit_before_push {
             if verbosity != VerbosityLevel::Quiet {
-                println!(
-                    "  {} Recorded commit {} for undo",
-                    "✓".green(),
-                    &hash[..8]
-                );
+                println!("  {} Recorded commit {} for undo", "✓".green(), &hash[..8]);
             }
         } else if verbosity != VerbosityLevel::Quiet {
             println!(
@@ -764,9 +784,13 @@ pub fn push_history(
         );
         let message = commit_message.unwrap_or(&default_message);
 
-        println!("  {} changes...", "Committing".cyan());
+        if verbosity != VerbosityLevel::Quiet {
+            println!("  {} changes...", "Committing".cyan());
+        }
         repo.commit(message)?;
-        println!("  {} Committed: {}", "✓".green(), message);
+        if verbosity != VerbosityLevel::Quiet {
+            println!("  {} Committed: {}", "✓".green(), message);
+        }
 
         // Push to remote if configured
         if push_remote && state.has_remote {
@@ -775,7 +799,13 @@ pub fn push_history(
             }
 
             let repo_path = state.sync_repo_path.clone();
-            match push_with_rebase_auto_heal(repo.as_ref(), &repo_path, &mut state, &branch_name, verbosity) {
+            match push_with_rebase_auto_heal(
+                repo.as_ref(),
+                &repo_path,
+                &mut state,
+                &branch_name,
+                verbosity,
+            ) {
                 Ok(PushResult::Clean) => {
                     if verbosity != VerbosityLevel::Quiet {
                         println!("  {} Pushed to origin/{}", "✓".green(), branch_name);
@@ -828,101 +858,101 @@ pub fn push_history(
             log::info!("Push completed successfully, but history was not updated.");
         }
     } else {
-        println!("  {} No changes to commit", "Note:".yellow());
+        if verbosity != VerbosityLevel::Quiet {
+            println!("  {} No changes to commit", "Note:".yellow());
+        }
     }
 
     // ============================================================================
     // DISPLAY SUMMARY TO USER
     // ============================================================================
-    println!("\n{}", "=== Push Summary ===".bold().cyan());
+    if verbosity != VerbosityLevel::Quiet {
+        println!("\n{}", "=== Push Summary ===".bold().cyan());
 
-    // Show operation statistics
-    let stats_msg = if deleted_from_repo > 0 {
-        format!(
-            "  {} Added    {} Modified    {} Deleted    {} Unchanged",
-            format!("{added_count}").green(),
-            format!("{modified_count}").cyan(),
-            format!("{deleted_from_repo}").red(),
-            format!("{unchanged_count}").dimmed(),
-        )
-    } else {
-        format!(
-            "  {} Added    {} Modified    {} Unchanged",
-            format!("{added_count}").green(),
-            format!("{modified_count}").cyan(),
-            format!("{unchanged_count}").dimmed(),
-        )
-    };
-    println!("{stats_msg}");
-    println!();
+        // Show operation statistics
+        let stats_msg = if deleted_from_repo > 0 {
+            format!(
+                "  {} Added    {} Modified    {} Deleted    {} Unchanged",
+                format!("{added_count}").green(),
+                format!("{modified_count}").cyan(),
+                format!("{deleted_from_repo}").red(),
+                format!("{unchanged_count}").dimmed(),
+            )
+        } else {
+            format!(
+                "  {} Added    {} Modified    {} Unchanged",
+                format!("{added_count}").green(),
+                format!("{modified_count}").cyan(),
+                format!("{unchanged_count}").dimmed(),
+            )
+        };
+        println!("{stats_msg}");
+        println!();
 
-    // Group conversations by project (top-level directory)
-    let mut by_project: HashMap<String, Vec<&ConversationSummary>> = HashMap::new();
-    for conv in &pushed_conversations {
-        // Skip unchanged conversations in detailed output
-        if conv.operation == SyncOperation::Unchanged {
-            continue;
-        }
-
-        let project = conv
-            .project_path
-            .split('/')
-            .next()
-            .unwrap_or("unknown")
-            .to_string();
-        by_project.entry(project).or_default().push(conv);
-    }
-
-    // Display conversations grouped by project
-    if !by_project.is_empty() {
-        println!("{}", "Pushed Conversations:".bold());
-
-        let mut projects: Vec<_> = by_project.keys().collect();
-        projects.sort();
-
-        for project in projects {
-            let conversations = &by_project[project];
-            println!("\n  {} {}/", "Project:".bold(), project.cyan());
-
-            for conv in conversations.iter().take(MAX_CONVERSATIONS_TO_DISPLAY) {
-                let operation_str = match conv.operation {
-                    SyncOperation::Added => "ADD".green(),
-                    SyncOperation::Modified => "MOD".cyan(),
-                    SyncOperation::Conflict => "CONFLICT".yellow(),
-                    SyncOperation::Unchanged => "---".dimmed(),
-                };
-
-                let timestamp_str = conv
-                    .timestamp
-                    .as_ref()
-                    .and_then(|t| {
-                        // Extract just the date portion for compact display
-                        t.split('T').next()
-                    })
-                    .unwrap_or("unknown");
-
-                println!(
-                    "    {} {} ({}msg, {})",
-                    operation_str,
-                    conv.project_path,
-                    conv.message_count,
-                    timestamp_str.dimmed()
-                );
+        // Group conversations by project (top-level directory)
+        let mut by_project: HashMap<String, Vec<&ConversationSummary>> = HashMap::new();
+        for conv in &pushed_conversations {
+            // Skip unchanged conversations in detailed output
+            if conv.operation == SyncOperation::Unchanged {
+                continue;
             }
 
-            if conversations.len() > MAX_CONVERSATIONS_TO_DISPLAY {
-                println!(
-                    "    {} ... and {} more conversations",
-                    "...".dimmed(),
-                    conversations.len() - MAX_CONVERSATIONS_TO_DISPLAY
-                );
+            let project = conv
+                .project_path
+                .split('/')
+                .next()
+                .unwrap_or("unknown")
+                .to_string();
+            by_project.entry(project).or_default().push(conv);
+        }
+
+        // Display conversations grouped by project
+        if !by_project.is_empty() {
+            println!("{}", "Pushed Conversations:".bold());
+
+            let mut projects: Vec<_> = by_project.keys().collect();
+            projects.sort();
+
+            for project in projects {
+                let conversations = &by_project[project];
+                println!("\n  {} {}/", "Project:".bold(), project.cyan());
+
+                for conv in conversations.iter().take(MAX_CONVERSATIONS_TO_DISPLAY) {
+                    let operation_str = match conv.operation {
+                        SyncOperation::Added => "ADD".green(),
+                        SyncOperation::Modified => "MOD".cyan(),
+                        SyncOperation::Conflict => "CONFLICT".yellow(),
+                        SyncOperation::Unchanged => "---".dimmed(),
+                    };
+
+                    let timestamp_str = conv
+                        .timestamp
+                        .as_ref()
+                        .and_then(|t| {
+                            // Extract just the date portion for compact display
+                            t.split('T').next()
+                        })
+                        .unwrap_or("unknown");
+
+                    println!(
+                        "    {} {} ({}msg, {})",
+                        operation_str,
+                        conv.project_path,
+                        conv.message_count,
+                        timestamp_str.dimmed()
+                    );
+                }
+
+                if conversations.len() > MAX_CONVERSATIONS_TO_DISPLAY {
+                    println!(
+                        "    {} ... and {} more conversations",
+                        "...".dimmed(),
+                        conversations.len() - MAX_CONVERSATIONS_TO_DISPLAY
+                    );
+                }
             }
         }
-    }
 
-    if verbosity == VerbosityLevel::Quiet {
-        println!("Push complete");
-    } else {
         println!("\n{}", "Push complete!".green().bold());
     }
 
@@ -953,17 +983,29 @@ mod push_auto_heal_tests {
 
     #[test]
     fn test_drift_check_true_when_diverged() {
-        assert!(has_last_synced_commit_drift(Some("old-hash"), "new-hash", false));
+        assert!(has_last_synced_commit_drift(
+            Some("old-hash"),
+            "new-hash",
+            false
+        ));
     }
 
     #[test]
     fn test_drift_check_false_when_ancestor() {
-        assert!(!has_last_synced_commit_drift(Some("ancestor"), "descendant", true));
+        assert!(!has_last_synced_commit_drift(
+            Some("ancestor"),
+            "descendant",
+            true
+        ));
     }
 
     #[test]
     fn test_drift_check_false_when_same_hash() {
-        assert!(!has_last_synced_commit_drift(Some("same-hash"), "same-hash", true));
+        assert!(!has_last_synced_commit_drift(
+            Some("same-hash"),
+            "same-hash",
+            true
+        ));
     }
 
     #[test]
@@ -972,7 +1014,11 @@ mod push_auto_heal_tests {
 
         // File with conflict markers
         let conflict_file = dir.path().join("session.jsonl");
-        std::fs::write(&conflict_file, "<<<<<<< HEAD\nline1\n=======\nline2\n>>>>>>> branch\n").unwrap();
+        std::fs::write(
+            &conflict_file,
+            "<<<<<<< HEAD\nline1\n=======\nline2\n>>>>>>> branch\n",
+        )
+        .unwrap();
 
         // Normal file without markers
         let normal_file = dir.path().join("other.jsonl");
@@ -984,7 +1030,10 @@ mod push_auto_heal_tests {
 
         let conflicts = find_rebase_conflict_files(dir.path());
         assert_eq!(conflicts.len(), 1, "should find exactly one conflict file");
-        assert_eq!(conflicts[0], conflict_file, "should find the jsonl file with conflict markers");
+        assert_eq!(
+            conflicts[0], conflict_file,
+            "should find the jsonl file with conflict markers"
+        );
     }
 
     #[test]
@@ -1013,7 +1062,11 @@ mod push_auto_heal_tests {
         std::fs::write(nested.join("session.jsonl"), "<<<<<<< HEAD\nconflict\n").unwrap();
 
         let conflicts = find_rebase_conflict_files(dir.path());
-        assert_eq!(conflicts.len(), 1, "should skip .git but find conflict in projects dir");
+        assert_eq!(
+            conflicts.len(),
+            1,
+            "should skip .git but find conflict in projects dir"
+        );
         assert!(conflicts[0].ends_with("session.jsonl"));
     }
 }

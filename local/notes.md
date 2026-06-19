@@ -1,5 +1,31 @@
 # 项目问题记录
 
+## 2026-06-19: Multi-device concurrent push silently diverged
+
+### 问题描述
+- 两台设备几乎同时执行 `ccs push` 时，后发设备的 `git push` 被 non-fast-forward 拒绝。
+- `src/sync/push.rs` 仅记录 warning，但仍向用户显示 push 完成，导致静默分叉和后续持续失败。
+
+### 根本原因
+- push 流程没有 pull/rebase/retry 闭环。
+- `SyncState` 不记录上次成功同步 commit，无法主动发现漂移。
+- Stop hook 使用 `ccs push --quiet`，放大了静默失败问题。
+
+### 解决方案
+- 为 git SCM 增加 push 错误分类、fetch、rebase、rebase cleanup helpers（src/scm/）。
+- 用 bounded retry 的 `push_with_rebase_auto_heal` 替换直接 push（src/sync/push.rs）。
+- 在 state.json 中记录 `last_synced_commit`，用于漂移诊断（src/sync/state.rs）。
+- rebase 冲突时 fallback 到 keep-both 文件副本，避免数据丢失。
+
+### 影响范围
+- Git sync repositories used by `ccs push`，Stop hook，wrapper 启动流程。
+- `src/scm/mod.rs`、`src/scm/git.rs`、`src/scm/hg.rs`、`src/sync/state.rs`、`src/sync/push.rs`
+- 新增集成测试 `tests/push_rebase_auto_heal.rs`
+
+### 预防措施
+- 新增集成测试覆盖并发 push、rebase 自愈、conflict keep-both fallback。
+- SCM 模块测试覆盖 push 错误分类、gitdir-file 仓库兼容、rebase 状态检测。
+
 ## 2026-04-22: Pull 无法匹配含连字符的项目名 (v0.3.8)
 
 ### 问题描述

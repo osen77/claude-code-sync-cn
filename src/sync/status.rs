@@ -79,7 +79,10 @@ pub fn show_status(show_conflicts: bool, show_files: bool) -> Result<()> {
     let remote_projects_dir = state.sync_repo_path.join(&filter.sync_subdirectory);
     if remote_projects_dir.exists() {
         let remote_sessions = discover_sessions(&remote_projects_dir, &filter)?;
-        println!("  同步仓库: {} 个会话", remote_sessions.len().to_string().cyan());
+        println!(
+            "  同步仓库: {} 个会话",
+            remote_sessions.len().to_string().cyan()
+        );
     }
 
     // Config sync info

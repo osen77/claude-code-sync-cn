@@ -49,7 +49,10 @@ pub fn handle_config_interactive() -> Result<()> {
     .context("Failed to get user selections")?;
 
     if selections.is_empty() {
-        println!("{}", "No settings selected. Configuration unchanged.".yellow());
+        println!(
+            "{}",
+            "No settings selected. Configuration unchanged.".yellow()
+        );
         return Ok(());
     }
 
@@ -69,17 +72,26 @@ pub fn handle_config_interactive() -> Result<()> {
                     .unwrap_or_else(|| "Not set".to_string());
 
                 let input = Text::new("Exclude older than (days):")
-                    .with_help_message(&format!("Current: {}. Enter a number or leave empty to unset", current))
+                    .with_help_message(&format!(
+                        "Current: {}. Enter a number or leave empty to unset",
+                        current
+                    ))
                     .prompt()?;
 
                 if input.trim().is_empty() {
                     modified_config.exclude_older_than_days = None;
                     println!("  {} Unset exclude_older_than_days", "✓".green());
                 } else {
-                    let days: u32 = input.trim().parse()
+                    let days: u32 = input
+                        .trim()
+                        .parse()
                         .context("Invalid number. Must be a positive integer.")?;
                     modified_config.exclude_older_than_days = Some(days);
-                    println!("  {} Set exclude_older_than_days to {} days", "✓".green(), days);
+                    println!(
+                        "  {} Set exclude_older_than_days to {} days",
+                        "✓".green(),
+                        days
+                    );
                 }
             }
 
@@ -91,7 +103,10 @@ pub fn handle_config_interactive() -> Result<()> {
                 };
 
                 let input = Text::new("Include patterns (comma-separated):")
-                    .with_help_message(&format!("Current: {}. Glob patterns like '*work*' or '/path/to/project'", current))
+                    .with_help_message(&format!(
+                        "Current: {}. Glob patterns like '*work*' or '/path/to/project'",
+                        current
+                    ))
                     .prompt()?;
 
                 if input.trim().is_empty() {
@@ -103,7 +118,11 @@ pub fn handle_config_interactive() -> Result<()> {
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty())
                         .collect();
-                    println!("  {} Set include patterns: {:?}", "✓".green(), modified_config.include_patterns);
+                    println!(
+                        "  {} Set include patterns: {:?}",
+                        "✓".green(),
+                        modified_config.include_patterns
+                    );
                 }
             }
 
@@ -115,7 +134,10 @@ pub fn handle_config_interactive() -> Result<()> {
                 };
 
                 let input = Text::new("Exclude patterns (comma-separated):")
-                    .with_help_message(&format!("Current: {}. Glob patterns like '*test*' or '/tmp/*'", current))
+                    .with_help_message(&format!(
+                        "Current: {}. Glob patterns like '*test*' or '/tmp/*'",
+                        current
+                    ))
                     .prompt()?;
 
                 if input.trim().is_empty() {
@@ -127,7 +149,11 @@ pub fn handle_config_interactive() -> Result<()> {
                         .map(|s| s.trim().to_string())
                         .filter(|s| !s.is_empty())
                         .collect();
-                    println!("  {} Set exclude patterns: {:?}", "✓".green(), modified_config.exclude_patterns);
+                    println!(
+                        "  {} Set exclude patterns: {:?}",
+                        "✓".green(),
+                        modified_config.exclude_patterns
+                    );
                 }
             }
 
@@ -136,7 +162,10 @@ pub fn handle_config_interactive() -> Result<()> {
 
                 let exclude = Confirm::new("Exclude attachments (images, PDFs, etc.)?")
                     .with_default(current)
-                    .with_help_message(&format!("Current: {}. If yes, only .jsonl files will be synced", current))
+                    .with_help_message(&format!(
+                        "Current: {}. If yes, only .jsonl files will be synced",
+                        current
+                    ))
                     .prompt()?;
 
                 modified_config.exclude_attachments = exclude;
@@ -151,7 +180,9 @@ pub fn handle_config_interactive() -> Result<()> {
                     .with_help_message("Maximum size for individual files (e.g., 10 for 10MB)")
                     .prompt()?;
 
-                let size_mb: f64 = input.trim().parse()
+                let size_mb: f64 = input
+                    .trim()
+                    .parse()
                     .context("Invalid number. Must be a positive number.")?;
 
                 modified_config.max_file_size_bytes = (size_mb * 1024.0 * 1024.0) as u64;
@@ -173,7 +204,9 @@ pub fn handle_config_interactive() -> Result<()> {
         .prompt()?;
 
     if confirm {
-        modified_config.save().context("Failed to save configuration")?;
+        modified_config
+            .save()
+            .context("Failed to save configuration")?;
         println!("\n{} Configuration saved successfully!", "✓".green().bold());
     } else {
         println!("\n{}", "Configuration not saved.".yellow());
@@ -189,8 +222,14 @@ pub fn handle_config_wizard() -> Result<()> {
     println!("{}", "Configuration Wizard".cyan().bold());
     println!("{}", "=".repeat(80).cyan());
     println!();
-    println!("{}", "This wizard will walk you through all configuration options.".dimmed());
-    println!("{}", "Press Enter to keep current value or enter a new value.".dimmed());
+    println!(
+        "{}",
+        "This wizard will walk you through all configuration options.".dimmed()
+    );
+    println!(
+        "{}",
+        "Press Enter to keep current value or enter a new value.".dimmed()
+    );
     println!();
 
     // Load current configuration
@@ -205,20 +244,30 @@ pub fn handle_config_wizard() -> Result<()> {
         .unwrap_or_else(|| "Not set".to_string());
     println!("   Current: {}", current_age.yellow());
 
-    let exclude_old = Confirm::new("Do you want to exclude projects older than a certain number of days?")
-        .with_default(modified_config.exclude_older_than_days.is_some())
-        .prompt()?;
+    let exclude_old =
+        Confirm::new("Do you want to exclude projects older than a certain number of days?")
+            .with_default(modified_config.exclude_older_than_days.is_some())
+            .prompt()?;
 
     if exclude_old {
-        let default_days = modified_config.exclude_older_than_days.unwrap_or(30).to_string();
+        let default_days = modified_config
+            .exclude_older_than_days
+            .unwrap_or(30)
+            .to_string();
         let input = Text::new("How many days?")
             .with_default(&default_days)
             .prompt()?;
 
-        let days: u32 = input.trim().parse()
+        let days: u32 = input
+            .trim()
+            .parse()
             .context("Invalid number. Must be a positive integer.")?;
         modified_config.exclude_older_than_days = Some(days);
-        println!("  {} Will exclude projects older than {} days\n", "✓".green(), days);
+        println!(
+            "  {} Will exclude projects older than {} days\n",
+            "✓".green(),
+            days
+        );
     } else {
         modified_config.exclude_older_than_days = None;
         println!("  {} Age filter disabled\n", "✓".green());
@@ -250,7 +299,11 @@ pub fn handle_config_wizard() -> Result<()> {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        println!("  {} Include patterns set: {:?}\n", "✓".green(), modified_config.include_patterns);
+        println!(
+            "  {} Include patterns set: {:?}\n",
+            "✓".green(),
+            modified_config.include_patterns
+        );
     } else {
         modified_config.include_patterns = Vec::new();
         println!("  {} All projects will be included\n", "✓".green());
@@ -282,7 +335,11 @@ pub fn handle_config_wizard() -> Result<()> {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
-        println!("  {} Exclude patterns set: {:?}\n", "✓".green(), modified_config.exclude_patterns);
+        println!(
+            "  {} Exclude patterns set: {:?}\n",
+            "✓".green(),
+            modified_config.exclude_patterns
+        );
     } else {
         modified_config.exclude_patterns = Vec::new();
         println!("  {} No exclusion patterns\n", "✓".green());
@@ -290,9 +347,13 @@ pub fn handle_config_wizard() -> Result<()> {
 
     // 4. Exclude attachments
     println!("{}", "4. File Type Filter".bold().cyan());
-    println!("   Current: {}",
-        if modified_config.exclude_attachments { "Exclude attachments".yellow() }
-        else { "Include all files".yellow() }
+    println!(
+        "   Current: {}",
+        if modified_config.exclude_attachments {
+            "Exclude attachments".yellow()
+        } else {
+            "Include all files".yellow()
+        }
     );
 
     let exclude_attachments = Confirm::new("Exclude attachments (images, PDFs, etc.)?")
@@ -301,9 +362,14 @@ pub fn handle_config_wizard() -> Result<()> {
         .prompt()?;
 
     modified_config.exclude_attachments = exclude_attachments;
-    println!("  {} Attachments will be {}\n",
+    println!(
+        "  {} Attachments will be {}\n",
         "✓".green(),
-        if exclude_attachments { "excluded" } else { "included" }
+        if exclude_attachments {
+            "excluded"
+        } else {
+            "included"
+        }
     );
 
     // 5. Max file size
@@ -320,7 +386,9 @@ pub fn handle_config_wizard() -> Result<()> {
             .with_default(&format!("{:.1}", current_mb))
             .prompt()?;
 
-        let size_mb: f64 = input.trim().parse()
+        let size_mb: f64 = input
+            .trim()
+            .parse()
             .context("Invalid number. Must be a positive number.")?;
 
         modified_config.max_file_size_bytes = (size_mb * 1024.0 * 1024.0) as u64;
@@ -341,7 +409,9 @@ pub fn handle_config_wizard() -> Result<()> {
         .prompt()?;
 
     if confirm {
-        modified_config.save().context("Failed to save configuration")?;
+        modified_config
+            .save()
+            .context("Failed to save configuration")?;
         println!("\n{} Configuration saved successfully!", "✓".green().bold());
     } else {
         println!("\n{}", "Configuration not saved.".yellow());
@@ -352,14 +422,17 @@ pub fn handle_config_wizard() -> Result<()> {
 
 /// Display a compact configuration summary
 fn display_config_summary(config: &FilterConfig) {
-    println!("  {} {}",
+    println!(
+        "  {} {}",
         "Exclude older than:".cyan(),
-        config.exclude_older_than_days
+        config
+            .exclude_older_than_days
             .map(|d| format!("{} days", d))
             .unwrap_or_else(|| "Not set".dimmed().to_string())
     );
 
-    println!("  {} {}",
+    println!(
+        "  {} {}",
         "Include patterns:".cyan(),
         if config.include_patterns.is_empty() {
             "None (all included)".dimmed().to_string()
@@ -368,7 +441,8 @@ fn display_config_summary(config: &FilterConfig) {
         }
     );
 
-    println!("  {} {}",
+    println!(
+        "  {} {}",
         "Exclude patterns:".cyan(),
         if config.exclude_patterns.is_empty() {
             "None".dimmed().to_string()
@@ -377,12 +451,17 @@ fn display_config_summary(config: &FilterConfig) {
         }
     );
 
-    println!("  {} {}",
+    println!(
+        "  {} {}",
         "Max file size:".cyan(),
-        format!("{:.1} MB", config.max_file_size_bytes as f64 / (1024.0 * 1024.0))
+        format!(
+            "{:.1} MB",
+            config.max_file_size_bytes as f64 / (1024.0 * 1024.0)
+        )
     );
 
-    println!("  {} {}",
+    println!(
+        "  {} {}",
         "Exclude attachments:".cyan(),
         if config.exclude_attachments {
             "Yes (only .jsonl files)".green().to_string()
@@ -471,16 +550,24 @@ pub fn handle_repo_selector() -> Result<()> {
         Ok(s) => s,
         Err(e) => {
             let err_msg = e.to_string();
-            if err_msg.contains("not initialized") || err_msg.contains(&format!("Run '{} init'", BINARY_NAME)) {
+            if err_msg.contains("not initialized")
+                || err_msg.contains(&format!("Run '{} init'", BINARY_NAME))
+            {
                 // Check if there's an existing repo in the default location that we can recover
                 if let Some(recovered) = try_recover_existing_repo()? {
-                    println!("{}", "Found existing repository - recovered configuration!".green());
+                    println!(
+                        "{}",
+                        "Found existing repository - recovered configuration!".green()
+                    );
                     println!();
                     recovered
                 } else {
                     println!("{}", "No repositories configured.".yellow());
                     println!();
-                    println!("Run '{}' to set up your first repository.", format!("{} init", BINARY_NAME).cyan());
+                    println!(
+                        "Run '{}' to set up your first repository.",
+                        format!("{} init", BINARY_NAME).cyan()
+                    );
                     return Ok(());
                 }
             } else {
@@ -492,7 +579,10 @@ pub fn handle_repo_selector() -> Result<()> {
     if state.repos.is_empty() {
         println!("{}", "No repositories configured.".yellow());
         println!();
-        println!("Run '{}' to set up your first repository.", format!("{} init", BINARY_NAME).cyan());
+        println!(
+            "Run '{}' to set up your first repository.",
+            format!("{} init", BINARY_NAME).cyan()
+        );
         return Ok(());
     }
 
@@ -526,7 +616,10 @@ pub fn handle_repo_selector() -> Result<()> {
                 .map(|u| format!(" ({})", u.dimmed()))
                 .unwrap_or_default();
 
-            format!("{}{} - {}{}", repo.name, active_marker, path_str, remote_info)
+            format!(
+                "{}{} - {}{}",
+                repo.name, active_marker, path_str, remote_info
+            )
         })
         .collect();
 

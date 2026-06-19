@@ -110,7 +110,10 @@ impl SessionIndexCache {
         if let Err(e) = std::fs::write(&path, &json) {
             warn!("Failed to write session cache to {path:?}: {e}");
         } else {
-            debug!("Saved session cache ({} entries) to {path:?}", self.entries.len());
+            debug!(
+                "Saved session cache ({} entries) to {path:?}",
+                self.entries.len()
+            );
         }
     }
 
@@ -119,7 +122,13 @@ impl SessionIndexCache {
     ///
     /// `key` must be the same string used for `insert` (typically
     /// `file_path.to_string_lossy()`).
-    pub fn lookup(&self, key: &str, file_path: &Path, file_size: u64, mtime_secs: i64) -> Option<SessionSummary> {
+    pub fn lookup(
+        &self,
+        key: &str,
+        file_path: &Path,
+        file_size: u64,
+        mtime_secs: i64,
+    ) -> Option<SessionSummary> {
         let entry = self.entries.get(key)?;
 
         if entry.file_size != file_size || entry.mtime_secs != mtime_secs {
@@ -146,7 +155,13 @@ impl SessionIndexCache {
     ///
     /// `key` should be `file_path.to_string_lossy()` — the same value used for
     /// `lookup` and `retain_existing`.
-    pub fn insert(&mut self, key: String, file_size: u64, mtime_secs: i64, summary: &SessionSummary) {
+    pub fn insert(
+        &mut self,
+        key: String,
+        file_size: u64,
+        mtime_secs: i64,
+        summary: &SessionSummary,
+    ) {
         self.entries.insert(
             key,
             CachedEntry {
@@ -230,7 +245,9 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let cache = SessionIndexCache::load(dir.path());
         let fake_path = dir.path().join("fake.jsonl");
-        assert!(cache.lookup(&path_key(&fake_path), &fake_path, 100, 999).is_none());
+        assert!(cache
+            .lookup(&path_key(&fake_path), &fake_path, 100, 999)
+            .is_none());
     }
 
     #[test]
@@ -255,10 +272,14 @@ mod tests {
         assert_eq!(s.file_size, file_size);
 
         // Different size → None
-        assert!(cache.lookup(&key, &file_path, file_size + 1, mtime).is_none());
+        assert!(cache
+            .lookup(&key, &file_path, file_size + 1, mtime)
+            .is_none());
 
         // Different mtime → None
-        assert!(cache.lookup(&key, &file_path, file_size, mtime + 1).is_none());
+        assert!(cache
+            .lookup(&key, &file_path, file_size, mtime + 1)
+            .is_none());
     }
 
     #[test]

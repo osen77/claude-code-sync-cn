@@ -407,21 +407,11 @@ fn scan_all_session_summaries(
     let mut summaries = Vec::new();
 
     if source.includes_claude() {
-        scan_claude_summaries_cached(
-            &mut cache,
-            &mut seen_paths,
-            &mut summaries,
-            project_filter,
-        )?;
+        scan_claude_summaries_cached(&mut cache, &mut seen_paths, &mut summaries, project_filter)?;
     }
 
     if source.includes_codex() {
-        scan_codex_summaries_cached(
-            &mut cache,
-            &mut seen_paths,
-            &mut summaries,
-            project_filter,
-        )?;
+        scan_codex_summaries_cached(&mut cache, &mut seen_paths, &mut summaries, project_filter)?;
     }
 
     // Prune stale entries and persist
@@ -609,10 +599,8 @@ fn scan_codex_summaries_cached(
             match CodexSession::from_file(file_path) {
                 Ok(session) => {
                     let project_name = session.project_name().unwrap_or("codex");
-                    let title =
-                        session.title(titles.get(&session.session_id).map(String::as_str));
-                    let summary =
-                        SessionSummary::from_codex_session(&session, project_name, title);
+                    let title = session.title(titles.get(&session.session_id).map(String::as_str));
+                    let summary = SessionSummary::from_codex_session(&session, project_name, title);
                     cache.insert(path_key, file_size, mtime, &summary);
 
                     if project_filter.is_some_and(|name| summary.project_name != name) {
@@ -623,7 +611,11 @@ fn scan_codex_summaries_cached(
                     }
                 }
                 Err(e) => {
-                    log::warn!("Failed to parse Codex session {}: {}", file_path.display(), e);
+                    log::warn!(
+                        "Failed to parse Codex session {}: {}",
+                        file_path.display(),
+                        e
+                    );
                 }
             }
         }
@@ -1574,9 +1566,8 @@ pub fn handle_session_interactive(
                     }
                 }
                 SessionMenuChoice::Cleanup => {
-                    if let Some(claude_project) = scan_all_projects()?
-                        .iter()
-                        .find(|p| p.name == project.name)
+                    if let Some(claude_project) =
+                        scan_all_projects()?.iter().find(|p| p.name == project.name)
                     {
                         cleanup_sessions_interactive(claude_project)?;
                     } else {

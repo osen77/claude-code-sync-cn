@@ -81,10 +81,7 @@ pub fn handle_uninstall(force: bool) -> Result<()> {
     if let Some(ref repo) = sync_repo_path {
         if repo.exists() {
             println!();
-            println!(
-                "{}",
-                "⚠️  同步仓库可能包含未推送的对话历史".yellow().bold()
-            );
+            println!("{}", "⚠️  同步仓库可能包含未推送的对话历史".yellow().bold());
             println!("   路径: {}", repo.display());
 
             let delete_repo = if force {

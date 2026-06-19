@@ -5,11 +5,11 @@ use walkdir::WalkDir;
 
 // Import the necessary modules from claude_code_sync
 use claude_code_sync::config::CONFIG_DIR_ENV;
-use claude_code_sync::scm;
 use claude_code_sync::history::{
     ConversationSummary, OperationHistory, OperationType, SyncOperation,
 };
 use claude_code_sync::parser::ConversationSession;
+use claude_code_sync::scm;
 use claude_code_sync::sync::SyncState;
 use claude_code_sync::undo::{undo_pull, undo_push, Snapshot};
 
@@ -875,11 +875,8 @@ fn test_operation_record_with_no_commit_hash() {
     )
     .unwrap();
 
-    let mut record = OperationRecord::new(
-        OperationType::Push,
-        Some("main".to_string()),
-        vec![conv],
-    );
+    let mut record =
+        OperationRecord::new(OperationType::Push, Some("main".to_string()), vec![conv]);
 
     // commit_hash should be None by default
     assert!(record.commit_hash.is_none());

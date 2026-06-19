@@ -150,7 +150,10 @@ pub fn extract_project_name(encoded_path: &str) -> &str {
 /// # Returns
 /// - `Some(PathBuf)` if exactly one matching project directory is found
 /// - `None` if no match found or multiple matches (ambiguous)
-pub fn find_local_project_by_name(claude_projects_dir: &Path, project_name: &str) -> Option<PathBuf> {
+pub fn find_local_project_by_name(
+    claude_projects_dir: &Path,
+    project_name: &str,
+) -> Option<PathBuf> {
     let entries: Vec<_> = std::fs::read_dir(claude_projects_dir)
         .ok()?
         .filter_map(|e| e.ok())
@@ -194,7 +197,9 @@ pub fn find_local_project_by_name(claude_projects_dir: &Path, project_name: &str
         n if n > 1 => {
             log::warn!(
                 "Ambiguous match: {} local directories match project '{}': {:?}",
-                n, project_name, all_matches
+                n,
+                project_name,
+                all_matches
             );
             None
         }
@@ -232,13 +237,12 @@ pub fn find_colliding_projects(
             let path = entry.path();
             if path.is_dir() {
                 // Prefer real project name from JSONL cwd, fall back to dir name extraction
-                let project_name = get_project_name_from_dir(&path)
-                    .unwrap_or_else(|| {
-                        path.file_name()
-                            .and_then(|n| n.to_str())
-                            .map(|n| extract_project_name(n).to_string())
-                            .unwrap_or_default()
-                    });
+                let project_name = get_project_name_from_dir(&path).unwrap_or_else(|| {
+                    path.file_name()
+                        .and_then(|n| n.to_str())
+                        .map(|n| extract_project_name(n).to_string())
+                        .unwrap_or_default()
+                });
                 if !project_name.is_empty() {
                     collisions.entry(project_name).or_default().push(path);
                 }

@@ -4,8 +4,8 @@ use anyhow::{anyhow, Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-use crate::BINARY_NAME;
 use super::{PushError, RebaseOutcome, Scm};
+use crate::BINARY_NAME;
 
 fn classify_push_stderr(stderr: &str) -> Option<PushError> {
     let stderr = stderr.to_ascii_lowercase();
@@ -128,8 +128,9 @@ impl GitScm {
     /// Clone a remote repository.
     pub fn clone(url: &str, path: &Path) -> Result<Self> {
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create parent directory for '{}'", path.display()))?;
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create parent directory for '{}'", path.display())
+            })?;
         }
 
         let output = Command::new("git")
@@ -191,7 +192,9 @@ impl GitScm {
     }
 
     fn git_dir(&self) -> Result<PathBuf> {
-        Ok(PathBuf::from(self.run_git(&["rev-parse", "--absolute-git-dir"])?))
+        Ok(PathBuf::from(
+            self.run_git(&["rev-parse", "--absolute-git-dir"])?,
+        ))
     }
 }
 
@@ -247,13 +250,14 @@ impl Scm for GitScm {
     }
 
     fn push(&self, remote: &str, branch: &str) -> Result<()> {
-        self.push_classified(remote, branch).map_err(|err| match err {
-            PushError::NonFastForward => anyhow!(
-                "Failed to push to remote '{}': remote contains commits not present locally",
-                remote
-            ),
-            PushError::Other(err) => err,
-        })
+        self.push_classified(remote, branch)
+            .map_err(|err| match err {
+                PushError::NonFastForward => anyhow!(
+                    "Failed to push to remote '{}': remote contains commits not present locally",
+                    remote
+                ),
+                PushError::Other(err) => err,
+            })
     }
 
     fn push_classified(&self, remote: &str, branch: &str) -> std::result::Result<(), PushError> {
@@ -288,7 +292,11 @@ impl Scm for GitScm {
             return Ok(RebaseOutcome::InProgress);
         }
 
-        Err(anyhow!("git rebase {} failed: {}", upstream, output_text(&output)))
+        Err(anyhow!(
+            "git rebase {} failed: {}",
+            upstream,
+            output_text(&output)
+        ))
     }
 
     fn rebase_continue(&self) -> Result<RebaseOutcome> {
@@ -302,7 +310,10 @@ impl Scm for GitScm {
             return Ok(RebaseOutcome::InProgress);
         }
 
-        Err(anyhow!("git rebase --continue failed: {}", output_text(&output)))
+        Err(anyhow!(
+            "git rebase --continue failed: {}",
+            output_text(&output)
+        ))
     }
 
     fn rebase_abort(&self) -> Result<()> {
@@ -324,7 +335,8 @@ impl Scm for GitScm {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Err(anyhow!(
                 "Failed to pull from remote '{}': {}",
-                remote, stderr
+                remote,
+                stderr
             ));
         }
 
@@ -397,7 +409,8 @@ mod tests {
 
         assert!(!scm.has_remote("origin"));
 
-        scm.add_remote("origin", "https://github.com/test/repo.git").unwrap();
+        scm.add_remote("origin", "https://github.com/test/repo.git")
+            .unwrap();
         assert!(scm.has_remote("origin"));
         assert!(!scm.has_remote("upstream"));
     }
@@ -448,7 +461,11 @@ mod tests {
         let scm = GitScm::init(&repo_path).unwrap();
         let actual_git_dir = temp.path().join("external-git-dir");
         std::fs::rename(repo_path.join(".git"), &actual_git_dir).unwrap();
-        std::fs::write(repo_path.join(".git"), format!("gitdir: {}\n", actual_git_dir.display())).unwrap();
+        std::fs::write(
+            repo_path.join(".git"),
+            format!("gitdir: {}\n", actual_git_dir.display()),
+        )
+        .unwrap();
 
         assert_eq!(
             scm.git_dir().unwrap().canonicalize().unwrap(),
@@ -460,7 +477,8 @@ mod tests {
     fn test_classify_rebase_continue_conflict_state_from_stdout() {
         let output = Output {
             status: Command::new("true").status().unwrap(),
-            stdout: b"You must edit all merge conflicts and then\nrun git rebase --continue\n".to_vec(),
+            stdout: b"You must edit all merge conflicts and then\nrun git rebase --continue\n"
+                .to_vec(),
             stderr: Vec::new(),
         };
 

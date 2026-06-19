@@ -94,7 +94,8 @@ impl SyncState {
 
         if !state_path.exists() {
             return Err(anyhow!(
-                "Sync not initialized. Run '{} init' first.", BINARY_NAME
+                "Sync not initialized. Run '{} init' first.",
+                BINARY_NAME
             ));
         }
 
@@ -215,7 +216,8 @@ impl MultiRepoState {
 
         if !state_path.exists() {
             return Err(anyhow!(
-                "Sync not initialized. Run '{} init' first.", BINARY_NAME
+                "Sync not initialized. Run '{} init' first.",
+                BINARY_NAME
             ));
         }
 

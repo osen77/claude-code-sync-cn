@@ -89,10 +89,7 @@ fn is_our_hook_command(cmd: &str) -> bool {
 pub fn handle_hooks_install() -> Result<()> {
     let settings_path = claude_settings_path()?;
 
-    println!(
-        "{}",
-        "Installing Claude Code hooks...".cyan().bold()
-    );
+    println!("{}", "Installing Claude Code hooks...".cyan().bold());
 
     // Read existing settings or create new
     let mut settings: Value = if settings_path.exists() {
@@ -119,7 +116,8 @@ pub fn handle_hooks_install() -> Result<()> {
 
         if let Some(existing) = hooks_obj.get_mut(event_name) {
             // Extract the subcommand (e.g., "hook-session-start") for precise matching
-            let subcommand = new_hooks_array.first()
+            let subcommand = new_hooks_array
+                .first()
                 .and_then(|g| g.get("hooks"))
                 .and_then(|h| h.as_array())
                 .and_then(|hooks| hooks.first())
@@ -129,11 +127,7 @@ pub fn handle_hooks_install() -> Result<()> {
                 .unwrap_or("");
             if let Some(existing_array) = existing.as_array() {
                 if contains_our_hook(existing_array, subcommand) {
-                    println!(
-                        "  {} {} hook already installed",
-                        "!".yellow(),
-                        event_name
-                    );
+                    println!("  {} {} hook already installed", "!".yellow(), event_name);
                     continue;
                 }
             }
@@ -170,14 +164,14 @@ pub fn handle_hooks_uninstall() -> Result<()> {
     let settings_path = claude_settings_path()?;
 
     if !settings_path.exists() {
-        println!("{}", "No settings file found, nothing to uninstall.".yellow());
+        println!(
+            "{}",
+            "No settings file found, nothing to uninstall.".yellow()
+        );
         return Ok(());
     }
 
-    println!(
-        "{}",
-        "Removing Claude Code hooks...".cyan().bold()
-    );
+    println!("{}", "Removing Claude Code hooks...".cyan().bold());
 
     let content = std::fs::read_to_string(&settings_path)?;
     let mut settings: Value = serde_json::from_str(&content)?;
@@ -187,7 +181,9 @@ pub fn handle_hooks_uninstall() -> Result<()> {
 
         // Remove our hooks from each event type (including legacy SessionEnd)
         for event_name in &["SessionStart", "Stop", "SessionEnd", "UserPromptSubmit"] {
-            if let Some(hooks_array) = hooks_obj.get_mut(*event_name).and_then(|v| v.as_array_mut())
+            if let Some(hooks_array) = hooks_obj
+                .get_mut(*event_name)
+                .and_then(|v| v.as_array_mut())
             {
                 let original_len = hooks_array.len();
 
@@ -220,7 +216,10 @@ pub fn handle_hooks_uninstall() -> Result<()> {
         }
 
         if removed_count == 0 {
-            println!("{}", format!("No {} hooks found to remove.", BINARY_NAME).yellow());
+            println!(
+                "{}",
+                format!("No {} hooks found to remove.", BINARY_NAME).yellow()
+            );
         } else {
             // Write back
             std::fs::write(&settings_path, serde_json::to_string_pretty(&settings)?)?;
@@ -244,7 +243,10 @@ pub fn handle_hooks_show() -> Result<()> {
     if !settings_path.exists() {
         println!("{}", "No settings file found.".yellow());
         println!();
-        println!("Run '{}' to install hooks.", format!("{} hooks install", BINARY_NAME).cyan());
+        println!(
+            "Run '{}' to install hooks.",
+            format!("{} hooks install", BINARY_NAME).cyan()
+        );
         return Ok(());
     }
 
@@ -282,9 +284,15 @@ pub fn handle_hooks_show() -> Result<()> {
     };
 
     if hooks_installed.is_empty() {
-        println!("{}", format!("{} hooks: NOT installed", BINARY_NAME).yellow());
+        println!(
+            "{}",
+            format!("{} hooks: NOT installed", BINARY_NAME).yellow()
+        );
         println!();
-        println!("Run '{}' to install hooks.", format!("{} hooks install", BINARY_NAME).cyan());
+        println!(
+            "Run '{}' to install hooks.",
+            format!("{} hooks install", BINARY_NAME).cyan()
+        );
     } else {
         println!("{}", format!("{} hooks: INSTALLED", BINARY_NAME).green());
         println!();
@@ -303,8 +311,11 @@ pub fn handle_hooks_show() -> Result<()> {
             println!();
             println!(
                 "{}",
-                format!("Note: Some hooks are missing. Run '{} hooks install' to reinstall.", BINARY_NAME)
-                    .yellow()
+                format!(
+                    "Note: Some hooks are missing. Run '{} hooks install' to reinstall.",
+                    BINARY_NAME
+                )
+                .yellow()
             );
         }
     }
@@ -399,8 +410,7 @@ pub fn handle_stop() -> Result<()> {
     }
 
     // Read hook input from stdin (required by Claude Code hooks)
-    let _input: Value = serde_json::from_reader(std::io::stdin())
-        .unwrap_or(json!({}));
+    let _input: Value = serde_json::from_reader(std::io::stdin()).unwrap_or(json!({}));
 
     // Execute push quietly after each response
     let push_result = std::process::Command::new(BINARY_NAME)
@@ -422,7 +432,11 @@ pub fn handle_stop() -> Result<()> {
             let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
             match &push_result {
                 Ok(status) => {
-                    let _ = writeln!(file, "[{}] Stop push completed: exit code {}", timestamp, status);
+                    let _ = writeln!(
+                        file,
+                        "[{}] Stop push completed: exit code {}",
+                        timestamp, status
+                    );
                 }
                 Err(e) => {
                     let _ = writeln!(file, "[{}] Stop push failed: {}", timestamp, e);
@@ -449,17 +463,18 @@ const SESSION_START_DEBOUNCE_SECS: u64 = 300; // 5 minutes
 /// Uses ps + grep to detect Claude Code native-binary processes
 fn count_claude_processes() -> usize {
     let output = std::process::Command::new("sh")
-        .args(["-c", "ps aux | grep 'native-binary/claude' | grep -v grep | wc -l"])
+        .args([
+            "-c",
+            "ps aux | grep 'native-binary/claude' | grep -v grep | wc -l",
+        ])
         .output();
 
     match output {
-        Ok(out) => {
-            String::from_utf8_lossy(&out.stdout)
-                .trim()
-                .parse()
-                .unwrap_or(0)
-        }
-        Err(_) => 0 // If detection fails, assume first start
+        Ok(out) => String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0),
+        Err(_) => 0, // If detection fails, assume first start
     }
 }
 
@@ -475,8 +490,7 @@ pub fn handle_session_start() -> Result<()> {
     use std::io::Write;
 
     // Read hook input from stdin (required by Claude Code hooks)
-    let input: Value = serde_json::from_reader(std::io::stdin())
-        .unwrap_or(json!({}));
+    let input: Value = serde_json::from_reader(std::io::stdin()).unwrap_or(json!({}));
 
     // Extract source field
     let source = input
@@ -490,8 +504,8 @@ pub fn handle_session_start() -> Result<()> {
     let is_startup = source == "startup";
 
     // Get timestamp file path for debouncing
-    let timestamp_file = crate::config::ConfigManager::config_dir()
-        .map(|d| d.join("last-session-pull"));
+    let timestamp_file =
+        crate::config::ConfigManager::config_dir().map(|d| d.join("last-session-pull"));
 
     // Check debounce
     let debounce_active = if let Ok(ref ts_path) = timestamp_file {
@@ -544,7 +558,11 @@ pub fn handle_session_start() -> Result<()> {
                 .open(&debug_log)
             {
                 let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                let _ = writeln!(file, "[{}] pull skipped (other instances: {})", timestamp, process_count);
+                let _ = writeln!(
+                    file,
+                    "[{}] pull skipped (other instances: {})",
+                    timestamp, process_count
+                );
             }
         }
         return Ok(());
@@ -560,7 +578,11 @@ pub fn handle_session_start() -> Result<()> {
                 .open(&debug_log)
             {
                 let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                let _ = writeln!(file, "[{}] pull skipped (source: {} != startup)", timestamp, source);
+                let _ = writeln!(
+                    file,
+                    "[{}] pull skipped (source: {} != startup)",
+                    timestamp, source
+                );
             }
         }
         return Ok(());
@@ -607,7 +629,11 @@ pub fn handle_session_start() -> Result<()> {
             let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
             match &pull_result {
                 Ok(status) => {
-                    let _ = writeln!(file, "[{}] SessionStart pull completed: exit code {}", timestamp, status);
+                    let _ = writeln!(
+                        file,
+                        "[{}] SessionStart pull completed: exit code {}",
+                        timestamp, status
+                    );
                 }
                 Err(e) => {
                     let _ = writeln!(file, "[{}] SessionStart pull failed: {}", timestamp, e);

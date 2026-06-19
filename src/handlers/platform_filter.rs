@@ -84,7 +84,10 @@ pub fn filter_for_platform(content: &str, target: Platform) -> String {
     };
 
     let result = PLATFORM_BLOCK_REGEX.replace_all(content, |caps: &regex::Captures| {
-        let platform_name = caps.get(1).map(|m| m.as_str().to_lowercase()).unwrap_or_default();
+        let platform_name = caps
+            .get(1)
+            .map(|m| m.as_str().to_lowercase())
+            .unwrap_or_default();
         let block_content = caps.get(2).map(|m| m.as_str()).unwrap_or("");
 
         if target_names.contains(&platform_name.as_str()) {
@@ -102,9 +105,8 @@ pub fn filter_for_platform(content: &str, target: Platform) -> String {
 
 /// Clean up excessive blank lines (more than 2 consecutive)
 fn cleanup_blank_lines(content: &str) -> String {
-    static BLANK_LINES_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"\n{3,}").expect("Invalid regex pattern")
-    });
+    static BLANK_LINES_REGEX: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"\n{3,}").expect("Invalid regex pattern"));
 
     BLANK_LINES_REGEX.replace_all(content, "\n\n").to_string()
 }
@@ -136,7 +138,10 @@ pub fn extract_current_platform_block(content: &str, platform: Platform) -> Opti
     };
 
     for caps in PLATFORM_BLOCK_REGEX.captures_iter(content) {
-        let platform_name = caps.get(1).map(|m| m.as_str().to_lowercase()).unwrap_or_default();
+        let platform_name = caps
+            .get(1)
+            .map(|m| m.as_str().to_lowercase())
+            .unwrap_or_default();
         if target_names.contains(&platform_name.as_str()) {
             // Return the full match including tags
             return Some(caps.get(0)?.as_str().to_string());
@@ -240,7 +245,9 @@ Windows content
 
     #[test]
     fn test_has_platform_blocks() {
-        assert!(has_platform_blocks("<!-- platform:macos -->\ncontent\n<!-- end-platform -->"));
+        assert!(has_platform_blocks(
+            "<!-- platform:macos -->\ncontent\n<!-- end-platform -->"
+        ));
         assert!(!has_platform_blocks("No platform blocks here"));
     }
 
@@ -346,7 +353,10 @@ Windows content
         let mac_block = extract_current_platform_block(content, Platform::MacOS);
         assert!(mac_block.is_some());
         assert!(mac_block.as_ref().unwrap().contains("Mac content"));
-        assert!(mac_block.as_ref().unwrap().contains("<!-- platform:macos -->"));
+        assert!(mac_block
+            .as_ref()
+            .unwrap()
+            .contains("<!-- platform:macos -->"));
 
         let win_block = extract_current_platform_block(content, Platform::Windows);
         assert!(win_block.is_some());
