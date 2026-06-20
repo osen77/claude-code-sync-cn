@@ -1,5 +1,27 @@
 # 项目问题记录
 
+## 2026-06-20: 修复 Open in Claude 的环境变量与别名继承问题
+
+### 问题描述
+- 用户在使用交互式菜单 `ccs session` 中选择 "Open in Claude" 时，如果打开命令配置的是 `claude-auto --resume <id>`，会提示找不到 `claude-auto` 命令。但在终端直接执行是可以的。
+
+### 根本原因
+- 在 `src/handlers/session.rs` 的 `open_in_claude` 函数中，之前采用了一个硬编码的 workaround 试图加载别名：`zsh -c "source ~/.zshrc && ..."`。
+- 该实现存在两个问题：
+  1. 用户的 shell 未必是 `zsh`。
+  2. 很多用户的 `.zshrc`（或 `.bashrc`）在顶部包含交互式判断（例如 `[[ $- != *i* ]] && return`），导致在 `zsh -c` 的非交互式模式下被直接跳过，NVM、Cargo 路径以及 `claude-auto` 等 alias 和函数无法被加载。
+
+### 解决方案
+- 移除了强制写入的 `zsh -c` 逻辑。
+- 动态获取环境变量中的当前壳环境：`std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string())`。
+- 将子进程启动标志改为 `-ic` (Interactive Command Mode)，这能让 Shell 以为自己运行在终端下，自动加载完整的配置文件。
+
+### 影响范围
+- `src/handlers/session.rs`
+
+### 预防措施
+- 启动外部命令行工具时，尤其是在 macOS/Linux 下，应始终考虑是否需要继承完整的用户终端配置环境。使用 `$SHELL -ic` 代替显式的 `source` 是更通用且稳健的方式。
+
 ## 2026-06-20: 删除语义重构，意图删除与误删保护机制
 
 ### 问题描述
