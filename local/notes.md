@@ -22,6 +22,24 @@
 ### 预防措施
 - 启动外部命令行工具时，尤其是在 macOS/Linux 下，应始终考虑是否需要继承完整的用户终端配置环境。使用 `$SHELL -ic` 代替显式的 `source` 是更通用且稳健的方式。
 
+## 2026-06-20: 修复交互式菜单中 Rename 操作后列表不刷新的问题
+
+### 问题描述
+- 用户在 `ccs session` 的交互式菜单中对某个会话执行 `Rename` (重命名)操作后，按 `Back` 键返回到会话列表时，发现列表中的标题没有更新，仍然显示的是旧标题。
+
+### 根本原因
+- 在 `src/handlers/session.rs` 的 `handle_session_interactive` 的循环结构中，当执行 `ActionChoice::Rename` 后，仅仅修改了传入的临时变量 `session` 的 `title`，但并没有触发任何能够引起外层 `all_sessions` 列表重新加载的机制。
+- 之前针对 `ActionChoice::Delete` 操作实现了一个 `deleted` 标志位并在结束后重载 `all_sessions` 的机制，但 `Rename` 操作漏掉了相同的机制。
+
+### 解决方案
+- 将 `rename_session_interactive` 的返回值从 `Result<()>` 更改为 `Result<bool>`，以便返回重命名是否真实发生的布尔值。
+- 在 `SessionMenuChoice::Select` 以及 `Search` 分支内，将 `let mut deleted = false;` 重命名为更具语义的 `let mut list_needs_refresh = false;`。
+- 当执行 `ActionChoice::Rename` 且返回 `true`（发生了真实的标题更新）或 `ActionChoice::Delete` 返回 `true` 时，均将 `list_needs_refresh` 设置为 `true`。
+- 循环退出后判断 `list_needs_refresh` 并重载 `all_sessions`，以保证上一层级菜单的数据为最新。
+
+### 影响范围
+- `src/handlers/session.rs`
+
 ## 2026-06-20: 删除语义重构，意图删除与误删保护机制
 
 ### 问题描述

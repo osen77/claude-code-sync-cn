@@ -1450,7 +1450,7 @@ fn open_in_claude(session: &SessionSummary) -> Result<bool> {
 }
 
 /// Interactive rename session
-fn rename_session_interactive(session: &mut SessionSummary) -> Result<()> {
+fn rename_session_interactive(session: &mut SessionSummary) -> Result<bool> {
     println!();
     println!("{} {}", "Current title:".dimmed(), session.title);
     println!();
@@ -1465,12 +1465,12 @@ fn rename_session_interactive(session: &mut SessionSummary) -> Result<()> {
         Ok(title) => {
             if title.trim().is_empty() {
                 println!("{}", "Title cannot be empty.".red());
-                return Ok(());
+                return Ok(false);
             }
 
             if title == session.title {
                 println!("{}", "Title unchanged.".yellow());
-                return Ok(());
+                return Ok(false);
             }
 
             rename_session(&session.file_path, &session.session_id, &title)?;
@@ -1479,13 +1479,13 @@ fn rename_session_interactive(session: &mut SessionSummary) -> Result<()> {
             println!();
             println!("{} Title updated successfully!", "SUCCESS:".green().bold());
             println!();
+            Ok(true)
         }
         Err(_) => {
             println!("{}", "Rename cancelled.".yellow());
+            Ok(false)
         }
     }
-
-    Ok(())
 }
 
 /// Interactive delete session
@@ -1730,7 +1730,7 @@ pub fn handle_session_interactive(
             match show_session_menu(project, &sessions, filtered_count)? {
                 SessionMenuChoice::Select(session) => {
                     let mut session = session;
-                    let mut deleted = false;
+                    let mut list_needs_refresh = false;
                     loop {
                         match show_action_menu(&session)? {
                             ActionChoice::OpenClaude => {
@@ -1742,11 +1742,13 @@ pub fn handle_session_interactive(
                                 show_session_details(&session)?;
                             }
                             ActionChoice::Rename => {
-                                rename_session_interactive(&mut session)?;
+                                if rename_session_interactive(&mut session)? {
+                                    list_needs_refresh = true;
+                                }
                             }
                             ActionChoice::Delete => {
                                 if delete_session_interactive(&session)? {
-                                    deleted = true;
+                                    list_needs_refresh = true;
                                     break;
                                 }
                             }
@@ -1755,7 +1757,7 @@ pub fn handle_session_interactive(
                             }
                         }
                     }
-                    if deleted {
+                    if list_needs_refresh {
                         all_sessions = scan_all_session_summaries(None, source)?;
                     }
                 }
@@ -1771,7 +1773,7 @@ pub fn handle_session_interactive(
                             match show_search_results(&results, &keyword)? {
                                 SessionMenuChoice::Select(session) => {
                                     let mut session = session;
-                                    let mut deleted = false;
+                                    let mut list_needs_refresh = false;
                                     loop {
                                         match show_action_menu(&session)? {
                                             ActionChoice::OpenClaude => {
@@ -1782,11 +1784,13 @@ pub fn handle_session_interactive(
                                                 show_session_details(&session)?;
                                             }
                                             ActionChoice::Rename => {
-                                                rename_session_interactive(&mut session)?;
+                                                if rename_session_interactive(&mut session)? {
+                                                    list_needs_refresh = true;
+                                                }
                                             }
                                             ActionChoice::Delete => {
                                                 if delete_session_interactive(&session)? {
-                                                    deleted = true;
+                                                    list_needs_refresh = true;
                                                     break;
                                                 }
                                             }
@@ -1795,7 +1799,7 @@ pub fn handle_session_interactive(
                                             }
                                         }
                                     }
-                                    if deleted {
+                                    if list_needs_refresh {
                                         all_sessions = scan_all_session_summaries(None, source)?;
                                     }
                                 }
