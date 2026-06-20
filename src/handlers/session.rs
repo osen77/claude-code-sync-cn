@@ -1414,24 +1414,20 @@ fn open_in_claude(session: &SessionSummary) -> Result<bool> {
             println!("{} {}", "Executing:".cyan().bold(), cmd);
             println!();
 
-            // Prepend source ~/.zshrc to load shell functions (e.g., cc-auto)
-            let full_cmd = if cfg!(target_os = "windows") {
-                cmd.clone()
-            } else {
-                format!("source ~/.zshrc && {}", cmd)
-            };
-
-            // Execute the command via zsh
+            // Execute the command using the user's preferred shell in interactive mode
+            // This ensures that aliases, functions (like claude-auto), and customized PATH
+            // environments are properly loaded before execution.
             let status = if cfg!(target_os = "windows") {
                 std::process::Command::new("cmd")
                     .arg("/C")
-                    .arg(&full_cmd)
+                    .arg(&cmd)
                     .status()
                     .with_context(|| format!("Failed to execute command: {}", cmd))?
             } else {
-                std::process::Command::new("zsh")
-                    .arg("-c")
-                    .arg(&full_cmd)
+                let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
+                std::process::Command::new(shell)
+                    .arg("-ic")
+                    .arg(&cmd)
                     .status()
                     .with_context(|| format!("Failed to execute command: {}", cmd))?
             };
@@ -3440,7 +3436,7 @@ pub fn handle_session_restore(session_id: Option<&str>) -> Result<()> {
     println!();
 
     let mut options = Vec::new();
-    for (i, summary) in missing_summaries.iter().enumerate() {
+    for summary in missing_summaries.iter() {
         let time = summary
             .last_activity
             .as_ref()

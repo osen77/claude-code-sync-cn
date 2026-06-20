@@ -58,6 +58,7 @@ fn create_test_sync_state(sync_repo_path: &Path, state_dir: &Path) -> anyhow::Re
         sync_repo_path: sync_repo_path.to_path_buf(),
         has_remote: false,
         is_cloned_repo: false,
+        last_synced_commit: None,
     };
 
     let state_file = state_dir.join("state.json");
