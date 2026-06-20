@@ -81,6 +81,12 @@ enum Commands {
         #[arg(long)]
         no_config: bool,
 
+        /// Force-delete sync-repo sessions that are missing locally (escape
+        /// hatch for accidental-deletion protection). By default missing
+        /// sessions are protected and kept in the repo.
+        #[arg(long)]
+        prune: bool,
+
         /// Interactive mode - preview changes and confirm before pushing
         #[arg(short, long)]
         interactive: bool,
@@ -130,6 +136,11 @@ enum Commands {
         /// Exclude file attachments (images, etc.) from sync
         #[arg(long)]
         exclude_attachments: bool,
+
+        /// Force-delete sync-repo sessions that are missing locally during the
+        /// push phase (escape hatch for accidental-deletion protection).
+        #[arg(long)]
+        prune: bool,
 
         /// Interactive mode - preview changes and confirm before syncing
         #[arg(short, long)]
@@ -568,6 +579,12 @@ enum SessionAction {
         force: bool,
     },
 
+    /// Restore sessions deleted by accident (present in sync repo, missing locally)
+    Restore {
+        /// Specific session ID to restore (restores all if omitted)
+        session_id: Option<String>,
+    },
+
     /// List all projects (non-interactive)
     Projects {
         /// Session source to query (default: all)
@@ -666,6 +683,7 @@ fn main() -> Result<()> {
                 message: None,
                 branch: None,
                 exclude_attachments: false,
+                prune: false,
                 interactive: false,
                 verbose: false,
                 quiet: false,
@@ -676,6 +694,7 @@ fn main() -> Result<()> {
                 message: None,
                 branch: None,
                 exclude_attachments: false,
+                prune: false,
                 interactive: false,
                 verbose: false,
                 quiet: false,
@@ -796,6 +815,7 @@ fn main() -> Result<()> {
             branch,
             exclude_attachments,
             no_config,
+            prune,
             interactive,
             verbose,
             quiet,
@@ -816,6 +836,7 @@ fn main() -> Result<()> {
                 exclude_attachments,
                 !no_config, // sync_config = !no_config
                 interactive,
+                prune,
                 verbosity,
             )?;
         }
@@ -841,6 +862,7 @@ fn main() -> Result<()> {
             message,
             branch,
             exclude_attachments,
+            prune,
             interactive,
             verbose,
             quiet,
@@ -859,6 +881,7 @@ fn main() -> Result<()> {
                 branch.as_deref(),
                 exclude_attachments,
                 interactive,
+                prune,
                 verbosity,
             )?;
         }
@@ -1122,6 +1145,9 @@ fn main() -> Result<()> {
                 }
                 Some(SessionAction::Delete { session_id, force }) => {
                     handle_session_delete(&session_id, force)?;
+                }
+                Some(SessionAction::Restore { session_id }) => {
+                    handle_session_restore(session_id.as_deref())?;
                 }
                 Some(SessionAction::Projects { source }) => {
                     handle_session_projects(source.into())?;

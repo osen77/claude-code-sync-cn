@@ -6,6 +6,7 @@ mod push;
 mod remote;
 mod state;
 mod status;
+pub mod tombstone;
 
 // Re-export public types and functions
 pub use init::{init_from_onboarding, init_sync_repo};
@@ -14,6 +15,7 @@ pub use push::push_history;
 pub use remote::{remove_remote, set_remote, show_remote};
 pub use state::{MultiRepoState, RepoConfig, SyncState};
 pub use status::show_status;
+pub use tombstone::{DeleteReason, DeletionRecord, TombstoneRegistry};
 
 use anyhow::Result;
 use colored::Colorize;
@@ -27,6 +29,7 @@ pub fn sync_bidirectional(
     branch: Option<&str>,
     exclude_attachments: bool,
     interactive: bool,
+    prune: bool,
     verbosity: crate::VerbosityLevel,
 ) -> Result<()> {
     use crate::VerbosityLevel;
@@ -53,6 +56,7 @@ pub fn sync_bidirectional(
         exclude_attachments,
         true,
         interactive,
+        prune,
         verbosity,
     )?;
 

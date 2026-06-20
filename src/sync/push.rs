@@ -163,7 +163,117 @@ fn push_with_rebase_auto_heal(
     ))
 }
 
+/// Scan the sync repo's project dirs and return sessions that exist in the
+/// repo but are missing locally.
+///
+/// Only sync-repo project dirs that have a corresponding local project are
+/// considered, so sessions pushed by other devices for projects absent on
+/// this machine are never flagged. The two layout modes
+/// (`use_project_name_only` vs full-path) share the same collection logic;
+/// only the local-file grouping differs.
+fn collect_missing_repo_sessions(
+    projects_dir: &Path,
+    filter: &FilterConfig,
+    sessions: &[crate::parser::ConversationSession],
+    local_files_by_project: &HashMap<String, std::collections::HashSet<String>>,
+) -> Vec<PathBuf> {
+    let mut missing = Vec::new();
+
+    if filter.use_project_name_only {
+        // Map project_name -> set of local file names (union of all matching dirs).
+        let mut local_files_by_name: HashMap<String, std::collections::HashSet<String>> =
+            HashMap::new();
+        let mut project_name_has_local: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+
+        for session in sessions {
+            if let Some(pname) = session.project_name() {
+                project_name_has_local.insert(pname.to_string());
+                let fname = Path::new(&session.file_path)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                local_files_by_name
+                    .entry(pname.to_string())
+                    .or_default()
+                    .insert(fname);
+            }
+        }
+
+        if let Ok(entries) = fs::read_dir(projects_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let sync_project_dir = entry.path();
+                if !sync_project_dir.is_dir() {
+                    continue;
+                }
+                let project_name = sync_project_dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+
+                if !project_name_has_local.contains(&project_name) {
+                    continue;
+                }
+
+                let local_files = local_files_by_name
+                    .get(&project_name)
+                    .cloned()
+                    .unwrap_or_default();
+
+                if let Ok(files) = fs::read_dir(&sync_project_dir) {
+                    for file in files.filter_map(|f| f.ok()) {
+                        let fname = file.file_name().to_string_lossy().to_string();
+                        if fname.ends_with(".jsonl") && !local_files.contains(&fname) {
+                            missing.push(file.path());
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        // Full-path mode: sync repo dir names match local dir names exactly.
+        if let Ok(entries) = fs::read_dir(projects_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let sync_project_dir = entry.path();
+                if !sync_project_dir.is_dir() {
+                    continue;
+                }
+                let dir_name = sync_project_dir
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+
+                let Some(local_files) = local_files_by_project.get(&dir_name) else {
+                    continue;
+                };
+
+                if let Ok(files) = fs::read_dir(&sync_project_dir) {
+                    for file in files.filter_map(|f| f.ok()) {
+                        let fname = file.file_name().to_string_lossy().to_string();
+                        if fname.ends_with(".jsonl") && !local_files.contains(&fname) {
+                            missing.push(file.path());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    missing
+}
+
 /// Push local Claude Code history to sync repository
+///
+/// `prune` controls the accidental-deletion policy:
+/// - `false` (default): sessions present in the sync repo but missing locally
+///   are treated as accidental loss and **protected** — they are kept in the
+///   repo and a warning is printed. Use `ccs restore` to recover them.
+/// - `true`: the missing sessions are force-deleted from the repo (physical
+///   prune), which is the escape hatch for users who deliberately removed
+///   files outside `ccs` and want the deletion propagated.
 pub fn push_history(
     commit_message: Option<&str>,
     push_remote: bool,
@@ -171,6 +281,7 @@ pub fn push_history(
     exclude_attachments: bool,
     sync_config: bool,
     interactive: bool,
+    prune: bool,
     verbosity: crate::VerbosityLevel,
 ) -> Result<()> {
     use crate::VerbosityLevel;
@@ -491,14 +602,19 @@ pub fn push_history(
     }
 
     // ============================================================================
-    // REMOVE LOCALLY DELETED SESSIONS FROM SYNC REPO
+    // DETECT LOCALLY-MISSING SESSIONS IN SYNC REPO
     // ============================================================================
-    // Compare sync repo files against local files to detect deletions.
-    // Only remove files from sync repo project dirs that have a corresponding
-    // local project dir — this prevents deleting sessions pushed by other devices.
+    // Compare sync repo files against local files to find sessions that exist
+    // in the repo but are missing locally. Only consider sync-repo project
+    // dirs that have a corresponding local project dir — this prevents
+    // touching sessions pushed by other devices for projects absent here.
+    //
+    // These missing sessions are either:
+    //   * accidental local loss → protected by default (kept in repo),
+    //   * force-pruned when `--prune` is set.
     let mut deleted_from_repo = 0;
 
-    {
+    let missing_in_repo: Vec<PathBuf> = {
         // Build a set of local session file names grouped by project dir name
         // (the encoded directory name under ~/.claude/projects/)
         let mut local_files_by_project: HashMap<String, std::collections::HashSet<String>> =
@@ -533,114 +649,51 @@ pub fn push_history(
             }
         }
 
-        // Now scan sync repo project dirs and find files to remove.
-        // For use_project_name_only mode, we need to map project names back to
-        // local project dirs. We use the already-discovered sessions to build this mapping.
-        if filter.use_project_name_only {
-            // Build mapping: project_name -> set of local file names (union of all matching dirs)
-            let mut local_files_by_name: HashMap<String, std::collections::HashSet<String>> =
-                HashMap::new();
-            // Track which project names have a local dir present
-            let mut project_name_has_local: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
+        collect_missing_repo_sessions(&projects_dir, &filter, &sessions, &local_files_by_project)
+    };
 
-            for session in &sessions {
-                if let Some(pname) = session.project_name() {
-                    project_name_has_local.insert(pname.to_string());
-                    let fname = Path::new(&session.file_path)
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    local_files_by_name
-                        .entry(pname.to_string())
-                        .or_default()
-                        .insert(fname);
-                }
-            }
-            // Scan sync repo
-            if let Ok(entries) = fs::read_dir(&projects_dir) {
-                for entry in entries.filter_map(|e| e.ok()) {
-                    let sync_project_dir = entry.path();
-                    if !sync_project_dir.is_dir() {
-                        continue;
-                    }
-                    let project_name = sync_project_dir
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or_default()
-                        .to_string();
-
-                    // Only process projects that exist locally
-                    if !project_name_has_local.contains(&project_name) {
-                        continue;
-                    }
-
-                    let local_files = local_files_by_name
-                        .get(&project_name)
-                        .cloned()
-                        .unwrap_or_default();
-
-                    if let Ok(files) = fs::read_dir(&sync_project_dir) {
-                        for file in files.filter_map(|f| f.ok()) {
-                            let fname = file.file_name().to_string_lossy().to_string();
-                            if fname.ends_with(".jsonl") && !local_files.contains(&fname) {
-                                let file_path = file.path();
-                                if let Err(e) = fs::remove_file(&file_path) {
-                                    log::warn!("Failed to remove deleted session: {}", e);
-                                } else {
-                                    deleted_from_repo += 1;
-                                    log::debug!("Removed deleted session: {}", file_path.display());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        } else {
-            // Full-path mode: sync repo dir names match local dir names exactly
-            if let Ok(entries) = fs::read_dir(&projects_dir) {
-                for entry in entries.filter_map(|e| e.ok()) {
-                    let sync_project_dir = entry.path();
-                    if !sync_project_dir.is_dir() {
-                        continue;
-                    }
-                    let dir_name = sync_project_dir
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or_default()
-                        .to_string();
-
-                    // Only process dirs that exist locally
-                    let Some(local_files) = local_files_by_project.get(&dir_name) else {
-                        continue;
-                    };
-
-                    if let Ok(files) = fs::read_dir(&sync_project_dir) {
-                        for file in files.filter_map(|f| f.ok()) {
-                            let fname = file.file_name().to_string_lossy().to_string();
-                            if fname.ends_with(".jsonl") && !local_files.contains(&fname) {
-                                let file_path = file.path();
-                                if let Err(e) = fs::remove_file(&file_path) {
-                                    log::warn!("Failed to remove deleted session: {}", e);
-                                } else {
-                                    deleted_from_repo += 1;
-                                    log::debug!("Removed deleted session: {}", file_path.display());
-                                }
-                            }
-                        }
-                    }
-                }
+    if missing_in_repo.is_empty() {
+        // Nothing missing locally — no protection or pruning needed.
+    } else if prune {
+        // Escape hatch: force-delete the missing sessions from the repo.
+        // This is the user explicitly saying "I removed these files on
+        // purpose, propagate the deletion." No tombstone is written because
+        // prune is a physical sync, not an intentional-delete registration.
+        for file_path in &missing_in_repo {
+            if let Err(e) = fs::remove_file(file_path) {
+                log::warn!("Failed to prune missing session: {}", e);
+            } else {
+                deleted_from_repo += 1;
+                log::debug!("Pruned missing session: {}", file_path.display());
             }
         }
-
-        if deleted_from_repo > 0 && verbosity != VerbosityLevel::Quiet {
+        if verbosity != VerbosityLevel::Quiet {
             println!(
-                "  {} Removed {} deleted sessions from sync repo",
+                "  {} Pruned {} missing sessions from sync repo",
                 "✓".green(),
                 deleted_from_repo
             );
         }
+    } else {
+        // Protection mode: refuse to propagate the local absence. The repo
+        // keeps these sessions so they survive as a recoverable backup.
+        if verbosity != VerbosityLevel::Quiet {
+            println!(
+                "  {} Detected {} session(s) missing locally but present in sync repo — protected from deletion.",
+                "⚠".yellow(),
+                missing_in_repo.len()
+            );
+            println!(
+                "    {} Use '{}' to recover them, or '{}' to force-delete.",
+                "→".cyan(),
+                format!("{} session restore", BINARY_NAME).cyan(),
+                format!("{} push --prune", BINARY_NAME).cyan()
+            );
+        }
+        log::info!(
+            "Protected {} missing sessions from deletion (use --prune to force)",
+            missing_in_repo.len()
+        );
     }
 
     // ============================================================================

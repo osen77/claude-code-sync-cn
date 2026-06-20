@@ -146,6 +146,9 @@ ccs pull
 
 # 仅推送
 ccs push -m "Update from Mac"
+
+# 强制推送并修剪远程已在本地手动物理删除的历史（逃生舱机制，通常在误删保护触发时使用）
+ccs push --prune -m "Force prune missing sessions"
 ```
 
 ### 切换设备工作流
@@ -417,7 +420,15 @@ ccs session delete <session-id>
 
 # 强制删除（跳过确认）
 ccs session delete <session-id> --force
+
+# 恢复意外删除的会话
+# （当使用 rm 命令意外删除了本地文件，但同步仓库中还存在时，可以使用此命令进行恢复）
+ccs session restore <session-id>
 ```
+
+> **提示：误删保护与跨设备同步**
+> `ccs` 为你的会话历史启用了**误删保护 (Deletion Protection)**。当你使用 `ccs session delete` 或在交互式菜单里删除会话时，它会生成一个标准的意图记录（Tombstone），该记录会随着 `push` 同步至远端，从而让其他设备在 `pull` 时也同步删除该会话。
+> 如果你没有通过 `ccs` 命令而是意外在本地终端使用了 `rm` 或者清空了目录，下次 `push` 时程序会**拦截**这一操作（以防止远程备份也被误删）。它会保留云端副本，并提示你使用 `ccs session restore` 找回丢失的会话。如果你确实想连带云端一起强制物理销毁，可以通过 `ccs push --prune` 逃生舱绕过保护。
 
 ### 会话标题
 
@@ -459,6 +470,7 @@ ccs session delete <session-id> --force
 | `ccs session show <id>` | 查看会话详情 |
 | `ccs session rename <id> <title>` | 重命名会话 |
 | `ccs session delete <id>` | 删除会话 |
+| `ccs session restore` | 恢复意外丢失的会话 |
 | `ccs config-sync push` | 推送配置到远程 |
 | `ccs config-sync list` | 列出远程设备配置 |
 | `ccs config-sync apply <device>` | 应用其他设备配置 |
@@ -589,7 +601,22 @@ ssh-keygen -t ed25519
 cat ~/.ssh/id_ed25519.pub  # 添加到 GitHub
 ```
 
-### 问题 3：冲突处理
+### 问题 3：误删除与找回
+
+**解决：**
+如果你在文件夹中使用了 `rm` 等操作不小心删除了会话文件，下一次 `ccs push` 会被拦截并提示存在丢失的会话。
+此时你可以使用以下命令进行找回：
+```bash
+# 交互式查看并恢复缺失的会话
+ccs session restore
+```
+如果你确实想连带云端同步库中的该会话记录一起删除（即不需要恢复）：
+```bash
+# 强制修剪云端对应记录
+ccs push --prune
+```
+
+### 问题 4：冲突处理
 
 **自动处理：**
 - 冲突文件会保留两个版本
