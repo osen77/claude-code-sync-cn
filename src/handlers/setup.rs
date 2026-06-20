@@ -744,8 +744,14 @@ pub fn handle_setup(skip_sync: bool) -> Result<()> {
             println!();
             println!("{}", "🔄 正在同步...".cyan());
 
-            match sync::sync_bidirectional(None, None, false, false, crate::VerbosityLevel::Normal)
-            {
+            match sync::sync_bidirectional(
+                None,
+                None,
+                false,
+                false,
+                false,
+                crate::VerbosityLevel::Normal,
+            ) {
                 Ok(()) => {
                     println!("{}", "✓ 同步完成".green());
                 }

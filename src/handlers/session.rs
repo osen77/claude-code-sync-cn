@@ -15,10 +15,15 @@ use crate::codex::{
     codex_history_path, codex_sessions_dir, load_codex_history_titles, CodexSession,
 };
 use crate::config::ConfigManager;
-use crate::filter::FilterConfig;
+use crate::filter::{ConfigSyncSettings, FilterConfig};
 use crate::parser::ConversationSession;
+use crate::scm;
 use crate::session_cache::{mtime_secs, SessionIndexCache};
-use crate::sync::discovery::{claude_projects_dir, discover_sessions, extract_project_name};
+use crate::sync::discovery::{
+    claude_projects_dir, discover_sessions, extract_project_name, find_local_project_by_name,
+};
+use crate::sync::tombstone::{DeleteReason, DeletionRecord, TombstoneRegistry};
+use crate::sync::SyncState;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionSourceFilter {
@@ -714,10 +719,190 @@ pub fn rename_session(file_path: &Path, session_id: &str, new_title: &str) -> Re
     Ok(())
 }
 
-/// Delete a session file
+/// Delete a session file from the local filesystem only.
+///
+/// This is the low-level primitive: it removes the `.jsonl` file from
+/// `~/.claude/projects/` (or `~/.codex/sessions/`) and nothing else. It does
+/// NOT touch the sync repo, does NOT write a tombstone, and does NOT commit.
+///
+/// Callers that represent a user-driven deletion must use
+/// [`delete_session_with_commit`] instead, which keeps the sync repo and the
+/// tombstone registry in lockstep with the local deletion.
 pub fn delete_session(file_path: &Path) -> Result<()> {
     fs::remove_file(file_path)
         .with_context(|| format!("Failed to delete file: {}", file_path.display()))?;
+    Ok(())
+}
+
+/// Compute the path of a session file relative to the sync repo's `projects/`
+/// directory, mirroring [`crate::sync::push`]'s `compute_relative_path` logic
+/// but operating on a [`SessionSummary`] instead of a [`ConversationSession`].
+///
+/// Returns `None` when the session is not under `~/.claude/projects/`
+/// (e.g. Codex sessions, which are not synced and have no repo representation).
+fn repo_relative_path(session: &SessionSummary, filter: &FilterConfig) -> Option<PathBuf> {
+    // Codex sessions live outside ~/.claude/projects/ and are not synced.
+    if session.source == "codex" {
+        return None;
+    }
+
+    let claude_dir = claude_projects_dir().ok()?;
+    let filename = session.file_path.file_name()?;
+
+    let relative = if filter.use_project_name_only {
+        PathBuf::from(&session.project_name).join(filename)
+    } else {
+        session
+            .file_path
+            .strip_prefix(&claude_dir)
+            .ok()?
+            .to_path_buf()
+    };
+
+    Some(relative)
+}
+
+/// Build a [`DeletionRecord`] for a session, without persisting it.
+fn build_deletion_record(
+    session: &SessionSummary,
+    repo_rel: &Path,
+    reason: DeleteReason,
+) -> DeletionRecord {
+    DeletionRecord {
+        session_id: session.session_id.clone(),
+        repo_relative_path: repo_rel.to_string_lossy().to_string(),
+        project_name: session.project_name.clone(),
+        source: session.source.clone(),
+        deleted_at: chrono::Utc::now().to_rfc3339(),
+        device: ConfigSyncSettings::default().get_device_name(),
+        reason,
+    }
+}
+
+/// Delete a single session: remove the local file, and for Claude sessions
+/// also remove the sync-repo copy, register a tombstone, and commit.
+///
+/// This is the unified entry point for intentional deletions. It makes the
+/// deletion atomic across the local tree and the sync repo, and records the
+/// intent so other devices can distinguish it from accidental loss.
+///
+/// Codex sessions are local-only (not in the sync repo), so for them this
+/// only removes the local file — see the plan's "known limitations".
+///
+/// `reason` drives both the tombstone entry and the commit message prefix.
+pub fn delete_session_with_commit(session: &SessionSummary, reason: DeleteReason) -> Result<()> {
+    // 1. Always remove the local file first.
+    delete_session(&session.file_path)?;
+
+    // 2. Codex sessions have no sync-repo representation; nothing more to do.
+    let filter = FilterConfig::load()?;
+    let Some(repo_rel) = repo_relative_path(session, &filter) else {
+        log::debug!(
+            "Session {} is not synced (source={}); local file only removed",
+            session.session_id,
+            session.source
+        );
+        return Ok(());
+    };
+
+    let state = SyncState::load()?;
+    let projects_dir = state.sync_repo_path.join(&filter.sync_subdirectory);
+    let repo_file = projects_dir.join(&repo_rel);
+
+    // 3. Remove the sync-repo copy if present. Missing is fine (e.g. never
+    //    pushed yet) — the tombstone still records the intent.
+    if repo_file.exists() {
+        if let Err(e) = fs::remove_file(&repo_file) {
+            log::warn!(
+                "Failed to remove sync-repo copy {}: {}",
+                repo_file.display(),
+                e
+            );
+        }
+    }
+
+    // 4. Register the tombstone.
+    let record = build_deletion_record(session, &repo_rel, reason.clone());
+    let mut registry = TombstoneRegistry::load(&state.sync_repo_path)?;
+    registry.add(record);
+    registry.save(&state.sync_repo_path)?;
+
+    // 5. Commit the deletion + tombstone together.
+    let repo = scm::open(&state.sync_repo_path)?;
+    repo.stage_all()?;
+    if repo.has_changes()? {
+        let message = format!(
+            "delete(session): {} {}",
+            reason.as_str(),
+            session.session_id
+        );
+        repo.commit(&message)?;
+        log::info!("Committed session deletion: {}", message);
+    }
+
+    Ok(())
+}
+
+/// Remove a session's local file and sync-repo copy, returning a tombstone
+/// record for the caller to batch-persist.
+///
+/// Unlike [`delete_session_with_commit`], this does NOT save the tombstone
+/// registry or commit — the caller is expected to accumulate records and
+/// perform a single save + commit at the end (used by batch cleanup so the
+/// history gets one commit instead of N).
+///
+/// Returns `None` when the local file could not be removed (the session is
+/// left untouched and the caller can continue with the rest).
+fn remove_session_for_batch(
+    session: &SessionSummary,
+    reason: DeleteReason,
+    filter: &FilterConfig,
+    state: &SyncState,
+) -> Result<Option<DeletionRecord>> {
+    // 1. Remove the local file.
+    delete_session(&session.file_path)?;
+
+    // 2. Codex sessions have no repo representation.
+    let Some(repo_rel) = repo_relative_path(session, filter) else {
+        return Ok(None);
+    };
+
+    let projects_dir = state.sync_repo_path.join(&filter.sync_subdirectory);
+    let repo_file = projects_dir.join(&repo_rel);
+    if repo_file.exists() {
+        if let Err(e) = fs::remove_file(&repo_file) {
+            log::warn!(
+                "Failed to remove sync-repo copy {}: {}",
+                repo_file.display(),
+                e
+            );
+        }
+    }
+
+    Ok(Some(build_deletion_record(session, &repo_rel, reason)))
+}
+
+/// Persist accumulated tombstone records and commit the batch deletion in a
+/// single commit. Shared by batch cleanup.
+fn commit_batch_deletion(
+    state: &SyncState,
+    records: Vec<DeletionRecord>,
+    commit_message: &str,
+) -> Result<()> {
+    if records.is_empty() {
+        return Ok(());
+    }
+
+    let mut registry = TombstoneRegistry::load(&state.sync_repo_path)?;
+    registry.add_many(records);
+    registry.save(&state.sync_repo_path)?;
+
+    let repo = scm::open(&state.sync_repo_path)?;
+    repo.stage_all()?;
+    if repo.has_changes()? {
+        repo.commit(commit_message)?;
+        log::info!("Committed batch deletion: {}", commit_message);
+    }
     Ok(())
 }
 
@@ -1329,7 +1514,7 @@ fn delete_session_interactive(session: &SessionSummary) -> Result<bool> {
 
     match confirm {
         Ok(true) => {
-            delete_session(&session.file_path)?;
+            delete_session_with_commit(session, DeleteReason::Explicit)?;
             println!();
             println!(
                 "{} Session deleted successfully!",
@@ -1399,19 +1584,61 @@ fn cleanup_sessions_interactive(project: &ProjectSummary) -> Result<usize> {
 
     match confirm {
         Ok(true) => {
+            let filter = FilterConfig::load()?;
+            let state = SyncState::load().ok();
             let mut deleted_count = 0;
+            let mut records: Vec<DeletionRecord> = Vec::new();
+
             for session in &filtered_sessions {
-                if let Err(e) = delete_session(&session.file_path) {
-                    println!(
-                        "{} Failed to delete {}: {}",
-                        "ERROR:".red().bold(),
-                        session.file_path.display(),
-                        e
-                    );
-                } else {
-                    deleted_count += 1;
+                match state {
+                    Some(ref st) => {
+                        match remove_session_for_batch(session, DeleteReason::Cleanup, &filter, st)
+                        {
+                            Ok(Some(record)) => {
+                                records.push(record);
+                                deleted_count += 1;
+                            }
+                            Ok(None) => {
+                                // Local file removed but no repo representation
+                                // (e.g. Codex). Still counts as deleted.
+                                deleted_count += 1;
+                            }
+                            Err(e) => {
+                                println!(
+                                    "{} Failed to delete {}: {}",
+                                    "ERROR:".red().bold(),
+                                    session.file_path.display(),
+                                    e
+                                );
+                            }
+                        }
+                    }
+                    None => {
+                        // No sync repo configured: fall back to local-only delete.
+                        if let Err(e) = delete_session(&session.file_path) {
+                            println!(
+                                "{} Failed to delete {}: {}",
+                                "ERROR:".red().bold(),
+                                session.file_path.display(),
+                                e
+                            );
+                        } else {
+                            deleted_count += 1;
+                        }
+                    }
                 }
             }
+
+            // Persist tombstones and commit once for the whole batch.
+            if let Some(ref st) = state {
+                if !records.is_empty() {
+                    let message = format!("cleanup(session): {} garbage sessions", records.len());
+                    if let Err(e) = commit_batch_deletion(st, records, &message) {
+                        println!("{} Failed to commit cleanup: {}", "ERROR:".red().bold(), e);
+                    }
+                }
+            }
+
             println!();
             println!(
                 "{} Deleted {} sessions!",
@@ -1548,6 +1775,7 @@ pub fn handle_session_interactive(
                             match show_search_results(&results, &keyword)? {
                                 SessionMenuChoice::Select(session) => {
                                     let mut session = session;
+                                    let mut deleted = false;
                                     loop {
                                         match show_action_menu(&session)? {
                                             ActionChoice::OpenClaude => {
@@ -1562,6 +1790,7 @@ pub fn handle_session_interactive(
                                             }
                                             ActionChoice::Delete => {
                                                 if delete_session_interactive(&session)? {
+                                                    deleted = true;
                                                     break;
                                                 }
                                             }
@@ -1569,6 +1798,9 @@ pub fn handle_session_interactive(
                                                 break;
                                             }
                                         }
+                                    }
+                                    if deleted {
+                                        all_sessions = scan_all_session_summaries(None, source)?;
                                     }
                                 }
                                 _ => {}
@@ -3106,7 +3338,7 @@ pub fn handle_session_delete(session_id: &str, force: bool) -> Result<()> {
                 }
             }
 
-            delete_session(&session.file_path)?;
+            delete_session_with_commit(&session, DeleteReason::Explicit)?;
             println!(
                 "{} Session deleted successfully!",
                 "SUCCESS:".green().bold()
@@ -3116,6 +3348,168 @@ pub fn handle_session_delete(session_id: &str, force: bool) -> Result<()> {
     }
 
     anyhow::bail!("Session not found: {}", session_id)
+}
+
+/// Restore a session that exists in the sync repo but is missing locally
+pub fn handle_session_restore(session_id: Option<&str>) -> Result<()> {
+    let state = SyncState::load().context("Failed to load sync state (is sync configured?)")?;
+    let filter = FilterConfig::load()?;
+    let claude_dir = claude_projects_dir()?;
+    let remote_projects_dir = state.sync_repo_path.join(&filter.sync_subdirectory);
+
+    if !remote_projects_dir.exists() {
+        println!(
+            "{}",
+            "Sync repository is empty or not initialized.".yellow()
+        );
+        return Ok(());
+    }
+
+    println!("{} missing sessions from sync repo...", "Scanning".cyan());
+
+    // 1. Discover all local sessions
+    let local_sessions = discover_sessions(&claude_dir, &filter)?;
+    let local_ids: std::collections::HashSet<_> = local_sessions
+        .iter()
+        .map(|s| s.session_id.clone())
+        .collect();
+
+    // 2. Discover all remote sessions
+    let remote_sessions = discover_sessions(&remote_projects_dir, &filter)?;
+
+    // 3. Find missing (present in remote, not in local)
+    let missing_sessions: Vec<_> = remote_sessions
+        .into_iter()
+        .filter(|s| !local_ids.contains(&s.session_id))
+        .collect();
+
+    if missing_sessions.is_empty() {
+        println!();
+        println!("{}", "No missing sessions found in sync repo.".green());
+        println!("{}", "Your local directory is fully up to date.".dimmed());
+        return Ok(());
+    }
+
+    // 4. Convert to SessionSummary to re-use display logic
+    // We map these back to their correct project_name. Since we don't have
+    // the local project directory anymore (it might have been deleted too),
+    // we use a placeholder or derived dir path based on the remote project dir.
+    let mut missing_summaries = Vec::new();
+    for rs in &missing_sessions {
+        let pname = rs.project_name().unwrap_or("unknown");
+        let remote_rel = Path::new(&rs.file_path)
+            .strip_prefix(&remote_projects_dir)
+            .unwrap_or(Path::new(&rs.file_path));
+
+        let local_proj_dir = if filter.use_project_name_only {
+            // Find an existing project dir with this name, or fallback
+            find_local_project_by_name(&claude_dir, pname).unwrap_or_else(|| claude_dir.join(pname))
+        } else {
+            // Reconstruct full path
+            let proj_rel = remote_rel.parent().unwrap_or(Path::new(""));
+            claude_dir.join(proj_rel)
+        };
+
+        missing_summaries.push(SessionSummary::from_session(rs, pname, &local_proj_dir));
+    }
+
+    missing_summaries.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+
+    // 5. If specific session_id is provided, restore it directly
+    if let Some(target_id) = session_id {
+        let Some(target) = missing_summaries.iter().find(|s| s.session_id == target_id) else {
+            anyhow::bail!("Session ID {} not found among missing sessions", target_id);
+        };
+
+        do_restore(target, &remote_projects_dir, &filter)?;
+        println!(
+            "{} Restored session: {}",
+            "SUCCESS:".green().bold(),
+            target.display_title(50)
+        );
+        return Ok(());
+    }
+
+    // 6. Otherwise, interactive selection
+    println!();
+    println!(
+        "{} Found {} session(s) in sync repo that are missing locally:",
+        "Restore:".cyan().bold(),
+        missing_summaries.len()
+    );
+    println!();
+
+    let mut options = Vec::new();
+    for (i, summary) in missing_summaries.iter().enumerate() {
+        let time = summary
+            .last_activity
+            .as_ref()
+            .map(|t| format_relative_time(t))
+            .unwrap_or_else(|| "unknown".to_string());
+
+        options.push(format!(
+            "{:<40} [{}] {} msgs  {}",
+            summary.display_title(40).dimmed(),
+            summary.project_name.cyan(),
+            summary.message_count,
+            time
+        ));
+    }
+    options.push("Cancel".to_string());
+
+    let selection = inquire::Select::new("Select a session to restore:", options.clone())
+        .with_page_size(15)
+        .prompt();
+
+    match selection {
+        Ok(selected) if selected != "Cancel" => {
+            if let Some(idx) = options.iter().position(|x| x == &selected) {
+                let target = &missing_summaries[idx];
+                do_restore(target, &remote_projects_dir, &filter)?;
+                println!();
+                println!(
+                    "{} Restored session: {}",
+                    "SUCCESS:".green().bold(),
+                    target.display_title(50)
+                );
+            }
+        }
+        _ => {
+            println!("{}", "Restore cancelled.".yellow());
+        }
+    }
+
+    Ok(())
+}
+
+fn do_restore(
+    target: &SessionSummary,
+    remote_projects_dir: &Path,
+    filter: &FilterConfig,
+) -> Result<()> {
+    // Determine the source file in the remote repo
+    let source_rel = repo_relative_path(target, filter)
+        .context("Failed to compute relative path for restoration")?;
+    let source_file = remote_projects_dir.join(&source_rel);
+
+    if !source_file.exists() {
+        anyhow::bail!("Remote file not found: {}", source_file.display());
+    }
+
+    // Ensure the local target directory exists
+    if let Some(parent) = target.file_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    fs::copy(&source_file, &target.file_path).with_context(|| {
+        format!(
+            "Failed to restore session file from {} to {}",
+            source_file.display(),
+            target.file_path.display()
+        )
+    })?;
+
+    Ok(())
 }
 
 #[cfg(test)]

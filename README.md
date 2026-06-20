@@ -97,9 +97,10 @@ ccs uninstall
 | `ccs sync` | 双向同步 |
 | `ccs automate` | 配置自动同步 |
 | `ccs status` | 查看同步状态 |
-| `ccs session` | 会话管理 |
+| `ccs session` | 会话管理（含误删保护与恢复） |
 | `ccs session search <关键词>` | 跨 Claude Code / Codex 搜索历史会话 |
 | `ccs session overview --since 7d` | 查看最近项目会话概览 |
+| `ccs session restore` | 恢复被意外删除的会话 |
 | `ccs config-sync push` | 推送配置到远程 |
 | `ccs config-sync apply <device>` | 应用其他设备配置 |
 | `ccs update` | 更新到最新版本 |

@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use inquire::Confirm;
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::conflict::ConflictDetector;
@@ -55,6 +56,68 @@ pub fn pull_history(
             Err(e) => {
                 log::warn!("Failed to pull: {}", e);
                 log::info!("Continuing with local sync repository state...");
+            }
+        }
+    }
+
+    // ============================================================================
+    // PROPAGATE INTENTIONAL DELETIONS
+    // ============================================================================
+    // Before discovering local sessions, check if the sync repo has any
+    // registered tombstones that we haven't applied locally yet.
+    let mut propagated_deletes = 0;
+    if let Ok(registry) = crate::sync::tombstone::TombstoneRegistry::load(&state.sync_repo_path) {
+        if !registry.is_empty() {
+            if verbosity != VerbosityLevel::Quiet {
+                println!("  {} tombstones...", "Checking".cyan());
+            }
+            // We just scan all local jsonl files. If their session ID (from the filename)
+            // is in the registry, we remove them locally. We don't need full parsing here
+            // since filenames contain the session UUID.
+            if let Ok(entries) = fs::read_dir(&claude_dir) {
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let local_project_dir = entry.path();
+                    if !local_project_dir.is_dir() {
+                        continue;
+                    }
+                    if let Ok(files) = fs::read_dir(&local_project_dir) {
+                        for file in files.filter_map(|f| f.ok()) {
+                            let fname = file.file_name().to_string_lossy().to_string();
+                            if fname.ends_with(".jsonl") {
+                                // Extract UUID from filename: "session-uuid.jsonl" or "uuid.jsonl"
+                                // Claude Code filenames are typically either just the UUID or prefixed.
+                                let session_id = fname
+                                    .strip_suffix(".jsonl")
+                                    .unwrap_or(&fname)
+                                    .trim_start_matches("session-");
+
+                                if registry.contains(session_id) {
+                                    let file_path = file.path();
+                                    if let Err(e) = fs::remove_file(&file_path) {
+                                        log::warn!(
+                                            "Failed to propagate remote deletion for {}: {}",
+                                            session_id,
+                                            e
+                                        );
+                                    } else {
+                                        propagated_deletes += 1;
+                                        log::debug!(
+                                            "Propagated remote deletion: {}",
+                                            file_path.display()
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if propagated_deletes > 0 && verbosity != VerbosityLevel::Quiet {
+                println!(
+                    "  {} Propagated {} intentional deletion(s) from other devices",
+                    "✓".green(),
+                    propagated_deletes
+                );
             }
         }
     }
