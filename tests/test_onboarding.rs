@@ -60,7 +60,7 @@ fn test_ensure_config_dir_creates_directory() -> Result<()> {
 #[test]
 #[serial]
 fn test_sync_state_with_cloned_flag() -> Result<()> {
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
     let repo_path = temp_dir.path().join("test-repo");
 
     // Test serialization/deserialization with is_cloned_repo field
@@ -101,7 +101,7 @@ fn test_sync_state_backwards_compatible() -> Result<()> {
 #[test]
 #[serial]
 fn test_filter_config_save_and_load() -> Result<()> {
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
 
     // Set XDG_CONFIG_HOME to isolate test config
     // Config env already set by setup_test_config_env()
@@ -127,7 +127,7 @@ fn test_filter_config_save_and_load() -> Result<()> {
 #[test]
 #[serial]
 fn test_scm_clone_validates_path() -> Result<()> {
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
     let clone_path = temp_dir.path().join("cloned-repo");
 
     // We can't test actual cloning without a real remote repo
@@ -148,7 +148,7 @@ fn test_scm_clone_validates_path() -> Result<()> {
 #[test]
 #[serial]
 fn test_init_from_onboarding() -> Result<()> {
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
     let repo_path = temp_dir.path().join("onboarding-test-repo");
 
     // Set XDG_CONFIG_HOME to isolate test config
@@ -175,7 +175,7 @@ fn test_init_from_onboarding() -> Result<()> {
 #[test]
 #[serial]
 fn test_init_from_onboarding_with_remote() -> Result<()> {
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
     let repo_path = temp_dir.path().join("onboarding-remote-test");
 
     // Set XDG_CONFIG_HOME to isolate test config
@@ -206,7 +206,7 @@ fn test_init_from_onboarding_with_remote() -> Result<()> {
 #[test]
 #[serial]
 fn test_config_directory_structure() -> Result<()> {
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
 
     // Ensure config directory can be created
     let config_dir = ConfigManager::ensure_config_dir()?;
@@ -256,7 +256,7 @@ fn test_filter_config_with_attachments() -> Result<()> {
 #[test]
 #[serial]
 fn test_multiple_config_operations() -> Result<()> {
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
 
     // Set XDG_CONFIG_HOME to isolate test config
     // Config env already set by setup_test_config_env()
@@ -289,7 +289,7 @@ fn test_multiple_config_operations() -> Result<()> {
 #[test]
 #[serial]
 fn test_init_sync_repo_creates_filter_config() -> Result<()> {
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
     let repo_path = temp_dir.path().join("cli-init-test-repo");
 
     // Set XDG_CONFIG_HOME to isolate test config
@@ -325,7 +325,7 @@ fn test_init_sync_repo_creates_filter_config() -> Result<()> {
 #[test]
 #[serial]
 fn test_init_sync_repo_with_remote_creates_filter_config() -> Result<()> {
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
     let repo_path = temp_dir.path().join("cli-remote-test-repo");
 
     // Set XDG_CONFIG_HOME to isolate test config
@@ -356,7 +356,7 @@ fn test_init_sync_repo_with_remote_creates_filter_config() -> Result<()> {
 #[test]
 #[serial]
 fn test_init_sync_repo_does_not_overwrite_existing_filter_config() -> Result<()> {
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
     let repo_path = temp_dir.path().join("no-overwrite-test-repo");
 
     // Set XDG_CONFIG_HOME to isolate test config
@@ -398,7 +398,7 @@ fn test_init_sync_repo_does_not_overwrite_existing_filter_config() -> Result<()>
 #[test]
 #[serial]
 fn test_clone_with_invalid_url_fails() -> Result<()> {
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
     let clone_path = temp_dir.path().join("clone-test-repo");
 
     // Try to clone from an invalid URL
@@ -411,7 +411,7 @@ fn test_clone_with_invalid_url_fails() -> Result<()> {
 #[test]
 #[serial]
 fn test_clone_creates_parent_directories() -> Result<()> {
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
     let nested_path = temp_dir
         .path()
         .join("deeply")
@@ -436,7 +436,7 @@ fn test_clone_creates_parent_directories() -> Result<()> {
 #[test]
 #[serial]
 fn test_init_from_onboarding_sets_is_cloned_flag() -> Result<()> {
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
     let repo_path = temp_dir.path().join("cloned-repo-test");
 
     // Set XDG_CONFIG_HOME to isolate test config
@@ -470,7 +470,7 @@ fn test_init_from_onboarding_sets_is_cloned_flag() -> Result<()> {
 #[test]
 #[serial]
 fn test_init_from_onboarding_local_repo_not_cloned() -> Result<()> {
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
     let repo_path = temp_dir.path().join("local-repo-test");
 
     // Set XDG_CONFIG_HOME to isolate test config
@@ -523,7 +523,7 @@ fn test_init_config_clone_requires_remote_url() -> Result<()> {
     use claude_code_sync::onboarding::InitConfig;
     use std::io::Write;
 
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
 
     // Create config file with clone=true but no remote_url
     let config_path = temp_dir.path().join("init.toml");
@@ -557,7 +557,7 @@ fn test_init_config_clone_with_remote_url_valid() -> Result<()> {
     use claude_code_sync::onboarding::InitConfig;
     use std::io::Write;
 
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
 
     // Create config file with clone=true and remote_url
     let config_path = temp_dir.path().join("init.toml");
@@ -637,7 +637,7 @@ fn test_multi_repo_state_serialization() -> Result<()> {
 #[test]
 #[serial]
 fn test_v1_to_v2_migration() -> Result<()> {
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
     // Config env already set by setup_test_config_env()
 
     let config_dir = ConfigManager::config_dir()?;
@@ -679,7 +679,7 @@ fn test_v1_to_v2_migration() -> Result<()> {
 #[test]
 #[serial]
 fn test_sync_state_loads_v2_format() -> Result<()> {
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
     // Config env already set by setup_test_config_env()
 
     let config_dir = ConfigManager::config_dir()?;
@@ -719,7 +719,7 @@ fn test_sync_state_loads_v2_format() -> Result<()> {
 #[test]
 #[serial]
 fn test_multi_repo_state_multiple_repos() -> Result<()> {
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
     // Config env already set by setup_test_config_env()
 
     let config_dir = ConfigManager::config_dir()?;
@@ -769,7 +769,7 @@ fn test_multi_repo_state_multiple_repos() -> Result<()> {
 #[test]
 #[serial]
 fn test_switch_active_repo() -> Result<()> {
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
     // Config env already set by setup_test_config_env()
 
     let config_dir = ConfigManager::config_dir()?;
@@ -825,7 +825,7 @@ fn test_switch_active_repo() -> Result<()> {
 fn test_init_creates_v2_format_with_git_repo() -> Result<()> {
     use claude_code_sync::sync;
 
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
     // Config env already set by setup_test_config_env()
 
     let repo_path = temp_dir.path().join("test-sync-repo");
@@ -863,7 +863,7 @@ fn test_init_creates_v2_format_with_git_repo() -> Result<()> {
 fn test_init_with_remote_populates_remote_url() -> Result<()> {
     use claude_code_sync::sync;
 
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
     // Config env already set by setup_test_config_env()
 
     let repo_path = temp_dir.path().join("test-remote-repo");
@@ -891,7 +891,7 @@ fn test_init_with_remote_populates_remote_url() -> Result<()> {
 fn test_full_workflow_with_git_repos() -> Result<()> {
     use claude_code_sync::sync;
 
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
     // Config env already set by setup_test_config_env()
 
     // Create a "remote" bare repo to simulate a git remote
@@ -933,7 +933,7 @@ fn test_full_workflow_with_git_repos() -> Result<()> {
 fn test_operations_use_active_repo() -> Result<()> {
     use claude_code_sync::sync;
 
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
     // Config env already set by setup_test_config_env()
 
     // Create two repos
@@ -983,7 +983,7 @@ fn test_operations_use_active_repo() -> Result<()> {
 #[test]
 #[serial]
 fn test_invalid_active_repo_error() -> Result<()> {
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
     // Config env already set by setup_test_config_env()
 
     let config_dir = ConfigManager::config_dir()?;
@@ -1020,7 +1020,7 @@ fn test_invalid_active_repo_error() -> Result<()> {
 fn test_init_from_onboarding_creates_v2() -> Result<()> {
     use claude_code_sync::sync;
 
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
     // Config env already set by setup_test_config_env()
 
     let repo_path = temp_dir.path().join("onboarding-repo");
@@ -1051,7 +1051,7 @@ fn test_init_from_onboarding_creates_v2() -> Result<()> {
 #[test]
 #[serial]
 fn test_config_handles_uninitialized_state() -> Result<()> {
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
     // Config env already set by setup_test_config_env()
 
     // Don't create any state file - simulate fresh install
@@ -1076,7 +1076,7 @@ fn test_config_handles_uninitialized_state() -> Result<()> {
 fn test_cloned_repo_flag_in_v2() -> Result<()> {
     use claude_code_sync::sync;
 
-    let _temp_dir = setup_test_config_env()?;
+    let temp_dir = setup_test_config_env()?;
     // Config env already set by setup_test_config_env()
 
     let repo_path = temp_dir.path().join("cloned-repo");
