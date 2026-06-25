@@ -132,14 +132,15 @@ cwd.split(&['/', '\\'])
 - `ccs update --check-only` 仅检查
 - 自动下载并替换当前二进制
 
-### 5.1 会话来源 (`handlers/session.rs`, `codex.rs`)
+### 5.1 会话来源 (`handlers/session.rs`, `codex.rs`, `omp.rs`)
 
-`ccs session` 非交互命令支持两类历史来源：
+`ccs session` 非交互命令支持三类历史来源：
 
 - `CC`: Claude Code，读取 `~/.claude/projects/`
 - `CX`: Codex，只读读取 `~/.codex/sessions/`，标题辅助来自 `~/.codex/history.jsonl`
+- `OM`: OMP (Oh My Pi)，只读读取 `~/.omp/agent/sessions/`
 
-使用 `--source all|claude|codex` 过滤来源，默认 `all`。
+使用 `--source all|claude|codex|omp` 过滤来源，默认 `all`。Codex 与 OMP 会话均位于 `~/.claude/projects/` 之外，不参与同步（`repo_relative_path` 对二者返回 `None`）。
 
 ### 6. 自动同步 (`handlers/automate.rs`, `hooks.rs`, `wrapper.rs`)
 
@@ -474,6 +475,14 @@ pub fn title(&self) -> Option<String> {
    - ✅ 使用 `setup_test_config_env()` / `cleanup_test_config_env()` 辅助函数
    - **历史教训**: 曾因测试直接写入/删除真实 `state.json` 导致用户同步仓库配置反复丢失
 
+6. **平行模块复用**
+   - 新增与既有模块平行的实现时（如新增一个 session source、一个 SCM 后端），**先 Grep 相邻模块**是否已有相同 helper，再用 `pub(crate)` 提取共享，禁止逐字节复制
+   - 常见重复点：路径末段提取、系统内容过滤、JSONL 逐行解析、项目名跨平台提取、缓存扫描骨架
+
+7. **扩展点收敛**
+   - 字符串/枚举标记的分派值（如 `source` 字段）会散落在多处 match/if：label、目录名、过滤、扫描、显示、路径判定等
+   - 新增一个值前先全局 Grep 所有分派点核对清单，避免漏改导致该值在某条路径下静默失效
+
 ## 重要注意事项
 
 ### ⚠️ 中文项目名支持
@@ -602,6 +611,14 @@ RUST_LOG=trace ccs sync
 - `parser.rs`: 测试路径解析（Unix/Windows 路径）
 - `sync/discovery.rs`: 测试项目名提取和匹配
 - `merge.rs`: 测试对话合并逻辑
+- `codex.rs` / `omp.rs`: 测试 `from_file` 解析、`display_messages`、`title` 回退链、`project_name` 跨平台/非 ASCII、坏行跳过、session_id 从文件名回退
+
+### 新功能测试覆盖（重要）
+
+- ❌ **"既有测试不回归" ≠ "新功能已验证"**：新增模块/子命令时，只跑 `cargo test` 通过不代表新代码被覆盖——既有用例可能完全不触碰新路径
+- ✅ 新增模块必须在模块内补 `#[cfg(test)]` 单元测试，对标平行模块的测试结构
+- ✅ CLI 子命令额外用真实数据实跑验证各子命令路径，覆盖缓存命中与未命中
+- ✅ 写断言前先确认代码**真实行为**，别凭假设写——回退链、默认值常有"实践中不可达"的分支，先跑一次再断言预期值
 
 ### 集成测试
 

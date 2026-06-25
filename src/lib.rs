@@ -50,6 +50,7 @@ pub mod config;
 
 /// Read-only parsing for Codex CLI session history.
 pub mod codex;
+pub mod omp;
 
 /// Conflict detection and resolution for conversation synchronization.
 ///

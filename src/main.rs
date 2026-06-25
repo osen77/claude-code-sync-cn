@@ -1,4 +1,5 @@
 mod codex;
+mod omp;
 mod config;
 mod conflict;
 mod filter;
@@ -352,7 +353,7 @@ enum Commands {
         #[arg(short, long, global = true)]
         project: Option<String>,
 
-        /// Filter by session source (all, claude, codex)
+        /// Filter by session source (all, claude, codex, omp)
         #[arg(short, long, global = true, default_value = "all")]
         source: SessionSourceArg,
     },
@@ -617,6 +618,7 @@ enum SessionSourceArg {
     All,
     Claude,
     Codex,
+    Omp,
 }
 
 impl From<SessionSourceArg> for handlers::session::SessionSourceFilter {
@@ -625,6 +627,7 @@ impl From<SessionSourceArg> for handlers::session::SessionSourceFilter {
             SessionSourceArg::All => Self::All,
             SessionSourceArg::Claude => Self::Claude,
             SessionSourceArg::Codex => Self::Codex,
+            SessionSourceArg::Omp => Self::Omp,
         }
     }
 }

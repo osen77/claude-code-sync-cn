@@ -294,11 +294,11 @@ fn session_id_from_filename(path: &Path) -> Option<String> {
     stem.rsplit('-').next().map(|s| s.to_string())
 }
 
-fn last_path_component(path: &str) -> Option<&str> {
+pub(crate) fn last_path_component(path: &str) -> Option<&str> {
     path.split(&['/', '\\']).filter(|s| !s.is_empty()).last()
 }
 
-fn is_system_content(text: &str) -> bool {
+pub(crate) fn is_system_content(text: &str) -> bool {
     let trimmed = text.trim_start();
     trimmed.starts_with("# AGENTS.md instructions")
         || trimmed.starts_with("<environment_context>")

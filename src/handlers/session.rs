@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use crate::codex::{
     codex_history_path, codex_sessions_dir, load_codex_history_titles, CodexSession,
 };
+use crate::omp::{omp_sessions_dir, OmpSession};
 use crate::config::ConfigManager;
 use crate::filter::{ConfigSyncSettings, FilterConfig};
 use crate::parser::ConversationSession;
@@ -30,6 +31,7 @@ pub enum SessionSourceFilter {
     All,
     Claude,
     Codex,
+    Omp,
 }
 
 impl SessionSourceFilter {
@@ -40,12 +42,17 @@ impl SessionSourceFilter {
     fn includes_codex(self) -> bool {
         matches!(self, Self::All | Self::Codex)
     }
+
+    fn includes_omp(self) -> bool {
+        matches!(self, Self::All | Self::Omp)
+    }
 }
 
 fn source_label(source: &str) -> &str {
     match source {
         "claude" => "CC",
         "codex" => "CX",
+        "omp" => "OM",
         _ => "??",
     }
 }
@@ -53,6 +60,7 @@ fn source_label(source: &str) -> &str {
 fn memory_dir_name_for_source(source: &str) -> &'static str {
     match source {
         "codex" => ".memory",
+        "omp" => ".memory",
         _ => "memory",
     }
 }
@@ -195,6 +203,43 @@ impl SessionSummary {
                     session
                         .file_path
                         .parent()
+                        .map(Path::to_path_buf)
+                        .unwrap_or_default()
+                }),
+            file_path: session.file_path.clone(),
+            message_count: user_count + assistant_count,
+            user_message_count: user_count,
+            assistant_message_count: assistant_count,
+            first_timestamp: session.first_timestamp(),
+            last_activity: session.latest_timestamp(),
+            file_size,
+        }
+    }
+
+    /// Create a SessionSummary from an OMP session.
+    pub fn from_omp_session(session: &OmpSession, project_name: &str) -> Self {
+        let file_size = fs::metadata(&session.file_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+        let messages = session.display_messages();
+        let user_count = messages.iter().filter(|m| m.role == "user").count();
+        let assistant_count = messages.iter().filter(|m| m.role == "assistant").count();
+        let title = session.title_from_messages(&messages);
+
+        SessionSummary {
+            source: "omp".to_string(),
+            session_id: session.session_id.clone(),
+            title,
+            project_name: project_name.to_string(),
+            project_dir: session
+                .cwd
+                .as_deref()
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    session
+                        .file_path
+                        .parent()
+                        .and_then(|p| p.parent())
                         .map(Path::to_path_buf)
                         .unwrap_or_default()
                 }),
@@ -426,6 +471,10 @@ fn scan_all_session_summaries(
         scan_codex_summaries_cached(&mut cache, &mut seen_paths, &mut summaries, project_filter)?;
     }
 
+    if source.includes_omp() {
+        scan_omp_summaries_cached(&mut cache, &mut seen_paths, &mut summaries, project_filter)?;
+    }
+
     // Prune stale entries and persist
     cache.retain_existing(&seen_paths);
     cache.save(&config_dir);
@@ -640,6 +689,83 @@ fn scan_codex_summaries_cached(
     Ok(())
 }
 
+/// Scan OMP sessions with index cache.
+fn scan_omp_summaries_cached(
+    cache: &mut SessionIndexCache,
+    seen_paths: &mut std::collections::HashSet<String>,
+    summaries: &mut Vec<SessionSummary>,
+    project_filter: Option<&str>,
+) -> Result<()> {
+    use walkdir::WalkDir;
+
+    let sessions_dir = omp_sessions_dir()?;
+    if !sessions_dir.exists() {
+        return Ok(());
+    }
+
+    for file_entry in WalkDir::new(&sessions_dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let file_path = file_entry.path();
+        if file_path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+
+        let meta = match fs::metadata(file_path) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        let file_size = meta.len();
+        let mtime = mtime_secs(&meta).unwrap_or(0);
+        let path_key = file_path.to_string_lossy().to_string();
+        seen_paths.insert(path_key.clone());
+
+        let summary_opt = if let Some(summary) =
+            cache.lookup(&path_key, file_path, file_size, mtime)
+        {
+            Some(summary)
+        } else {
+            match OmpSession::from_file(file_path) {
+                Ok(session) => {
+                    let project_name = session.project_name().unwrap_or_else(|| {
+                        // Derive from parent directory of parent (project dir)
+                        file_path
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("omp")
+                            .to_string()
+                    });
+                    let summary = SessionSummary::from_omp_session(&session, &project_name);
+                    cache.insert(path_key, file_size, mtime, &summary);
+                    Some(summary)
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Failed to parse OMP session {}: {}",
+                        file_path.display(),
+                        e
+                    );
+                    None
+                }
+            }
+        };
+
+        if let Some(summary) = summary_opt {
+            if project_filter.is_some_and(|name| summary.project_name != name) {
+                continue;
+            }
+            if is_valid_session_summary(&summary) {
+                summaries.push(summary);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Get filtered (invalid) sessions for cleanup
 pub fn get_filtered_sessions(project: &ProjectSummary) -> Result<Vec<SessionSummary>> {
     let filter = FilterConfig::no_size_limit();
@@ -741,8 +867,8 @@ pub fn delete_session(file_path: &Path) -> Result<()> {
 /// Returns `None` when the session is not under `~/.claude/projects/`
 /// (e.g. Codex sessions, which are not synced and have no repo representation).
 fn repo_relative_path(session: &SessionSummary, filter: &FilterConfig) -> Option<PathBuf> {
-    // Codex sessions live outside ~/.claude/projects/ and are not synced.
-    if session.source == "codex" {
+    // Codex and OMP sessions live outside ~/.claude/projects/ and are not synced.
+    if session.source == "codex" || session.source == "omp" {
         return None;
     }
 
@@ -2205,7 +2331,7 @@ pub fn handle_session_overview(
         return Ok(());
     }
 
-    let mut overviews = Vec::new();
+    let mut overviews: Vec<ProjectOverview> = Vec::new();
     let total_sessions = sessions.len();
 
     let mut groups: Vec<(String, Vec<SessionSummary>)> = Vec::new();
@@ -2234,6 +2360,12 @@ pub fn handle_session_overview(
                 project_sessions
                     .iter()
                     .find(|s| s.source == "codex" && !s.project_dir.as_os_str().is_empty())
+                    .map(|s| s.project_dir.display().to_string())
+            })
+            .or_else(|| {
+                project_sessions
+                    .iter()
+                    .find(|s| s.source == "omp" && !s.project_dir.as_os_str().is_empty())
                     .map(|s| s.project_dir.display().to_string())
             });
 
@@ -2374,7 +2506,7 @@ pub fn handle_session_show(
 
     if let Some(session) = sessions.iter().find(|s| s.session_id == session_id) {
         // If no drill-down flags and not json, use interactive view
-        if session.source == "claude"
+        if (session.source == "claude" || session.source == "omp")
             && tail.is_none()
             && head.is_none()
             && around.is_none()
@@ -2668,6 +2800,23 @@ fn collect_display_messages_for_summary(
             .collect();
     }
 
+    if session.source == "omp" {
+        let Ok(conv) = OmpSession::from_file(&session.file_path) else {
+            return Vec::new();
+        };
+        return conv
+            .display_messages()
+            .into_iter()
+            .enumerate()
+            .map(|(idx, message)| DisplayMessage {
+                index: idx + 1,
+                role: message.role,
+                timestamp: message.timestamp,
+                content: message.content,
+            })
+            .collect();
+    }
+
     ConversationSession::from_file(&session.file_path)
         .map(|conv| collect_display_messages(&conv, full_content))
         .unwrap_or_default()
@@ -2684,6 +2833,26 @@ fn extract_recent_messages_for_summary(
         };
         let mut messages: Vec<String> = conv
             .display_messages(false)
+            .into_iter()
+            .rev()
+            .filter(|m| m.role == "user")
+            .filter_map(|m| {
+                let text = m.content.replace('\n', " ");
+                let text = text.trim().to_string();
+                (text.chars().count() >= min_chars).then(|| truncate_chars(&text, 100))
+            })
+            .take(count)
+            .collect();
+        messages.reverse();
+        return messages;
+    }
+
+    if session.source == "omp" {
+        let Ok(conv) = OmpSession::from_file(&session.file_path) else {
+            return Vec::new();
+        };
+        let mut messages: Vec<String> = conv
+            .display_messages()
             .into_iter()
             .rev()
             .filter(|m| m.role == "user")
