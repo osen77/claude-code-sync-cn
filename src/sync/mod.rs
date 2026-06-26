@@ -15,7 +15,6 @@ pub use push::push_history;
 pub use remote::{remove_remote, set_remote, show_remote};
 pub use state::{MultiRepoState, RepoConfig, SyncState};
 pub use status::show_status;
-pub use tombstone::{DeleteReason, DeletionRecord, TombstoneRegistry};
 
 use anyhow::Result;
 use colored::Colorize;
