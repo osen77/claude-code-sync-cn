@@ -24,7 +24,6 @@ pub use cleanup::handle_cleanup_snapshots;
 pub use config::{handle_config_interactive, handle_config_wizard, handle_repo_selector};
 pub use config_sync::{
     handle_config_apply, handle_config_list, handle_config_push, handle_config_status,
-    ConfigSyncSettings,
 };
 pub use history::{
     handle_history_clear, handle_history_last, handle_history_list, handle_history_review,
@@ -34,7 +33,6 @@ pub use hooks::{
     handle_session_start, handle_stop,
 };
 pub use onboarding::{is_initialized, run_init_from_config, try_init_from_config};
-pub use platform_filter::{filter_for_platform, has_platform_blocks, merge_claude_md, Platform};
 pub use session::{
     handle_session_delete, handle_session_interactive, handle_session_list,
     handle_session_overview, handle_session_projects, handle_session_rename,

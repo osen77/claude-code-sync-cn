@@ -1459,12 +1459,9 @@ fn open_in_claude(session: &SessionSummary) -> Result<bool> {
         None
     };
 
-    // Build default command
-    let default_cmd = if let Some(ref path) = project_path {
-        format!("cd \"{}\" && claude --resume {}", path, session.session_id)
-    } else {
-        format!("claude --resume {}", session.session_id)
-    };
+    // Build default command. We no longer include `cd "path" &&` because we use Command::current_dir.
+    // This avoids cross-shell compatibility issues with command separators (like `&&` in PowerShell 5.1).
+    let default_cmd = format!("claude --resume {}", session.session_id);
 
     // Try to load saved command template
     let mut initial_cmd = default_cmd.clone();
@@ -1544,16 +1541,48 @@ fn open_in_claude(session: &SessionSummary) -> Result<bool> {
             // This ensures that aliases, functions (like claude-auto), and customized PATH
             // environments are properly loaded before execution.
             let status = if cfg!(target_os = "windows") {
-                std::process::Command::new("cmd")
-                    .arg("/C")
-                    .arg(&cmd)
-                    .status()
-                    .with_context(|| format!("Failed to execute command: {}", cmd))?
+                // Windows `cmd /C` has complex quoting rules. We construct a single string for execution.
+                // When we use .arg(&cmd), std::process::Command adds its own quotes around an arg with spaces,
+                // which cmd.exe fails to parse properly if the command contains internal quotes (like a path) and `&&`.
+                // Instead, using .raw_arg() allows us to pass exactly what we want without extra quotes.
+                #[cfg(target_os = "windows")]
+                use std::os::windows::process::CommandExt;
+                
+                #[cfg(target_os = "windows")]
+                let mut command = std::process::Command::new("cmd");
+                
+                #[cfg(target_os = "windows")]
+                {
+                    command.arg("/C").raw_arg(&cmd);
+                    if let Some(ref path) = project_path {
+                        command.current_dir(path);
+                    }
+                    command
+                        .status()
+                        .with_context(|| format!("Failed to execute command: {}", cmd))?
+                }
+                
+                #[cfg(not(target_os = "windows"))]
+                {
+                    // This branch should be unreachable when cfg!(target_os = "windows") is true, 
+                    // but we need it to compile on non-Windows platforms.
+                    let mut command = std::process::Command::new("cmd");
+                    command.arg("/C").arg(&cmd);
+                    if let Some(ref path) = project_path {
+                        command.current_dir(path);
+                    }
+                    command
+                        .status()
+                        .with_context(|| format!("Failed to execute command: {}", cmd))?
+                }
             } else {
                 let shell = std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string());
-                std::process::Command::new(shell)
-                    .arg("-ic")
-                    .arg(&cmd)
+                let mut command = std::process::Command::new(shell);
+                command.arg("-ic").arg(&cmd);
+                if let Some(ref path) = project_path {
+                    command.current_dir(path);
+                }
+                command
                     .status()
                     .with_context(|| format!("Failed to execute command: {}", cmd))?
             };
