@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["extract_file_hint","format_user_interaction","is_user_interaction_result","simplify_text_content","simplify_text_content_with_limit"],"struct":["ConversationEntry","ConversationSession"]};
