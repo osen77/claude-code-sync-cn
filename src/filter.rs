@@ -54,7 +54,7 @@ impl Default for ConfigSyncSettings {
             sync_claude_md: true,
             sync_hooks: false,
             sync_skills_list: true,
-            auto_apply_claude_md: true,
+            auto_apply_claude_md: false,
             push_with_config: true,
             device_name: None,
         }
