@@ -775,6 +775,6 @@ mod tests {
         assert!(settings.sync_claude_md);
         assert!(!settings.sync_hooks);
         assert!(settings.sync_skills_list);
-        assert!(settings.auto_apply_claude_md);
+        assert!(!settings.auto_apply_claude_md);
     }
 }
