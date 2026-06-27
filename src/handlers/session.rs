@@ -320,7 +320,7 @@ enum SessionMenuChoice {
 
 /// Menu choice for session actions
 enum ActionChoice {
-    OpenClaude,
+    OpenInEditor,
     ViewDetails,
     Rename,
     Delete,
@@ -1305,9 +1305,14 @@ fn show_action_menu(session: &SessionSummary) -> Result<ActionChoice> {
     println!();
 
     let is_codex = session.source == "codex";
+    let open_label = if session.source == "omp" {
+        "Open in OMP"
+    } else {
+        "Open in Claude"
+    };
     let mut options = Vec::new();
     if !is_codex {
-        options.push("Open in Claude");
+        options.push(open_label);
     }
     options.push("View details");
     if !is_codex {
@@ -1322,7 +1327,7 @@ fn show_action_menu(session: &SessionSummary) -> Result<ActionChoice> {
 
     match selection {
         Ok(selected) => match selected {
-            "Open in Claude" => Ok(ActionChoice::OpenClaude),
+            s if s == open_label => Ok(ActionChoice::OpenInEditor),
             "View details" => Ok(ActionChoice::ViewDetails),
             "Rename session" => Ok(ActionChoice::Rename),
             "Delete session" => Ok(ActionChoice::Delete),
@@ -1449,9 +1454,9 @@ fn save_user_data(data: &UserData) -> Result<()> {
     Ok(())
 }
 
-/// Open session in Claude Code by executing `claude --resume {session_id}`
-/// Returns: Ok(true) = executed command, Ok(false) = cancelled
-fn open_in_claude(session: &SessionSummary) -> Result<bool> {
+/// Open session in editor by executing `claude --resume {session_id}` or `omp --resume {session_id}`
+/// based on the session source. Returns: Ok(true) = executed command, Ok(false) = cancelled
+fn open_in_editor(session: &SessionSummary) -> Result<bool> {
     // Get project path from session's cwd field
     let project_path = if let Ok(conv) = ConversationSession::from_file(&session.file_path) {
         conv.cwd().map(|s| s.to_string())
@@ -1459,9 +1464,11 @@ fn open_in_claude(session: &SessionSummary) -> Result<bool> {
         None
     };
 
-    // Build default command. We no longer include `cd "path" &&` because we use Command::current_dir.
-    // This avoids cross-shell compatibility issues with command separators (like `&&` in PowerShell 5.1).
-    let default_cmd = format!("claude --resume {}", session.session_id);
+    // Build default command based on session source
+    let default_cmd = match session.source.as_str() {
+        "omp" => format!("omp --resume {}", session.session_id),
+        _ => format!("claude --resume {}", session.session_id),
+    };
 
     // Try to load saved command template
     let mut initial_cmd = default_cmd.clone();
@@ -1888,8 +1895,8 @@ pub fn handle_session_interactive(
                     let mut list_needs_refresh = false;
                     loop {
                         match show_action_menu(&session)? {
-                            ActionChoice::OpenClaude => {
-                                if open_in_claude(&session)? {
+                            ActionChoice::OpenInEditor => {
+                                if open_in_editor(&session)? {
                                     return Ok(());
                                 }
                             }
@@ -1931,8 +1938,8 @@ pub fn handle_session_interactive(
                                     let mut list_needs_refresh = false;
                                     loop {
                                         match show_action_menu(&session)? {
-                                            ActionChoice::OpenClaude => {
-                                                open_in_claude(&session)?;
+                                            ActionChoice::OpenInEditor => {
+                                                open_in_editor(&session)?;
                                                 return Ok(());
                                             }
                                             ActionChoice::ViewDetails => {
