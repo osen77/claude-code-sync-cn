@@ -96,6 +96,11 @@ impl ConfigManager {
         Ok(Self::config_dir()?.join("user_data.json"))
     }
 
+    /// Get the delete-unlock window state file path (delete-unlock.json)
+    pub fn delete_unlock_path() -> Result<PathBuf> {
+        Ok(Self::config_dir()?.join("delete-unlock.json"))
+    }
+
     /// Ensure the configuration directory exists
     pub fn ensure_config_dir() -> Result<PathBuf> {
         let config_dir = Self::config_dir()?;
@@ -158,6 +163,9 @@ mod tests {
 
         let log = ConfigManager::log_file_path().unwrap();
         assert!(log.to_string_lossy().contains("claude-code-sync.log"));
+
+        let unlock = ConfigManager::delete_unlock_path().unwrap();
+        assert!(unlock.to_string_lossy().contains("delete-unlock.json"));
     }
 
     #[test]
