@@ -1,5 +1,22 @@
 # 项目问题记录
 
+## 2026-07-03: 新增删除放行窗口 `ccs unlock-delete`
+
+### 问题描述
+- 用户有时用 `rm`/文件管理器/外部服务有意删除 session，但 push 保护模式会拦截，且 Stop hook 自动 push 不带 `--prune`，导致有意删除永远同步不上云。
+
+### 解决方案
+- 新增 `src/sync/delete_unlock.rs`：`config_dir/delete-unlock.json` 存到期 unix 时间戳，被动过期、无后台进程。
+- `push.rs` 新增纯函数 `decide_missing_action`，`missing_in_repo` 分支消费窗口状态：窗口生效时等价 `--prune`（不写 tombstone），打印醒目 🔓 提示；显式 `--prune` 优先且保留原文案。
+- 新增 `ccs unlock-delete [--minutes N|--off|--status]`（默认 15 分钟），开启后按中国时区展示到期时刻。
+- `is_active()` fail-safe：状态文件损坏/缺失一律回退保护，绝不误删。
+
+### 影响范围
+- 新增 `src/sync/delete_unlock.rs`、`src/handlers/unlock_delete.rs`；改 `config.rs`、`sync/mod.rs`、`sync/push.rs`、`handlers/mod.rs`、`main.rs`。
+
+### 预防措施
+- 单测覆盖：`remaining_at` 纯函数、unlock/disable/status 往返、坏文件 fail-safe、`decide_missing_action` 三态；CLI 各路径隔离实跑验证。
+
 ## 2026-06-20: 修复 Open in Claude 的环境变量与别名继承问题
 
 ### 问题描述
