@@ -357,6 +357,21 @@ enum Commands {
         #[arg(short, long, global = true, default_value = "all")]
         source: SessionSourceArg,
     },
+
+    /// Temporarily allow push to sync session deletions to the cloud
+    UnlockDelete {
+        /// Window duration in minutes (default: 15)
+        #[arg(long, default_value_t = 15)]
+        minutes: u64,
+
+        /// Close the window now
+        #[arg(long, conflicts_with = "status")]
+        off: bool,
+
+        /// Show remaining time / whether the window is active
+        #[arg(long)]
+        status: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -712,6 +727,7 @@ fn main() -> Result<()> {
     let is_setup_command = matches!(command, Commands::Setup { .. });
     let is_update_command = matches!(command, Commands::Update { .. });
     let is_uninstall_command = matches!(command, Commands::Uninstall { .. });
+    let is_unlock_delete_command = matches!(command, Commands::UnlockDelete { .. });
 
     // Run onboarding if needed (skip for commands that don't require sync repo)
     if needs_onboarding
@@ -721,6 +737,7 @@ fn main() -> Result<()> {
         && !is_setup_command
         && !is_update_command
         && !is_uninstall_command
+        && !is_unlock_delete_command
     {
         log::info!("Running onboarding flow - first time setup detected");
 
@@ -842,6 +859,13 @@ fn main() -> Result<()> {
                 prune,
                 verbosity,
             )?;
+        }
+        Commands::UnlockDelete {
+            minutes,
+            off,
+            status,
+        } => {
+            handle_unlock_delete(minutes, off, status)?;
         }
         Commands::Pull {
             fetch_remote,
