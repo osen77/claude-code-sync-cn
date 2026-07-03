@@ -30,13 +30,13 @@ fn find_rebase_conflict_files(repo_path: &Path) -> Vec<PathBuf> {
     let dirs_to_scan = vec![repo_path.to_path_buf()];
 
     for dir in dirs_to_scan {
-        scan_for_conflict_files(&dir, repo_path, &mut conflicts);
+        scan_for_conflict_files(&dir, &mut conflicts);
     }
 
     conflicts
 }
 
-fn scan_for_conflict_files(dir: &Path, base: &Path, conflicts: &mut Vec<PathBuf>) {
+fn scan_for_conflict_files(dir: &Path, conflicts: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -50,7 +50,7 @@ fn scan_for_conflict_files(dir: &Path, base: &Path, conflicts: &mut Vec<PathBuf>
                 .map(|n| n.starts_with('.'))
                 .unwrap_or(false);
             if !is_hidden {
-                scan_for_conflict_files(&path, base, conflicts);
+                scan_for_conflict_files(&path, conflicts);
             }
         } else if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
             if let Ok(content) = std::fs::read_to_string(&path) {
@@ -71,6 +71,7 @@ fn scan_for_conflict_files(dir: &Path, base: &Path, conflicts: &mut Vec<PathBuf>
 enum PushResult {
     Clean,
     Degraded { conflicts: Vec<PathBuf> },
+#[allow(dead_code)]
     NothingToPush,
 }
 
@@ -297,6 +298,7 @@ fn collect_missing_repo_sessions(
 /// - `true`: the missing sessions are force-deleted from the repo (physical
 ///   prune), which is the escape hatch for users who deliberately removed
 ///   files outside `ccs` and want the deletion propagated.
+#[allow(clippy::too_many_arguments)]
 pub fn push_history(
     commit_message: Option<&str>,
     push_remote: bool,
@@ -966,10 +968,8 @@ pub fn push_history(
         if let Some(e) = push_error {
             return Err(e);
         }
-    } else {
-        if verbosity != VerbosityLevel::Quiet {
-            println!("  {} No changes to commit", "Note:".yellow());
-        }
+    } else if verbosity != VerbosityLevel::Quiet {
+        println!("  {} No changes to commit", "Note:".yellow());
     }
 
     // ============================================================================

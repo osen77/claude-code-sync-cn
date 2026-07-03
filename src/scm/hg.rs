@@ -151,9 +151,11 @@ impl HgScm {
 
             if trimmed.starts_with('[') {
                 // If we were in paths section and need to add, do it now
-                if in_paths_section && !path_updated && url.is_some() {
-                    new_content.push_str(&format!("{} = {}\n", name, url.unwrap()));
-                    path_updated = true;
+                if in_paths_section && !path_updated {
+                    if let Some(u) = &url {
+                        new_content.push_str(&format!("{} = {}\n", name, u));
+                        path_updated = true;
+                    }
                 }
                 in_paths_section = trimmed == "[paths]";
                 if in_paths_section {
@@ -183,11 +185,13 @@ impl HgScm {
         }
 
         // If we need to add and haven't yet
-        if url.is_some() && !path_updated {
-            if !paths_section_exists {
-                new_content.push_str("\n[paths]\n");
+        if let Some(u) = &url {
+            if !path_updated {
+                if !paths_section_exists {
+                    new_content.push_str("\n[paths]\n");
+                }
+                new_content.push_str(&format!("{} = {}\n", name, u));
             }
-            new_content.push_str(&format!("{} = {}\n", name, url.unwrap()));
         }
 
         self.write_hgrc(&new_content)

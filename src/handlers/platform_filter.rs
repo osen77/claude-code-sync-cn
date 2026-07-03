@@ -47,6 +47,7 @@ impl Platform {
     }
 
     /// Parse platform from tag name
+#[allow(dead_code)]
     pub fn from_tag_name(name: &str) -> Option<Self> {
         match name.to_lowercase().as_str() {
             "macos" | "mac" | "darwin" => Some(Platform::MacOS),
@@ -76,6 +77,7 @@ static PLATFORM_BLOCK_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 /// - Removes content blocks for other platforms
 /// - Keeps content blocks for the target platform (without the tags)
 /// - Keeps all content outside platform blocks
+#[allow(dead_code)]
 pub fn filter_for_platform(content: &str, target: Platform) -> String {
     let target_names: Vec<&str> = match target {
         Platform::MacOS => vec!["macos", "mac", "darwin"],
@@ -117,6 +119,7 @@ pub fn has_platform_blocks(content: &str) -> bool {
 }
 
 /// Extract all platform blocks from content (for analysis)
+#[allow(dead_code)]
 pub fn extract_platform_blocks(content: &str) -> Vec<(Platform, String)> {
     PLATFORM_BLOCK_REGEX
         .captures_iter(content)

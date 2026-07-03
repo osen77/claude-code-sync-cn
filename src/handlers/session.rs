@@ -310,6 +310,7 @@ enum ProjectMenuChoice {
 }
 
 /// Menu choice for session selection
+#[allow(clippy::large_enum_variant)]
 enum SessionMenuChoice {
     Select(SessionSummary),
     Search,
@@ -438,7 +439,7 @@ pub fn scan_project_sessions_with_filtered(
 
     let mut valid_summaries: Vec<SessionSummary> = all_summaries
         .into_iter()
-        .filter(|s| is_valid_session_summary(s))
+        .filter(is_valid_session_summary)
         .collect();
 
     // Sort by last activity (most recent first)
@@ -1932,40 +1933,37 @@ pub fn handle_session_interactive(
                         let keyword = keyword.trim().to_string();
                         if !keyword.is_empty() {
                             let results = search_sessions(&sessions, &keyword);
-                            match show_search_results(&results, &keyword)? {
-                                SessionMenuChoice::Select(session) => {
-                                    let mut session = session;
-                                    let mut list_needs_refresh = false;
-                                    loop {
-                                        match show_action_menu(&session)? {
-                                            ActionChoice::OpenInEditor => {
-                                                open_in_editor(&session)?;
-                                                return Ok(());
+                            if let SessionMenuChoice::Select(session) = show_search_results(&results, &keyword)? {
+                                let mut session = session;
+                                let mut list_needs_refresh = false;
+                                loop {
+                                    match show_action_menu(&session)? {
+                                        ActionChoice::OpenInEditor => {
+                                            open_in_editor(&session)?;
+                                            return Ok(());
+                                        }
+                                        ActionChoice::ViewDetails => {
+                                            show_session_details(&session)?;
+                                        }
+                                        ActionChoice::Rename => {
+                                            if rename_session_interactive(&mut session)? {
+                                                list_needs_refresh = true;
                                             }
-                                            ActionChoice::ViewDetails => {
-                                                show_session_details(&session)?;
-                                            }
-                                            ActionChoice::Rename => {
-                                                if rename_session_interactive(&mut session)? {
-                                                    list_needs_refresh = true;
-                                                }
-                                            }
-                                            ActionChoice::Delete => {
-                                                if delete_session_interactive(&session)? {
-                                                    list_needs_refresh = true;
-                                                    break;
-                                                }
-                                            }
-                                            ActionChoice::Back => {
+                                        }
+                                        ActionChoice::Delete => {
+                                            if delete_session_interactive(&session)? {
+                                                list_needs_refresh = true;
                                                 break;
                                             }
                                         }
-                                    }
-                                    if list_needs_refresh {
-                                        all_sessions = scan_all_session_summaries(None, source)?;
+                                        ActionChoice::Back => {
+                                            break;
+                                        }
                                     }
                                 }
-                                _ => {}
+                                if list_needs_refresh {
+                                    all_sessions = scan_all_session_summaries(None, source)?;
+                                }
                             }
                         }
                     }
@@ -2209,8 +2207,8 @@ fn read_memory_entries(project_dir: &Path, source: &str, max_entries: usize) -> 
             let heading = line.trim_start_matches('#').trim();
             // Look ahead for the first non-empty prose line as context
             let mut body = None;
-            for j in (i + 1)..lines.len() {
-                let next = lines[j].trim();
+            for line in &lines[i + 1..] {
+                let next = line.trim();
                 if next.is_empty() {
                     continue;
                 }
@@ -2528,6 +2526,7 @@ pub fn handle_session_overview(
 }
 
 /// Show session details (non-interactive), with optional drill-down flags
+#[allow(clippy::too_many_arguments)]
 pub fn handle_session_show(
     session_id: &str,
     tail: Option<usize>,
@@ -2679,7 +2678,9 @@ struct SearchMatch {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Default)]
 enum MatchMode {
+    #[default]
     And, // 0 — sorted first
     Or,  // 1 — sorted after AND
 }
@@ -2713,11 +2714,6 @@ struct MemorySearchRoot {
     source: String,
 }
 
-impl Default for MatchMode {
-    fn default() -> Self {
-        MatchMode::And
-    }
-}
 
 /// A processed message ready for display
 struct DisplayMessage {
@@ -2920,7 +2916,7 @@ fn flush_assistant_turn(
         return;
     }
     let mut parts = Vec::new();
-    parts.extend(texts.drain(..));
+    parts.append(texts);
     if !tools.is_empty() {
         parts.push(format_tool_summary(tools));
         tools.clear();
@@ -3247,6 +3243,7 @@ fn search_sessions_full(
 }
 
 /// Handle `ccs session search` command
+#[allow(clippy::too_many_arguments)]
 pub fn handle_session_search(
     keywords: &[&str],
     project_filter: Option<&str>,
@@ -3388,8 +3385,8 @@ pub fn handle_session_search(
             if shown >= limit {
                 break;
             }
-            if multi_keyword {
-                if prev_mode.map_or(true, |m| m != &result.match_mode) {
+            if multi_keyword
+                && prev_mode != Some(&result.match_mode) {
                     let label = match result.match_mode {
                         MatchMode::And => format!("[AND] all of: {}", query_display),
                         MatchMode::Or => format!("[OR] any of: {}", query_display),
@@ -3401,7 +3398,6 @@ pub fn handle_session_search(
                     }
                     prev_mode = Some(&result.match_mode);
                 }
-            }
             let header = format!("--- {} | {} ---", result.project, result.file);
             if is_tty {
                 println!("{}", header.dimmed());
@@ -3433,8 +3429,8 @@ pub fn handle_session_search(
             if shown >= limit {
                 break;
             }
-            if multi_keyword {
-                if prev_mode.map_or(true, |m| m != &result.match_mode) {
+            if multi_keyword
+                && prev_mode != Some(&result.match_mode) {
                     let label = match result.match_mode {
                         MatchMode::And => format!("[AND] all of: {}", query_display),
                         MatchMode::Or => format!("[OR] any of: {}", query_display),
@@ -3446,7 +3442,6 @@ pub fn handle_session_search(
                     }
                     prev_mode = Some(&result.match_mode);
                 }
-            }
             let time_str = result
                 .summary
                 .last_activity
@@ -3543,7 +3538,7 @@ pub fn handle_session_delete(session_id: &str, force: bool) -> Result<()> {
                 }
             }
 
-            delete_session_with_commit(&session, DeleteReason::Explicit)?;
+            delete_session_with_commit(session, DeleteReason::Explicit)?;
             println!(
                 "{} Session deleted successfully!",
                 "SUCCESS:".green().bold()

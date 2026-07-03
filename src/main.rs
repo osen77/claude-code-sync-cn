@@ -656,14 +656,7 @@ fn main() -> Result<()> {
 
     // Background update check (non-blocking)
     // Only check if not running update command itself
-    let update_check_handle = std::thread::spawn(|| {
-        if let Some(new_version) = check_for_update_silent() {
-            // Return the version to print after command parsing
-            Some(new_version)
-        } else {
-            None
-        }
-    });
+    let update_check_handle = std::thread::spawn(check_for_update_silent);
 
     let cli = Cli::parse();
 

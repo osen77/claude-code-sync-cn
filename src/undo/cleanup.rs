@@ -60,7 +60,7 @@ pub fn cleanup_old_snapshots_with_dir(
         let entry = entry?;
         let path = entry.path();
 
-        if !path.extension().map_or(false, |ext| ext == "json") {
+        if path.extension().is_none_or(|ext| ext != "json") {
             continue;
         }
 
