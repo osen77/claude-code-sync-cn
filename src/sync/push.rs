@@ -163,6 +163,29 @@ fn push_with_rebase_auto_heal(
     ))
 }
 
+/// How to handle sessions present in the sync repo but missing locally.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum MissingAction {
+    /// Keep them in the repo (accidental-loss protection).
+    Protect,
+    /// User passed `--prune`: physical sync, "Pruned N" wording.
+    PruneManual,
+    /// Delete-unlock window active: prune + 🔓 wording. Carries remaining minutes.
+    PruneUnlock(u64),
+}
+
+/// Decide the action for locally-missing sessions.
+/// Explicit `--prune` always wins over the window (and keeps the plain wording).
+pub(crate) fn decide_missing_action(prune: bool, unlock_remaining: Option<u64>) -> MissingAction {
+    if prune {
+        MissingAction::PruneManual
+    } else if let Some(secs) = unlock_remaining {
+        MissingAction::PruneUnlock(secs / 60)
+    } else {
+        MissingAction::Protect
+    }
+}
+
 /// Scan the sync repo's project dirs and return sessions that exist in the
 /// repo but are missing locally.
 ///
@@ -652,48 +675,70 @@ pub fn push_history(
         collect_missing_repo_sessions(&projects_dir, &filter, &sessions, &local_files_by_project)
     };
 
+    // Delete-unlock window: when active, treat locally-missing sessions as
+    // intentional deletions (same as --prune, no tombstone). Fail-safe: any
+    // error resolves to None → protection.
+    let unlock_remaining = crate::sync::delete_unlock::status().ok().flatten();
+
     if missing_in_repo.is_empty() {
         // Nothing missing locally — no protection or pruning needed.
-    } else if prune {
-        // Escape hatch: force-delete the missing sessions from the repo.
-        // This is the user explicitly saying "I removed these files on
-        // purpose, propagate the deletion." No tombstone is written because
-        // prune is a physical sync, not an intentional-delete registration.
-        for file_path in &missing_in_repo {
-            if let Err(e) = fs::remove_file(file_path) {
-                log::warn!("Failed to prune missing session: {}", e);
-            } else {
-                deleted_from_repo += 1;
-                log::debug!("Pruned missing session: {}", file_path.display());
+    } else {
+        match decide_missing_action(prune, unlock_remaining) {
+            MissingAction::PruneManual | MissingAction::PruneUnlock(_) => {
+                // Physical sync of the deletion. No tombstone is written —
+                // prune/window are physical syncs, not intentional-delete
+                // registrations.
+                for file_path in &missing_in_repo {
+                    if let Err(e) = fs::remove_file(file_path) {
+                        log::warn!("Failed to prune missing session: {}", e);
+                    } else {
+                        deleted_from_repo += 1;
+                        log::debug!("Pruned missing session: {}", file_path.display());
+                    }
+                }
+                if verbosity != VerbosityLevel::Quiet {
+                    match decide_missing_action(prune, unlock_remaining) {
+                        MissingAction::PruneUnlock(mins) => {
+                            println!(
+                                "  {} 删除放行窗口生效中，已同步删除 {} 个 session（剩余 {} 分钟）",
+                                "🔓".yellow(),
+                                deleted_from_repo,
+                                mins
+                            );
+                        }
+                        _ => {
+                            println!(
+                                "  {} Pruned {} missing sessions from sync repo",
+                                "✓".green(),
+                                deleted_from_repo
+                            );
+                        }
+                    }
+                }
+            }
+            MissingAction::Protect => {
+                // Protection mode: refuse to propagate the local absence. The
+                // repo keeps these sessions so they survive as a recoverable
+                // backup.
+                if verbosity != VerbosityLevel::Quiet {
+                    println!(
+                        "  {} Detected {} session(s) missing locally but present in sync repo — protected from deletion.",
+                        "⚠".yellow(),
+                        missing_in_repo.len()
+                    );
+                    println!(
+                        "    {} Use '{}' to recover them, or '{}' to force-delete.",
+                        "→".cyan(),
+                        format!("{} session restore", BINARY_NAME).cyan(),
+                        format!("{} push --prune", BINARY_NAME).cyan()
+                    );
+                }
+                log::info!(
+                    "Protected {} missing sessions from deletion (use --prune or unlock-delete to force)",
+                    missing_in_repo.len()
+                );
             }
         }
-        if verbosity != VerbosityLevel::Quiet {
-            println!(
-                "  {} Pruned {} missing sessions from sync repo",
-                "✓".green(),
-                deleted_from_repo
-            );
-        }
-    } else {
-        // Protection mode: refuse to propagate the local absence. The repo
-        // keeps these sessions so they survive as a recoverable backup.
-        if verbosity != VerbosityLevel::Quiet {
-            println!(
-                "  {} Detected {} session(s) missing locally but present in sync repo — protected from deletion.",
-                "⚠".yellow(),
-                missing_in_repo.len()
-            );
-            println!(
-                "    {} Use '{}' to recover them, or '{}' to force-delete.",
-                "→".cyan(),
-                format!("{} session restore", BINARY_NAME).cyan(),
-                format!("{} push --prune", BINARY_NAME).cyan()
-            );
-        }
-        log::info!(
-            "Protected {} missing sessions from deletion (use --prune to force)",
-            missing_in_repo.len()
-        );
     }
 
     // ============================================================================
@@ -1132,5 +1177,31 @@ mod push_auto_heal_tests {
             "should skip .git but find conflict in projects dir"
         );
         assert!(conflicts[0].ends_with("session.jsonl"));
+    }
+
+    #[test]
+    fn test_decide_missing_action_protect() {
+        assert_eq!(decide_missing_action(false, None), MissingAction::Protect);
+    }
+
+    #[test]
+    fn test_decide_missing_action_manual_prune_wins_over_window() {
+        assert_eq!(decide_missing_action(true, None), MissingAction::PruneManual);
+        assert_eq!(
+            decide_missing_action(true, Some(600)),
+            MissingAction::PruneManual
+        );
+    }
+
+    #[test]
+    fn test_decide_missing_action_window_prune_reports_minutes() {
+        assert_eq!(
+            decide_missing_action(false, Some(600)),
+            MissingAction::PruneUnlock(10)
+        );
+        assert_eq!(
+            decide_missing_action(false, Some(59)),
+            MissingAction::PruneUnlock(0)
+        );
     }
 }
