@@ -401,6 +401,36 @@ pub fn title(&self) -> Option<String> {
 }
 ```
 
+### 10. Push 保护与删除放行 (`sync/delete_unlock.rs`, `handlers/unlock_delete.rs`)
+
+**命令**: `ccs unlock-delete`
+
+**功能**:
+保护本地已删除的 session 不被误同步到云端。默认情况下，push 会拦截删除操作。若需临时放行（如确实删除了某些 session），使用此命令开启限时窗口。
+
+**关键特性**:
+- **被动过期**: 无后台进程，到期自动恢复保护
+- **Fail-safe**: 状态文件损坏/缺失一律回退保护，绝不误删
+- **自动应用**: 窗口期内所有 push（含 Stop hook 自动同步）自动应用 `--prune`，不写 tombstone
+
+**子命令**:
+```bash
+ccs unlock-delete                 # 开启放行窗口，默认 15 分钟
+ccs unlock-delete --minutes N     # 自定义时长
+ccs unlock-delete --status        # 查看剩余时间
+ccs unlock-delete --off           # 提前关闭
+```
+
+**存储**:
+- 配置文件: `config_dir/delete-unlock.json`
+- 内容: 到期 Unix 时间戳
+- 读取与判断: 纯函数 `is_active()` 对比当前时间
+
+**Push 流程集成**:
+- 新增纯函数 `decide_missing_action`，在 `push.rs` 的 `missing_in_repo` 分支消费窗口状态
+- 窗口生效时等价 `--prune`，打印醒目 🔓 提示
+- 显式 `--prune` 参数优先且保留原文案
+
 ## 开发规范
 
 ### 代码风格
