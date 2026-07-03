@@ -90,6 +90,7 @@ pub fn status() -> Result<Option<u64>> {
 
 /// Fail-safe active check for push consumption. ANY error (missing/corrupt/
 /// unreadable state) resolves to `false` so push falls back to protection.
+#[allow(dead_code)]
 pub fn is_active() -> bool {
     matches!(status(), Ok(Some(_)))
 }

@@ -288,7 +288,7 @@ impl ConversationSession {
             .and_then(|cwd| {
                 // Split by both / and \ to handle cross-platform paths
                 // Take the last non-empty component
-                cwd.split(&['/', '\\']).filter(|s| !s.is_empty()).last()
+                cwd.split(&['/', '\\']).rfind(|s| !s.is_empty())
             })
     }
 
@@ -606,7 +606,7 @@ impl ConversationSession {
 }
 
 /// Extract file basename hint from a tool_use block's input.file_path.
-fn extract_file_hint<'a>(block: &'a Value) -> Option<&'a str> {
+fn extract_file_hint(block: &Value) -> Option<&str> {
     block
         .get("input")
         .and_then(|inp| inp.get("file_path"))

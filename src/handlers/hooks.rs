@@ -343,9 +343,7 @@ pub fn handle_new_project_check() -> Result<()> {
 
     // Extract project name from cwd (handle both Unix and Windows paths)
     let project_name = cwd
-        .split(&['/', '\\'])
-        .filter(|s| !s.is_empty())
-        .last()
+        .split(&['/', '\\']).rfind(|s| !s.is_empty())
         .unwrap_or("unknown");
 
     let claude_dir = match claude_projects_dir() {

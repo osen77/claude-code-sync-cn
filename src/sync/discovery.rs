@@ -170,7 +170,7 @@ pub fn find_local_project_by_name(
     let matches_from_dir: Vec<PathBuf> = entries
         .iter()
         .filter(|e| {
-            e.file_name().to_str().map_or(false, |name| {
+            e.file_name().to_str().is_some_and(|name| {
                 !name.ends_with('-') && extract_project_name(name) == project_name
             })
         })

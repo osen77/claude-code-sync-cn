@@ -184,6 +184,7 @@ pub fn codex_history_path() -> Result<PathBuf> {
     Ok(home.join(".codex").join("history.jsonl"))
 }
 
+#[allow(dead_code)]
 pub fn discover_codex_sessions(base_path: &Path) -> Result<Vec<CodexSession>> {
     if !base_path.exists() {
         return Ok(Vec::new());
@@ -205,7 +206,8 @@ pub fn discover_codex_sessions(base_path: &Path) -> Result<Vec<CodexSession>> {
         }
     }
 
-    sessions.sort_by(|a, b| b.latest_timestamp().cmp(&a.latest_timestamp()));
+    sessions.sort_by_key(|s| s.latest_timestamp());
+    sessions.reverse();
     Ok(sessions)
 }
 
@@ -295,7 +297,7 @@ fn session_id_from_filename(path: &Path) -> Option<String> {
 }
 
 pub(crate) fn last_path_component(path: &str) -> Option<&str> {
-    path.split(&['/', '\\']).filter(|s| !s.is_empty()).last()
+    path.split(&['/', '\\']).rfind(|s| !s.is_empty())
 }
 
 pub(crate) fn is_system_content(text: &str) -> bool {

@@ -197,6 +197,7 @@ impl OmpSession {
         messages
     }
 
+#[allow(dead_code)]
     pub fn title(&self) -> String {
         self.title_from_messages(&self.display_messages())
     }
@@ -252,6 +253,7 @@ pub fn omp_sessions_dir() -> Result<PathBuf> {
     Ok(home.join(".omp").join("agent").join("sessions"))
 }
 
+#[allow(dead_code)]
 pub fn discover_omp_sessions(base_path: &Path) -> Result<Vec<OmpSession>> {
     if !base_path.exists() {
         return Ok(Vec::new());
@@ -273,7 +275,8 @@ pub fn discover_omp_sessions(base_path: &Path) -> Result<Vec<OmpSession>> {
         }
     }
 
-    sessions.sort_by(|a, b| b.latest_timestamp().cmp(&a.latest_timestamp()));
+    sessions.sort_by_key(|s| s.latest_timestamp());
+    sessions.reverse();
     Ok(sessions)
 }
 

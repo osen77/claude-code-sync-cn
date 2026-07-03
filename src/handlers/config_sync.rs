@@ -443,7 +443,7 @@ pub fn handle_config_apply(
             if !skills_list.skills.is_empty() {
                 println!();
                 println!("{}", "Skills 安装命令:".cyan());
-                for (_name, url) in &skills_list.skills {
+                for url in skills_list.skills.values() {
                     println!("  claude skill install {}", url);
                 }
             }
@@ -622,6 +622,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// Find the most recently updated device config (excluding current device)
+#[allow(dead_code)]
 pub fn find_latest_device_config(sync_repo: &Path, current_device: &str) -> Option<String> {
     find_latest_device_config_with_time(sync_repo, current_device).map(|(name, _)| name)
 }

@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use colored::Colorize;
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::Path;
 use std::process::Command;
 
 use crate::BINARY_NAME;
@@ -175,7 +175,7 @@ fn get_asset_name() -> Result<String> {
 }
 
 /// Download a file using curl
-fn download_file(url: &str, dest: &PathBuf) -> Result<()> {
+fn download_file(url: &str, dest: &Path) -> Result<()> {
     println!("{}", format!("   {}", url).cyan());
 
     let status = Command::new("curl")

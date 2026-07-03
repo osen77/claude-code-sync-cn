@@ -182,11 +182,13 @@ impl TombstoneRegistry {
     }
 
     /// Convenience alias for [`contains`].
+#[allow(dead_code)]
     pub fn is_deleted(&self, session_id: &str) -> bool {
         self.contains(session_id)
     }
 
     /// Number of records held.
+#[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.records.len()
     }

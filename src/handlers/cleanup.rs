@@ -64,24 +64,20 @@ pub fn handle_cleanup_snapshots(
         if !dry_run && deleted_count > 0 {
             println!("Deleted {} snapshots", deleted_count);
         }
-    } else {
-        if dry_run {
-            if deleted_count > 0 {
-                println!(
-                    "{} {} snapshots would be deleted",
-                    "✓".green(),
-                    deleted_count
-                );
-            } else {
-                println!("{}", "No snapshots to delete".dimmed());
-            }
+    } else if dry_run {
+        if deleted_count > 0 {
+            println!(
+                "{} {} snapshots would be deleted",
+                "✓".green(),
+                deleted_count
+            );
         } else {
-            if deleted_count > 0 {
-                println!("{} Deleted {} old snapshots", "✓".green(), deleted_count);
-            } else {
-                println!("{}", "No old snapshots to delete".dimmed());
-            }
+            println!("{}", "No snapshots to delete".dimmed());
         }
+    } else if deleted_count > 0 {
+        println!("{} Deleted {} old snapshots", "✓".green(), deleted_count);
+    } else {
+        println!("{}", "No old snapshots to delete".dimmed());
     }
 
     Ok(())
@@ -110,7 +106,7 @@ fn show_snapshot_details(
         let entry = entry?;
         let path = entry.path();
 
-        if !path.extension().map_or(false, |ext| ext == "json") {
+        if path.extension().is_none_or(|ext| ext != "json") {
             continue;
         }
 

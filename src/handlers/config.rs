@@ -452,12 +452,9 @@ fn display_config_summary(config: &FilterConfig) {
     );
 
     println!(
-        "  {} {}",
+        "  {} {:.1} MB",
         "Max file size:".cyan(),
-        format!(
-            "{:.1} MB",
-            config.max_file_size_bytes as f64 / (1024.0 * 1024.0)
-        )
+        config.max_file_size_bytes as f64 / (1024.0 * 1024.0)
     );
 
     println!(

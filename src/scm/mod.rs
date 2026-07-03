@@ -120,6 +120,7 @@ pub trait Scm: Send + Sync {
     }
 
     /// Continue an in-progress rebase.
+#[allow(dead_code)]
     fn rebase_continue(&self) -> Result<RebaseOutcome> {
         Err(anyhow!(
             "rebase continue is not supported by this SCM backend"
