@@ -41,10 +41,22 @@ fn state_path() -> Result<PathBuf> {
     ConfigManager::delete_unlock_path()
 }
 
+/// Compute the expiry timestamp for a `minutes`-long window starting at `now`.
+/// Fail-closed on the clock-error sentinel (`u64::MAX` from `now_secs`): refuse
+/// to open the window instead of writing a permanent deadline that would leave
+/// protection off forever (对齐读路径的 fail-closed，绝不因时钟异常永久放行).
+/// Pure function — no IO — so the guard is unit-testable without a real clock.
+fn compute_expiry(now: u64, minutes: u64) -> Result<u64> {
+    if now == u64::MAX {
+        anyhow::bail!("系统时钟异常，无法开启删除放行窗口（请检查系统时间）");
+    }
+    Ok(now.saturating_add(minutes.saturating_mul(60)))
+}
+
 /// Open (or extend) the window for `minutes`. Overwrites any existing state,
 /// so calling again simply renews the deadline. Returns the expiry unix ts.
 pub fn unlock(minutes: u64) -> Result<u64> {
-    let expires_at = now_secs().saturating_add(minutes.saturating_mul(60));
+    let expires_at = compute_expiry(now_secs(), minutes)?;
     ConfigManager::ensure_config_dir()?;
     let path = state_path()?;
     let json = serde_json::to_string(&UnlockState { expires_at })?;
@@ -113,6 +125,25 @@ mod tests {
     fn test_remaining_at_expired() {
         assert_eq!(remaining_at(100, 100), None);
         assert_eq!(remaining_at(100, 150), None);
+    }
+
+    #[test]
+    fn test_compute_expiry_normal() {
+        // 15 minutes = 900s past `now`.
+        assert_eq!(compute_expiry(1000, 15).unwrap(), 1900);
+    }
+
+    #[test]
+    fn test_compute_expiry_saturates_no_panic() {
+        // Huge --minutes must saturate rather than overflow-panic.
+        assert_eq!(compute_expiry(1000, u64::MAX).unwrap(), u64::MAX);
+    }
+
+    #[test]
+    fn test_compute_expiry_clock_error_fails_closed() {
+        // now_secs() sentinel for a clock error must refuse to open the window,
+        // never write a permanent (u64::MAX) deadline.
+        assert!(compute_expiry(u64::MAX, 15).is_err());
     }
 
     #[test]
