@@ -15,6 +15,7 @@ pub mod session;
 pub mod setup;
 pub mod undo;
 pub mod uninstall;
+pub mod unlock_delete;
 pub mod update;
 pub mod wrapper;
 
@@ -41,5 +42,6 @@ pub use session::{
 pub use setup::handle_setup;
 pub use undo::{handle_undo_pull, handle_undo_push};
 pub use uninstall::handle_uninstall;
+pub use unlock_delete::handle_unlock_delete;
 pub use update::{check_for_update_silent, handle_update, print_update_notification};
 pub use wrapper::{handle_wrapper_install, handle_wrapper_show, handle_wrapper_uninstall};
