@@ -21,7 +21,10 @@ fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
-        .unwrap_or(0)
+        // Fail-closed: on clock error, return MAX so `remaining_at` treats the
+        // window as expired rather than reporting it active with a huge
+        // remaining (宁可放行失败，绝不误删).
+        .unwrap_or(u64::MAX)
 }
 
 /// Remaining seconds until expiry, or `None` if already expired.
@@ -41,7 +44,7 @@ fn state_path() -> Result<PathBuf> {
 /// Open (or extend) the window for `minutes`. Overwrites any existing state,
 /// so calling again simply renews the deadline. Returns the expiry unix ts.
 pub fn unlock(minutes: u64) -> Result<u64> {
-    let expires_at = now_secs() + minutes * 60;
+    let expires_at = now_secs().saturating_add(minutes.saturating_mul(60));
     ConfigManager::ensure_config_dir()?;
     let path = state_path()?;
     let json = serde_json::to_string(&UnlockState { expires_at })?;
@@ -66,8 +69,10 @@ pub fn status() -> Result<Option<u64>> {
     if !path.exists() {
         return Ok(None);
     }
-    let content = std::fs::read_to_string(&path)?;
-    let state: UnlockState = serde_json::from_str(&content)?;
+    let content = std::fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read delete-unlock state: {}", path.display()))?;
+    let state: UnlockState = serde_json::from_str(&content)
+        .with_context(|| format!("Failed to parse delete-unlock state: {}", path.display()))?;
     Ok(remaining_at(state.expires_at, now_secs()))
 }
 
@@ -85,11 +90,18 @@ mod tests {
     use std::env;
     use tempfile::TempDir;
 
-    fn with_temp_config(f: impl FnOnce()) {
+    fn with_temp_config(f: impl FnOnce() + std::panic::UnwindSafe) {
+        let saved = env::var(CONFIG_DIR_ENV).ok();
         let tmp = TempDir::new().unwrap();
         env::set_var(CONFIG_DIR_ENV, tmp.path());
-        f();
-        env::remove_var(CONFIG_DIR_ENV);
+        let result = std::panic::catch_unwind(f);
+        match saved {
+            Some(v) => env::set_var(CONFIG_DIR_ENV, v),
+            None => env::remove_var(CONFIG_DIR_ENV),
+        }
+        if let Err(e) = result {
+            std::panic::resume_unwind(e);
+        }
     }
 
     #[test]
