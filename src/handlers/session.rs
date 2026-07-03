@@ -2552,8 +2552,12 @@ pub fn handle_session_show(
         }
 
         // Drill-down mode: parse and filter messages
-        // JSON or --full uses full content (no truncation); terminal uses simplified
-        let messages = collect_display_messages_for_summary(session, json || full);
+        // JSON or --full uses full content (no truncation); terminal uses simplified.
+        // --around always uses full content so its keyword matching stays consistent with
+        // `search` (which indexes full content); otherwise simplification (code-block removal
+        // + 500-char truncation) would drop keywords that search matched, misplacing the anchor.
+        let messages =
+            collect_display_messages_for_summary(session, json || full || around.is_some());
 
         if messages.is_empty() {
             if json {
@@ -2576,14 +2580,37 @@ pub fn handle_session_show(
 
         // Determine slice range
         let total = messages.len();
-        let (start, end, showing) = if let Some(keyword) = around {
-            let keyword_lower = keyword.to_lowercase();
-            let pos = messages
-                .iter()
-                .position(|m| m.content.to_lowercase().contains(&keyword_lower))
-                .unwrap_or(0);
-            let s = pos.saturating_sub(num);
-            let e = (pos + num + 1).min(total);
+
+        // --around: locate the keyword up-front. If it is not present anywhere, tell the user
+        // explicitly instead of silently falling back to the start of the session.
+        let around_range = if let Some(keyword) = around {
+            match find_around_range(&messages, keyword, num) {
+                Some(range) => Some(range),
+                None => {
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string(&serde_json::json!({
+                                "source": session.source,
+                                "session_id": session.session_id,
+                                "project": session.project_name,
+                                "title": session.title,
+                                "message_count": session.message_count,
+                                "showing": format!("around:\"{}\":{}:not-found", keyword, num),
+                                "messages": [],
+                            }))?
+                        );
+                    } else {
+                        println!("未在会话中找到关键词: {}", keyword);
+                    }
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
+
+        let (start, end, showing) = if let (Some(keyword), Some((s, e))) = (around, around_range) {
             (s, e, format!("around:\"{}\":{}", keyword, num))
         } else if let Some(n) = tail {
             let s = total.saturating_sub(n);
@@ -2721,6 +2748,22 @@ struct DisplayMessage {
     role: String,
     timestamp: Option<String>,
     content: String,
+}
+
+/// Compute the display range for `--around`: `num` messages before/after the first message
+/// whose content contains `keyword` (case-insensitive). Returns `None` when the keyword is
+/// absent — the caller reports "not found" rather than silently anchoring at the start.
+fn find_around_range(
+    messages: &[DisplayMessage],
+    keyword: &str,
+    num: usize,
+) -> Option<(usize, usize)> {
+    let keyword_lower = keyword.to_lowercase();
+    let pos = messages
+        .iter()
+        .position(|m| m.content.to_lowercase().contains(&keyword_lower))?;
+    let total = messages.len();
+    Some((pos.saturating_sub(num), (pos + num + 1).min(total)))
 }
 
 /// Collect displayable messages from a conversation.
@@ -3715,6 +3758,55 @@ fn do_restore(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_msg(index: usize, content: &str) -> DisplayMessage {
+        DisplayMessage {
+            index,
+            role: "assistant".to_string(),
+            timestamp: None,
+            content: content.to_string(),
+        }
+    }
+
+    #[test]
+    fn test_find_around_range_middle_hit() {
+        // 关键词命中中后段 -> 返回 pos 前后 num 条的区间
+        let msgs = vec![
+            make_msg(1, "开头"),
+            make_msg(2, "无关"),
+            make_msg(3, "这里有 NonFastForward 符号"),
+            make_msg(4, "无关"),
+            make_msg(5, "结尾"),
+        ];
+        // pos = 2 (0-based), num = 1 -> (1, 4)
+        assert_eq!(find_around_range(&msgs, "NonFastForward", 1), Some((1, 4)));
+    }
+
+    #[test]
+    fn test_find_around_range_case_insensitive() {
+        let msgs = vec![make_msg(1, "包含 KEYWORD 大写")];
+        assert_eq!(find_around_range(&msgs, "keyword", 3), Some((0, 1)));
+    }
+
+    #[test]
+    fn test_find_around_range_not_found_returns_none() {
+        // 关键失败：不再回退到 0，而是返回 None（由调用方提示"未找到"）
+        let msgs = vec![make_msg(1, "a"), make_msg(2, "b")];
+        assert_eq!(find_around_range(&msgs, "缺失的词", 5), None);
+    }
+
+    #[test]
+    fn test_find_around_range_boundary_saturating() {
+        let msgs = vec![
+            make_msg(1, "hit-here"),
+            make_msg(2, "x"),
+            make_msg(3, "tail-hit"),
+        ];
+        // 首条命中：start 不下溢
+        assert_eq!(find_around_range(&msgs, "hit-here", 2), Some((0, 3)));
+        // 末条命中：end 不越界（min total）
+        assert_eq!(find_around_range(&msgs, "tail-hit", 5), Some((0, 3)));
+    }
 
     #[test]
     fn test_format_relative_time() {
