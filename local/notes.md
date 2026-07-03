@@ -17,6 +17,29 @@
 ### 预防措施
 - 单测覆盖：`remaining_at` 纯函数、unlock/disable/status 往返、坏文件 fail-safe、`decide_missing_action` 三态；CLI 各路径隔离实跑验证。
 
+## 2026-07-03: 修复 `ccs session show --around` 定位不准（总从头显示）
+
+### 问题描述
+- 按标准检索流程 `session search "<词>"` 找到 session → `session show <id> --around "<词>"` 钻取上下文时，`--around` 常从会话开头显示，而非定位到关键词处，钻取失效。
+
+### 根本原因（两个缺陷叠加）
+1. **内容源不一致（主因）**：`search`（`search_sessions_full`）用 full 内容提取；`show --around`（终端默认，无 `--json`/`--full`）用 simplified 提取。simplified（`simplify_text_content`）会删除围栏代码块内容、并将每个 text block 截断到 500 字符。于是 search 命中的词若落在代码块内 / 500 字符后 / 工具输出里，在 simplified 内容中不存在。
+2. **匹配失败静默回退（放大器）**：`handle_session_show` 中 `.position(...).unwrap_or(0)` 匹配失败时回退到位置 0，且 `showing` 照常输出 `around:"kw":n`，伪装成定位成功，用户无从察觉 → 表现为"总从头"。
+- 实证：定位算法本身没问题（simplified 能命中的词如"打个新 Tag"→[14] 定位准确），问题纯在内容源与失败处理。
+
+### 解决方案
+- `--around` 强制用完整内容：`collect_display_messages_for_summary(session, json || full || around.is_some())`，与 `search` 的 index 体系对齐。
+- 抽出纯函数 `find_around_range()`，未命中返回 `None`（不再 `unwrap_or(0)`）。
+- 未命中显式提示：终端打印"未在会话中找到关键词: X"；JSON 输出 `showing` 带 `:not-found`、`messages` 为空。
+
+### 影响范围
+- `src/handlers/session.rs`（`handle_session_show` + 新增 `find_around_range`）、`src/parser.rs`（回归测试）。
+- 行为变更：`--around` 输出改为完整内容（含代码块、不截断），正是该场景所需；`--tail`/`--head`/默认视图不受影响。
+
+### 预防措施
+- 新增单测锁死根因：`test_simplified_drops_keywords_that_full_keeps`（parser.rs，证明两种提取的内容差异）+ 4 个 `find_around_range` 用例（含未命中返回 None）。
+- 教训：凡"用户输入关键词做匹配定位"的功能，匹配所用内容源必须与用户找到该词的入口（search）一致；匹配失败禁止静默回退，须显式反馈。
+
 ## 2026-06-20: 修复 Open in Claude 的环境变量与别名继承问题
 
 ### 问题描述

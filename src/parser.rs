@@ -1050,6 +1050,36 @@ mod tests {
         assert!(result.is_none());
     }
 
+    /// 回归：锁死 `--around` 定位失效的根因。
+    /// `search` 用 full 提取，`show --around`（旧终端默认）用 simplified 提取。
+    /// simplified 会删除围栏代码块内容、并将单个 text block 截断到 500 字符，
+    /// 导致 search 命中的关键词（代码块内 / 500 字符后）在 simplified 中不存在 →
+    /// `.position()` 匹配失败 → 旧代码 `unwrap_or(0)` 静默从头。
+    /// 此用例证明两种提取对同一 message 的内容差异，防止回退。
+    #[test]
+    fn test_simplified_drops_keywords_that_full_keeps() {
+        // block1: 围栏代码块内含独特 token；block2: 单行长文本，第 500 字符后含独特 token
+        let long_tail = format!("{}TailTokenZzz", "A".repeat(510));
+        let msg = serde_json::json!({
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "前导说明\n```rust\nenum E { NonFastForwardXyz }\n```\n收尾"},
+                {"type": "text", "text": long_tail},
+            ]
+        });
+
+        let simplified = ConversationSession::extract_display_content(&msg, false).unwrap();
+        let full = ConversationSession::extract_display_content_full(&msg, false).unwrap();
+
+        // 代码块内 token：simplified 丢失（被替换成 [Code: rust]），full 保留
+        assert!(!simplified.contains("NonFastForwardXyz"));
+        assert!(full.contains("NonFastForwardXyz"));
+
+        // 500 字符后 token：simplified 因截断丢失，full 保留
+        assert!(!simplified.contains("TailTokenZzz"));
+        assert!(full.contains("TailTokenZzz"));
+    }
+
     #[test]
     fn test_user_interaction_answer_detected() {
         assert!(is_user_interaction_result(
