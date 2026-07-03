@@ -453,6 +453,21 @@ ccs session restore <session-id>
 
 ---
 
+## 临时放行 session 删除
+
+默认情况下，本地缺失的 session 会被 push 保护（不同步删除到云端）。若你用文件管理器、`rm` 或外部服务有意删除了 session，希望删除同步上云：
+
+```bash
+ccs unlock-delete                 # 开启放行窗口，默认 15 分钟
+ccs unlock-delete --minutes 60    # 自定义时长
+ccs unlock-delete --status        # 查看剩余时间
+ccs unlock-delete --off           # 提前关闭
+```
+
+窗口期内的每次 push（含自动同步）都会把本地已删除的 session 同步删除到云端；到期自动恢复保护，无需手动关闭。
+
+---
+
 ## 常用命令示例
 
 ### 基本操作
