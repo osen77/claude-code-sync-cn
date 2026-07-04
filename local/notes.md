@@ -141,3 +141,34 @@
 
 ### 预防措施
 - 为后台静默命令（如自动触发的 hooks）提供更显式的非零退出和重试机制，或者向用户推送 Notification（后续可结合系统通知完善）。
+
+## 2026-07-04: 修复 Stop hook 子调用 PATH 失败导致自动同步失效
+
+### 问题描述
+- Stop hook 静默失败，`hook-debug.log` 连续出现 `Stop push failed to execute: No such file or directory (os error 2)`，对话历史未被自动推送到同步仓库。
+- 表象：`throttled-stop.sh` 每次都"成功"（退出 0）并更新节流时间戳，但实际 push 从未执行。
+
+### 根本原因（两层缺陷叠加）
+1. **spawn 用裸命令名**：`handle_stop`/`handle_session_start`/`handle_new_project_check` 三处用 `Command::new(BINARY_NAME)`（`BINARY_NAME = "ccs"`，裸名靠 PATH 解析）spawn 自身子命令。Claude Code 的 Stop hook 执行环境 PATH 受限，不含 `~/.cargo/bin`，导致 spawn 失败（`os error 2`）。
+2. **错误被吞没**：`handle_stop` 拿到 push 失败的 `Err` 后只写日志，仍返回 `Ok(())`。`throttled-stop.sh` 收到退出码 0 误判成功、更新 `/tmp/ccs-last-push`，导致 5 分钟内后续 Stop 全部被节流跳过，push 永远不会重试。
+- 注：`config_sync` 是直接函数调用（非 spawn），不受 PATH 影响——这解释了为何 00:37 hook push 失败但 config 提交成功。
+
+### 解决方案
+- 新增 helper `spawn_ccs_subcommand`：用 `std::env::current_exe()` 取当前 ccs 二进制绝对路径 spawn 子命令，完全脱离 PATH 依赖；`current_exe()` 失败时 fallback 到 `BINARY_NAME`（不劣于旧逻辑）。
+- 三处 `Command::new(BINARY_NAME)...status()` 替换为 `spawn_ccs_subcommand(...)`：`handle_new_project_check`(pull)、`handle_stop`(push)、`handle_session_start`(pull)。
+- `handle_stop` 末尾按 push 结果返回：`Ok(status.success()) → Ok(())`，其余返回 `Err`。`ccs push` 无变更时返回 `Ok`（退出 0），故不会因"无变更"误触发失败；失败时 `throttled-stop.sh` 收到非 0 → 不更新时间戳 → 下次 Stop 立即重试。
+- 单测 `spawn_ccs_subcommand_returns_result_without_panic` 验证不 panic、返回 Result（test 环境 `current_exe()` 指向 test binary，退出行为无意义可断言，真正的验证靠实跑）。
+
+### 影响范围
+- `src/handlers/hooks.rs`：新增 helper、改三处 spawn、改 `handle_stop` 错误传播、加单测。
+- 版本：0.4.8（未发版）。
+
+### 验证
+- `cargo build` / `cargo clippy -D warnings` / `cargo test`（14 passed）全绿。
+- 实跑 `ccs hook-stop`：日志从 `failed to execute` 变为 `Stop push completed: exit code exit status: 0`。
+- 实跑 `throttled-stop.sh`（清空节流）：完整链路通畅，`/tmp/ccs-last-push` 正确更新，日志 `completed`。
+
+### 预防措施
+- spawn 自身子命令一律用 `current_exe()`，禁止裸 `BINARY_NAME`（hook 环境不可假设 PATH）。
+- 后台/静默路径的错误必须传播，禁止"写日志 + 返回 Ok"——否则上游节流/重试逻辑会被误导。
+- 仍待办：`get_hooks_config()` install 时写入 settings.json 的命令字符串仍是裸 `ccs hook-*`（Claude Code 直接执行，不走 `current_exe`）；用户已手动把 Stop 指向 `throttled-stop.sh`（绝对路径）规避，SessionStart/UserPromptSubmit 未报告失败，暂不动以免扩大影响面。

@@ -13,6 +13,26 @@ use crate::BINARY_NAME;
 /// Identifiers for hooks installed by us (old name + new name)
 const HOOK_MARKERS: &[&str] = &["claude-code-sync", "ccs"];
 
+/// Spawn a ccs subcommand as a detached child process.
+///
+/// Uses `current_exe()` so the child resolves to the same binary regardless of
+/// the ambient PATH — important in Claude Code hook environments where PATH
+/// may not include the cargo bin directory. Falls back to the bare binary name
+/// if `current_exe()` fails (keeps old behavior, never worse).
+fn spawn_ccs_subcommand(
+    subcommand: &str,
+    args: &[&str],
+) -> std::io::Result<std::process::ExitStatus> {
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from(BINARY_NAME));
+    std::process::Command::new(exe)
+        .arg(subcommand)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+}
+
 /// Get the path to Claude settings file
 fn claude_settings_path() -> Result<PathBuf> {
     let home = dirs::home_dir().context("Cannot find home directory")?;
@@ -358,14 +378,9 @@ pub fn handle_new_project_check() -> Result<()> {
         // This is a new project, try to pull from remote
         log::info!("New project detected: {}", project_name);
 
-        // Execute pull quietly - we use a separate process to avoid blocking
-        // and to ensure clean error handling
-        let pull_result = std::process::Command::new(BINARY_NAME)
-            .args(["pull", "--quiet"])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
+        // Spawn via current_exe() so it works even when the hook environment
+        // PATH does not include the cargo bin directory.
+        let pull_result = spawn_ccs_subcommand("pull", &["--quiet"]);
 
         if pull_result.is_ok() {
             // Check if we now have a local project after pull
@@ -410,13 +425,10 @@ pub fn handle_stop() -> Result<()> {
     // Read hook input from stdin (required by Claude Code hooks)
     let _input: Value = serde_json::from_reader(std::io::stdin()).unwrap_or(json!({}));
 
-    // Execute push quietly after each response
-    let push_result = std::process::Command::new(BINARY_NAME)
-        .args(["push", "--quiet"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    // Execute push quietly after each response.
+    // Spawn via current_exe() so it works even when the hook environment
+    // PATH does not include the cargo bin directory.
+    let push_result = spawn_ccs_subcommand("push", &["--quiet"]);
 
     // Log result
     if let Ok(home) = std::env::var("HOME") {
@@ -450,14 +462,31 @@ pub fn handle_stop() -> Result<()> {
         }
     }
 
-    // Also sync config if enabled
+    // Also sync config if enabled. config_sync is a direct function call (not a
+    // spawned subprocess), so it is unaffected by PATH issues that can break
+    // the push above — keep running it regardless of push outcome.
     if let Ok(filter) = crate::filter::FilterConfig::load() {
         if filter.config_sync.enabled {
             let _ = super::config_sync::handle_config_push(&filter.config_sync);
         }
     }
 
-    Ok(())
+    // Propagate push failure so the throttled-stop.sh wrapper sees a non-zero
+    // exit code and does NOT advance the throttle timestamp — otherwise the
+    // next 5 minutes of Stop hooks would be silently skipped despite the push
+    // never succeeding. `ccs push` returns Ok (exit 0) when there is nothing to
+    // push, so this only fires on real failure.
+    match push_result {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => {
+            log::warn!("ccs push exited with {}", status);
+            Err(anyhow::anyhow!("ccs push exited with {}", status))
+        }
+        Err(e) => {
+            log::warn!("ccs push failed to execute: {}", e);
+            Err(anyhow::anyhow!("ccs push failed to execute: {}", e))
+        }
+    }
 }
 
 /// Debounce interval for SessionStart pull (in seconds)
@@ -614,13 +643,10 @@ pub fn handle_session_start() -> Result<()> {
         let _ = std::fs::write(ts_path, "");
     }
 
-    // Execute pull quietly (first start confirmed)
-    let pull_result = std::process::Command::new(BINARY_NAME)
-        .args(["pull", "--quiet"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
+    // Execute pull quietly (first start confirmed).
+    // Spawn via current_exe() so it works even when the hook environment
+    // PATH does not include the cargo bin directory.
+    let pull_result = spawn_ccs_subcommand("pull", &["--quiet"]);
 
     // Log result
     if let Ok(home) = std::env::var("HOME") {
@@ -698,5 +724,20 @@ pub fn are_hooks_installed() -> Result<bool> {
         Ok(has_session_start && has_stop && has_prompt_submit)
     } else {
         Ok(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `spawn_ccs_subcommand` must never panic and always return a Result.
+    /// In tests, `current_exe()` points at the test binary, which treats an
+    /// unknown subcommand as a test filter and exits 0 — so we cannot assert a
+    /// specific exit status here. The real verification happens by triggering
+    /// the Stop hook and reading hook-debug.log.
+    #[test]
+    fn spawn_ccs_subcommand_returns_result_without_panic() {
+        let _ = spawn_ccs_subcommand("__definitely_not_a_subcommand__", &[]);
     }
 }
