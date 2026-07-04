@@ -30,6 +30,9 @@ Thumbs.db
 .claude-code-sync-test/
 test-backup/
 
+# Local session artifacts (plans, agent scratch)
+.claude/
+
 # Build artifacts
 *.o
 *.so
