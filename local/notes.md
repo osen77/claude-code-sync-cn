@@ -172,3 +172,34 @@
 - spawn 自身子命令一律用 `current_exe()`，禁止裸 `BINARY_NAME`（hook 环境不可假设 PATH）。
 - 后台/静默路径的错误必须传播，禁止"写日志 + 返回 Ok"——否则上游节流/重试逻辑会被误导。
 - 仍待办：`get_hooks_config()` install 时写入 settings.json 的命令字符串仍是裸 `ccs hook-*`（Claude Code 直接执行，不走 `current_exe`）；用户已手动把 Stop 指向 `throttled-stop.sh`（绝对路径）规避，SessionStart/UserPromptSubmit 未报告失败，暂不动以免扩大影响面。
+
+## 2026-07-05: 根治 hook 配置 command not found: ccs（写入侧）
+
+### 问题描述
+- `~/.claude/settings.json` 中由 `ccs hooks install` 写入的 SessionStart/UserPromptSubmit 命令为裸 `ccs hook-session-start` / `ccs hook-new-project-check`。Claude Code 用受限 PATH 的 shell 执行 hook（不含 `~/.cargo/bin`），报 `command not found: ccs`，hook 静默失效。
+- 与 2026-07-04 是同源 PATH 假设问题，但发生在「配置写入」侧而非「spawn」侧：前者修了运行时 spawn，本次修 install 写入 settings.json 的命令字符串。
+
+### 根本原因
+- `get_hooks_config()` 拼命令字符串时直接用 `BINARY_NAME`（裸名 `"ccs"`），依赖执行环境 PATH。
+- install 流程只 append 不刷新：旧设备已存在的裸命令 hook 不会被升级为绝对路径，重装也修不好。
+
+### 解决方案
+- 新增 `hook_command(subcommand: &str) -> String`：用 `std::env::current_exe()` 取绝对路径，双引号包裹（应对含空格路径，Windows/macOS 通用），失败时 fallback `BINARY_NAME`（不劣于旧逻辑）。
+- `get_hooks_config()` 三处（session-start / stop / new-project-check）改用 `hook_command()`。
+- 新增 `update_our_hook_command(existing: &mut [Value], subcommand, new_command) -> bool`：在 install 时对已存在的「我们的 hook」（marker 为 cmd 含 `ccs`/`claude-code-sync` 且含对应 subcommand）就地刷新 command 字符串为绝对路径，**保护**用户自定义 wrapper（如 `throttled-stop.sh`，不命中 marker 不动）。
+- `handle_hooks_install` 合并循环：subcommand 提取从 `split_whitespace().nth(1)` 改为 `find(|t| t.starts_with("hook-"))`（兼容带空格的引号路径）；命中刷新打印 `↻ refreshed (absolute path)`，否则 append。
+- 4 个单测：`hook_command_is_quoted_absolute_path`、`update_our_hook_command_refreshes_bare_command`、`update_our_hook_command_ignores_custom_wrapper`、`subcommand_extracted_from_quoted_spaced_path`。
+
+### 影响范围
+- `src/handlers/hooks.rs`：`hook_command`、`update_our_hook_command`、`get_hooks_config`、`handle_hooks_install`、4 单测。
+- 版本：0.4.8 → 0.4.9（未发版）。
+
+### 验证
+- `cargo test`（hooks 模块 5 passed，全量 270+ passed）、`cargo clippy -D warnings`、`cargo fmt --check`（hooks.rs）全绿。
+- 端到端：`CLAUDE_CODE_SYNC_CONFIG_DIR` 复用真实 config + 隔离 HOME 跑 `ccs hooks install`，确认 settings.json 中裸命令被刷新为 `"/Users/mini/.cargo/bin/ccs" hook-*` 形式，`throttled-stop.sh` 不被触碰。
+- 当前 Mac `~/.claude/settings.json` 已手动标准化（备份 `settings.json.ccs-bak-20260705`），仅改 SessionStart/UserPromptSubmit 两行，Stop 保持 `throttled-stop.sh`。
+
+### 预防措施
+- 配置写入的命令字符串一律走 `hook_command()`（current_exe 绝对路径 + 引号），禁止裸 `BINARY_NAME`。与 2026-07-04 的 spawn 侧规则合并为「hook 环境不可假设 PATH，无论 spawn 还是写入」。
+- install 必须自愈：升级既有配置，不能只 append。自定义 wrapper 用 marker 精准识别保护。
+- 待办（非阻塞）：`throttled-stop.sh` 用 `/tmp` 状态文件（Windows 无 `/tmp`）；onboarding `dialoguer` 在非 TTY 崩溃。均与本次 PATH 修复无关，列入后续排查。

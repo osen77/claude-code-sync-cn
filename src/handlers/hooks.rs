@@ -39,6 +39,25 @@ fn claude_settings_path() -> Result<PathBuf> {
     Ok(home.join(".claude").join("settings.json"))
 }
 
+/// Build the command string written into settings.json for a hook subcommand.
+///
+/// Claude Code runs this string via its own shell, whose PATH does NOT include
+/// the cargo bin directory — so a bare `ccs` fails with "command not found".
+/// We resolve the running binary's absolute path at install time via
+/// `current_exe()`; each device writes its own real path (hooks are not synced
+/// across devices — `config_sync` strips the `hooks` field). The path is always
+/// double-quoted so one containing spaces (e.g. Windows
+/// `C:\Users\<name with space>\.cargo\bin\ccs.exe`) survives shell
+/// word-splitting on both sh and cmd. Falls back to the bare binary name if
+/// `current_exe()` fails (no worse than the old behavior).
+fn hook_command(subcommand: &str) -> String {
+    let exe = std::env::current_exe()
+        .ok()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| BINARY_NAME.to_string());
+    format!("\"{}\" {}", exe, subcommand)
+}
+
 /// Get the hooks configuration to install
 fn get_hooks_config() -> Value {
     json!({
@@ -47,7 +66,7 @@ fn get_hooks_config() -> Value {
                 "hooks": [
                     {
                         "type": "command",
-                        "command": format!("{} hook-session-start", BINARY_NAME),
+                        "command": hook_command("hook-session-start"),
                         "timeout": 60,
                         "statusMessage": "Syncing conversation history..."
                     }
@@ -59,7 +78,7 @@ fn get_hooks_config() -> Value {
                 "hooks": [
                     {
                         "type": "command",
-                        "command": format!("{} hook-stop", BINARY_NAME),
+                        "command": hook_command("hook-stop"),
                         "timeout": 60
                     }
                 ]
@@ -70,7 +89,7 @@ fn get_hooks_config() -> Value {
                 "hooks": [
                     {
                         "type": "command",
-                        "command": format!("{} hook-new-project-check", BINARY_NAME),
+                        "command": hook_command("hook-new-project-check"),
                         "timeout": 30
                     }
                 ]
@@ -105,6 +124,34 @@ fn is_our_hook_command(cmd: &str) -> bool {
     HOOK_MARKERS.iter().any(|marker| cmd.contains(marker))
 }
 
+/// Refresh our existing hook's command string to `new_command` in place.
+///
+/// Matches precisely on our marker ("ccs" / "claude-code-sync") AND the
+/// `hook-*` subcommand, so custom user wrappers (e.g. `throttled-stop.sh`,
+/// which carries neither marker nor the subcommand) are never touched. This is
+/// what lets `hooks install` self-heal a device that was set up with an older
+/// bare `ccs hook-*` command: re-running install rewrites it to the absolute
+/// path instead of skipping. Returns true if a matching hook was updated.
+fn update_our_hook_command(existing: &mut [Value], subcommand: &str, new_command: &str) -> bool {
+    let mut updated = false;
+    for group in existing.iter_mut() {
+        if let Some(hooks) = group.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+            for hook in hooks.iter_mut() {
+                let is_ours = hook
+                    .get("command")
+                    .and_then(|c| c.as_str())
+                    .map(|cmd| is_our_hook_command(cmd) && cmd.contains(subcommand))
+                    .unwrap_or(false);
+                if is_ours {
+                    hook["command"] = json!(new_command);
+                    updated = true;
+                }
+            }
+        }
+    }
+    updated
+}
+
 /// Install hooks to ~/.claude/settings.json
 pub fn handle_hooks_install() -> Result<()> {
     let settings_path = claude_settings_path()?;
@@ -135,25 +182,37 @@ pub fn handle_hooks_install() -> Result<()> {
         let new_hooks_array = new_hooks.as_array().unwrap();
 
         if let Some(existing) = hooks_obj.get_mut(event_name) {
-            // Extract the subcommand (e.g., "hook-session-start") for precise matching
-            let subcommand = new_hooks_array
+            // The command we want in settings.json for this event (absolute path).
+            let new_command = new_hooks_array
                 .first()
                 .and_then(|g| g.get("hooks"))
                 .and_then(|h| h.as_array())
                 .and_then(|hooks| hooks.first())
                 .and_then(|h| h.get("command"))
                 .and_then(|c| c.as_str())
-                .and_then(|cmd| cmd.split_whitespace().nth(1))
                 .unwrap_or("");
-            if let Some(existing_array) = existing.as_array() {
-                if contains_our_hook(existing_array, subcommand) {
-                    println!("  {} {} hook already installed", "!".yellow(), event_name);
+            // The `hook-*` subcommand token used for precise matching. Found by
+            // prefix rather than positional index so it survives a quoted,
+            // space-containing absolute path (e.g. `"/a b/ccs" hook-stop`).
+            let subcommand = new_command
+                .split_whitespace()
+                .find(|t| t.starts_with("hook-"))
+                .unwrap_or("");
+
+            if let Some(existing_array) = existing.as_array_mut() {
+                // Self-heal: if our hook is already there, refresh its command to
+                // the absolute path instead of skipping (handles devices set up
+                // with an older bare `ccs hook-*`). Custom wrappers untouched.
+                if update_our_hook_command(existing_array, subcommand, new_command) {
+                    println!(
+                        "  {} {} hook refreshed (absolute path)",
+                        "↻".cyan(),
+                        event_name
+                    );
                     continue;
                 }
-            }
 
-            // Append our hooks to existing array
-            if let Some(existing_array) = existing.as_array_mut() {
+                // Not present yet — append our hook to the existing array.
                 for hook in new_hooks_array {
                     existing_array.push(hook.clone());
                 }
@@ -363,7 +422,8 @@ pub fn handle_new_project_check() -> Result<()> {
 
     // Extract project name from cwd (handle both Unix and Windows paths)
     let project_name = cwd
-        .split(&['/', '\\']).rfind(|s| !s.is_empty())
+        .split(&['/', '\\'])
+        .rfind(|s| !s.is_empty())
         .unwrap_or("unknown");
 
     let claude_dir = match claude_projects_dir() {
@@ -739,5 +799,69 @@ mod tests {
     #[test]
     fn spawn_ccs_subcommand_returns_result_without_panic() {
         let _ = spawn_ccs_subcommand("__definitely_not_a_subcommand__", &[]);
+    }
+
+    /// The command written to settings.json must be an absolute, double-quoted
+    /// path plus the subcommand — never a bare `ccs` (which fails in the hook
+    /// shell whose PATH excludes the cargo bin dir).
+    #[test]
+    fn hook_command_is_quoted_absolute_path() {
+        let cmd = hook_command("hook-stop");
+        assert!(cmd.starts_with('"'), "path must be quoted: {cmd}");
+        assert!(cmd.ends_with(" hook-stop"), "must carry subcommand: {cmd}");
+        // The quoted segment resolves to the running test binary's real path,
+        // which is absolute on every platform.
+        let quoted = cmd
+            .split('"')
+            .nth(1)
+            .expect("command should contain a quoted path");
+        assert!(
+            std::path::Path::new(quoted).is_absolute(),
+            "path should be absolute: {quoted}"
+        );
+    }
+
+    /// Self-heal: an existing bare `ccs hook-stop` is rewritten to the new
+    /// absolute command; a matching hook returns true.
+    #[test]
+    fn update_our_hook_command_refreshes_bare_command() {
+        let mut arr = vec![json!({
+            "hooks": [{ "type": "command", "command": "ccs hook-stop", "timeout": 60 }]
+        })];
+        let updated = update_our_hook_command(&mut arr, "hook-stop", "\"/abs/ccs\" hook-stop");
+        assert!(updated);
+        assert_eq!(arr[0]["hooks"][0]["command"], "\"/abs/ccs\" hook-stop");
+
+        // Idempotent: a second pass with the same target keeps it stable.
+        let again = update_our_hook_command(&mut arr, "hook-stop", "\"/abs/ccs\" hook-stop");
+        assert!(again);
+        assert_eq!(arr[0]["hooks"][0]["command"], "\"/abs/ccs\" hook-stop");
+    }
+
+    /// Custom user wrappers (no marker, no subcommand) must never be touched.
+    #[test]
+    fn update_our_hook_command_ignores_custom_wrapper() {
+        let mut arr = vec![json!({
+            "hooks": [{ "type": "command", "command": "~/.claude/hooks/throttled-stop.sh", "timeout": 60 }]
+        })];
+        let updated = update_our_hook_command(&mut arr, "hook-stop", "\"/abs/ccs\" hook-stop");
+        assert!(!updated, "custom wrapper should not match");
+        assert_eq!(
+            arr[0]["hooks"][0]["command"],
+            "~/.claude/hooks/throttled-stop.sh"
+        );
+    }
+
+    /// The `hook-*` subcommand token must be recoverable from a quoted,
+    /// space-containing absolute path (the fragile positional `nth(1)` failed
+    /// here). Mirrors the extraction in `handle_hooks_install`.
+    #[test]
+    fn subcommand_extracted_from_quoted_spaced_path() {
+        let cmd = "\"/a b/ccs\" hook-session-start";
+        let sub = cmd
+            .split_whitespace()
+            .find(|t| t.starts_with("hook-"))
+            .unwrap_or("");
+        assert_eq!(sub, "hook-session-start");
     }
 }
