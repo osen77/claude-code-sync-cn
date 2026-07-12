@@ -1549,20 +1549,26 @@ fn open_in_editor(session: &SessionSummary) -> Result<bool> {
             // This ensures that aliases, functions (like claude-auto), and customized PATH
             // environments are properly loaded before execution.
             let status = if cfg!(target_os = "windows") {
-                // Windows `cmd /C` has complex quoting rules. We construct a single string for execution.
-                // When we use .arg(&cmd), std::process::Command adds its own quotes around an arg with spaces,
-                // which cmd.exe fails to parse properly if the command contains internal quotes (like a path) and `&&`.
-                // Instead, using .raw_arg() allows us to pass exactly what we want without extra quotes.
+                // PowerShell profile scripts define user aliases/functions (e.g. a custom
+                // `cc-auto` wrapper), so we invoke `powershell -Command` instead of `cmd /C` —
+                // cmd.exe has no knowledge of the user's PowerShell profile and fails with
+                // "not recognized" for anything defined only as a PowerShell alias/function.
+                // We use raw_arg() so std::process::Command doesn't add its own quotes around
+                // the command string, which would otherwise break paths/`&&` chains.
                 #[cfg(target_os = "windows")]
                 use std::os::windows::process::CommandExt;
                 
                 #[cfg(target_os = "windows")]
-                let mut command = std::process::Command::new("cmd");
+                let mut command = std::process::Command::new("powershell");
                 
                 #[cfg(target_os = "windows")]
                 {
-                    command.arg("/C").raw_arg(&cmd);
-                    if let Some(ref path) = project_path {
+                    command
+                        .arg("-NoLogo")
+                        .arg("-NonInteractive")
+                        .arg("-Command")
+                        .raw_arg(&cmd);
+                    if let Some(path) = &project_path {
                         command.current_dir(path);
                     }
                     command
@@ -1574,9 +1580,13 @@ fn open_in_editor(session: &SessionSummary) -> Result<bool> {
                 {
                     // This branch should be unreachable when cfg!(target_os = "windows") is true, 
                     // but we need it to compile on non-Windows platforms.
-                    let mut command = std::process::Command::new("cmd");
-                    command.arg("/C").arg(&cmd);
-                    if let Some(ref path) = project_path {
+                    let mut command = std::process::Command::new("powershell");
+                    command
+                        .arg("-NoLogo")
+                        .arg("-NonInteractive")
+                        .arg("-Command")
+                        .arg(&cmd);
+                    if let Some(path) = &project_path {
                         command.current_dir(path);
                     }
                     command
