@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"constant":["CACHE_VERSION"],"fn":["cache_path","mtime_secs"],"struct":["CachedEntry","SessionIndexCache"]};

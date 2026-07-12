@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["default_lfs_patterns","default_max_file_size","default_scm_backend","default_sync_subdirectory","default_true","default_use_project_name_only","get_friendly_computer_name","glob_match","sanitize_device_name","show_config","update_config"],"struct":["AutoMemorySettings","ConfigSyncSettings","FilterConfig"]};
