@@ -1,5 +1,4 @@
 mod codex;
-mod omp;
 mod config;
 mod conflict;
 mod filter;
@@ -8,11 +7,14 @@ mod history;
 mod interactive_conflict;
 mod logger;
 mod merge;
+mod omp;
 mod onboarding;
 mod parser;
+mod path_security;
 mod report;
 mod scm;
 mod session_cache;
+mod session_diagnostics;
 mod sync;
 mod undo;
 
@@ -35,6 +37,14 @@ pub use claude_code_sync::BINARY_NAME;
 #[command(about = "Sync Claude Code conversation history with git repositories", long_about = None)]
 #[command(version)]
 struct Cli {
+    /// Enable debug logging for console and file output
+    #[arg(long, global = true)]
+    debug: bool,
+
+    /// Override the platform log file path
+    #[arg(long, global = true, value_name = "PATH")]
+    log_file: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -502,10 +512,6 @@ enum SessionAction {
         /// Show session IDs
         #[arg(long)]
         show_ids: bool,
-
-        /// Session source to query (default: all)
-        #[arg(long, value_enum, default_value_t = SessionSourceArg::All)]
-        source: SessionSourceArg,
     },
 
     /// Search sessions and memory files by keyword (multiple words = AND match)
@@ -536,10 +542,6 @@ enum SessionAction {
         /// Output as JSON
         #[arg(long)]
         json: bool,
-
-        /// Session source to query (default: all)
-        #[arg(long, value_enum, default_value_t = SessionSourceArg::All)]
-        source: SessionSourceArg,
     },
 
     /// Show session details (supports drill-down with --tail/--head/--around)
@@ -570,10 +572,6 @@ enum SessionAction {
         /// Show full content without truncation (default for interactive detail view)
         #[arg(long)]
         full: bool,
-
-        /// Session source to query (default: all)
-        #[arg(long, value_enum, default_value_t = SessionSourceArg::All)]
-        source: SessionSourceArg,
     },
 
     /// Rename session (change title)
@@ -602,11 +600,7 @@ enum SessionAction {
     },
 
     /// List all projects (non-interactive)
-    Projects {
-        /// Session source to query (default: all)
-        #[arg(long, value_enum, default_value_t = SessionSourceArg::All)]
-        source: SessionSourceArg,
-    },
+    Projects,
 
     /// Overview of all projects with recent session context (for agent consumption)
     Overview {
@@ -621,10 +615,6 @@ enum SessionAction {
         /// Output as JSON
         #[arg(long)]
         json: bool,
-
-        /// Session source to query (default: all)
-        #[arg(long, value_enum, default_value_t = SessionSourceArg::All)]
-        source: SessionSourceArg,
     },
 }
 
@@ -648,17 +638,24 @@ impl From<SessionSourceArg> for handlers::session::SessionSourceFilter {
 }
 
 fn main() -> Result<()> {
-    // Initialize logging (rotate log if needed, then set up logger)
-    logger::rotate_log_if_needed().ok(); // Ignore errors during log rotation
-    logger::init_logger().ok(); // Ignore errors during logger init
+    // Parse CLI arguments before initializing logging so logger options are available.
+    let cli = Cli::parse();
+    let rust_log = std::env::var("RUST_LOG").ok();
+    let logger_status = logger::init_logger_with_options(logger::LoggerOptions::new(
+        cli.debug,
+        cli.log_file.clone(),
+        rust_log.as_deref(),
+    )?)?;
+
+    if let Some(warning) = &logger_status.warning {
+        eprintln!("WARNING: {warning}");
+    }
 
     log::debug!("ccs started");
 
     // Background update check (non-blocking)
     // Only check if not running update command itself
     let update_check_handle = std::thread::spawn(check_for_update_silent);
-
-    let cli = Cli::parse();
 
     // Check if this is the update command (skip notification for update command)
     let is_update_command = matches!(cli.command, Some(Commands::Update { .. }));
@@ -934,6 +931,7 @@ fn main() -> Result<()> {
                 || lfs_patterns.is_some()
                 || scm_backend.is_some()
                 || sync_subdirectory.is_some()
+                || use_project_name_only.is_some()
                 || show
                 || interactive
                 || wizard;
@@ -1110,7 +1108,6 @@ fn main() -> Result<()> {
                 Some(SessionAction::List {
                     project: list_project,
                     show_ids,
-                    source,
                 }) => {
                     // Use subcommand project filter if provided, otherwise use global
                     let filter = list_project.as_deref().or(project.as_deref());
@@ -1124,7 +1121,6 @@ fn main() -> Result<()> {
                     limit,
                     user_only,
                     json,
-                    source,
                 }) => {
                     let filter = search_project.as_deref().or(project.as_deref());
                     let keywords: Vec<&str> = keyword.iter().map(|s| s.as_str()).collect();
@@ -1147,7 +1143,6 @@ fn main() -> Result<()> {
                     num,
                     json,
                     full,
-                    source,
                 }) => {
                     handle_session_show(
                         &session_id,
@@ -1161,22 +1156,21 @@ fn main() -> Result<()> {
                     )?;
                 }
                 Some(SessionAction::Rename { session_id, title }) => {
-                    handle_session_rename(&session_id, &title)?;
+                    handle_session_rename_with_source(&session_id, &title, source.into())?;
                 }
                 Some(SessionAction::Delete { session_id, force }) => {
-                    handle_session_delete(&session_id, force)?;
+                    handle_session_delete_with_source(&session_id, force, source.into())?;
                 }
                 Some(SessionAction::Restore { session_id }) => {
-                    handle_session_restore(session_id.as_deref())?;
+                    handle_session_restore_with_source(session_id.as_deref(), source.into())?;
                 }
-                Some(SessionAction::Projects { source }) => {
+                Some(SessionAction::Projects) => {
                     handle_session_projects(source.into())?;
                 }
                 Some(SessionAction::Overview {
                     recent,
                     since,
                     json,
-                    source,
                 }) => {
                     handle_session_overview(recent, since.as_deref(), json, source.into())?;
                 }
@@ -1185,4 +1179,147 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse_session_source(args: &[&str]) -> SessionSourceArg {
+        let cli = Cli::try_parse_from(args).expect("CLI should parse");
+        match cli.command {
+            Some(Commands::Session { source, .. }) => source,
+            _ => panic!("expected session command"),
+        }
+    }
+
+    #[test]
+    fn test_global_logger_flags_parse_before_and_after_subcommand() {
+        let before = Cli::try_parse_from([
+            "ccs",
+            "--debug",
+            "--log-file",
+            "/tmp/ccs.log",
+            "session",
+            "projects",
+        ])
+        .unwrap();
+        assert!(before.debug);
+        assert_eq!(before.log_file, Some(PathBuf::from("/tmp/ccs.log")));
+
+        let after = Cli::try_parse_from([
+            "ccs",
+            "session",
+            "projects",
+            "--debug",
+            "--log-file",
+            "/tmp/ccs.log",
+        ])
+        .unwrap();
+        assert!(after.debug);
+        assert_eq!(after.log_file, Some(PathBuf::from("/tmp/ccs.log")));
+    }
+
+    #[test]
+    fn test_session_source_before_subcommand() {
+        assert_eq!(
+            parse_session_source(&["ccs", "session", "--source", "codex", "list"]),
+            SessionSourceArg::Codex
+        );
+    }
+
+    #[test]
+    fn test_session_source_after_subcommand() {
+        assert_eq!(
+            parse_session_source(&["ccs", "session", "list", "--source", "codex"]),
+            SessionSourceArg::Codex
+        );
+    }
+
+    #[test]
+    fn test_session_source_defaults_to_all() {
+        assert_eq!(
+            parse_session_source(&["ccs", "session", "list"]),
+            SessionSourceArg::All
+        );
+    }
+
+    #[test]
+    fn test_session_source_applies_to_mutations() {
+        assert_eq!(
+            parse_session_source(&[
+                "ccs",
+                "session",
+                "--source",
+                "omp",
+                "delete",
+                "session-id",
+                "--force",
+            ]),
+            SessionSourceArg::Omp
+        );
+        assert_eq!(
+            parse_session_source(&[
+                "ccs",
+                "session",
+                "rename",
+                "session-id",
+                "new-title",
+                "--source",
+                "codex",
+            ]),
+            SessionSourceArg::Codex
+        );
+    }
+
+    fn assert_query_actions_have_no_local_source(action: SessionAction) {
+        match action {
+            SessionAction::List {
+                project: _,
+                show_ids: _,
+            } => {}
+            SessionAction::Search {
+                keyword: _,
+                project: _,
+                since: _,
+                context: _,
+                limit: _,
+                user_only: _,
+                json: _,
+            } => {}
+            SessionAction::Show {
+                session_id: _,
+                tail: _,
+                head: _,
+                around: _,
+                num: _,
+                json: _,
+                full: _,
+            } => {}
+            SessionAction::Projects => {}
+            SessionAction::Overview {
+                recent: _,
+                since: _,
+                json: _,
+            } => {}
+            _ => panic!("expected a session query action"),
+        }
+    }
+
+    #[test]
+    fn test_session_query_actions_use_outer_source_only() {
+        let cli = Cli::try_parse_from(["ccs", "session", "--source", "codex", "list"])
+            .expect("CLI should parse");
+        match cli.command {
+            Some(Commands::Session {
+                action: Some(action),
+                source,
+                ..
+            }) => {
+                assert_eq!(source, SessionSourceArg::Codex);
+                assert_query_actions_have_no_local_source(action);
+            }
+            _ => panic!("expected session list command"),
+        }
+    }
 }

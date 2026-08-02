@@ -73,6 +73,8 @@ pub mod interactive_conflict;
 /// excluding attachments to sync only JSONL conversation files).
 pub mod filter;
 
+pub(crate) mod path_security;
+
 /// Source Control Management abstraction layer.
 ///
 /// Provides a unified interface for Git using CLI commands.
@@ -134,6 +136,7 @@ pub mod report;
 pub mod sync;
 
 pub mod session_cache;
+pub mod session_diagnostics;
 /// Snapshot-based undo functionality for sync operations.
 ///
 /// Creates point-in-time snapshots of conversation files before sync operations.

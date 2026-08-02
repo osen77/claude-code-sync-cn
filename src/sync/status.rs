@@ -4,6 +4,7 @@ use std::path::Path;
 
 use crate::config::ConfigManager;
 use crate::filter::FilterConfig;
+use crate::path_security::{validate_directory_root, validate_sync_projects_root};
 use crate::scm;
 
 use super::discovery::{claude_projects_dir, discover_sessions};
@@ -73,11 +74,13 @@ pub fn show_status(show_conflicts: bool, show_files: bool) -> Result<()> {
     // Session counts
     println!();
     println!("{}", "对话历史:".bold());
+    validate_directory_root(&claude_dir)?;
     let local_sessions = discover_sessions(&claude_dir, &filter)?;
     println!("  本地: {} 个会话", local_sessions.len().to_string().cyan());
 
     let remote_projects_dir = state.sync_repo_path.join(&filter.sync_subdirectory);
     if remote_projects_dir.exists() {
+        validate_sync_projects_root(&state.sync_repo_path, &remote_projects_dir)?;
         let remote_sessions = discover_sessions(&remote_projects_dir, &filter)?;
         println!(
             "  同步仓库: {} 个会话",

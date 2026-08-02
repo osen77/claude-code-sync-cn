@@ -86,6 +86,15 @@ pub struct ConversationEntry {
     pub extra: Value,
 }
 
+/// Result of parsing a session file while retaining observable corruption details.
+#[derive(Debug, Clone)]
+pub struct ParseOutcome<T> {
+    /// The successfully decoded value, including any valid partial entries.
+    pub value: T,
+    /// Number of non-empty lines that failed the primary JSON decode.
+    pub malformed_lines: usize,
+}
+
 /// Represents a complete conversation session
 #[derive(Debug, Clone)]
 pub struct ConversationSession {
@@ -112,13 +121,20 @@ pub struct ConversationSession {
 }
 
 impl ConversationSession {
-    /// Parse a JSONL file into a ConversationSession
+    /// Parse a JSONL file into a ConversationSession, discarding corruption details.
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
+        Ok(Self::from_file_with_report(path)?.value)
+    }
+
+    /// Parse a JSONL file and report malformed non-empty lines.
+    pub fn from_file_with_report<P: AsRef<Path>>(path: P) -> Result<ParseOutcome<Self>> {
         let path = path.as_ref();
         let file =
             File::open(path).with_context(|| format!("Failed to open file: {}", path.display()))?;
+        Self::from_reader_with_report(BufReader::new(file), path)
+    }
 
-        let reader = BufReader::new(file);
+    fn from_reader_with_report<R: BufRead>(reader: R, path: &Path) -> Result<ParseOutcome<Self>> {
         let mut entries = Vec::new();
         let mut session_id = None;
         let mut malformed_lines: Vec<usize> = Vec::new();
@@ -145,7 +161,6 @@ impl ConversationSession {
 
             match parsed {
                 Ok(entry) => {
-                    // Extract session ID from first entry that has one
                     if session_id.is_none() {
                         if let Some(ref sid) = entry.session_id {
                             session_id = Some(sid.clone());
@@ -154,8 +169,8 @@ impl ConversationSession {
                     entries.push(entry);
                 }
                 Err(e) => {
+                    malformed_lines.push(line_num + 1);
                     if recovered.is_empty() {
-                        malformed_lines.push(line_num + 1);
                         log::debug!(
                             "Skipping malformed line {} in {}: {}",
                             line_num + 1,
@@ -192,7 +207,6 @@ impl ConversationSession {
             );
         }
 
-        // If no session ID in entries, use filename (without extension) as session ID
         let session_id = session_id
             .or_else(|| {
                 path.file_stem()
@@ -206,10 +220,13 @@ impl ConversationSession {
                 )
             })?;
 
-        Ok(ConversationSession {
-            session_id,
-            entries,
-            file_path: path.to_string_lossy().to_string(),
+        Ok(ParseOutcome {
+            value: ConversationSession {
+                session_id,
+                entries,
+                file_path: path.to_string_lossy().to_string(),
+            },
+            malformed_lines: malformed_lines.len(),
         })
     }
 
@@ -712,6 +729,63 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn reader_io_error_is_returned_with_original_error_kind() {
+        use std::io::{self, Read};
+
+        struct FailingReader {
+            bytes: Option<Vec<u8>>,
+        }
+
+        impl Read for FailingReader {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if let Some(bytes) = self.bytes.take() {
+                    let length = bytes.len();
+                    buffer[..length].copy_from_slice(&bytes);
+                    Ok(length)
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::UnexpectedEof,
+                        "injected read failure",
+                    ))
+                }
+            }
+        }
+
+        let reader = io::BufReader::new(FailingReader {
+            bytes: Some(
+                br#"{"type":"user","sessionId":"read-error","timestamp":"2026-08-03T00:00:00Z"}
+"#
+                .to_vec(),
+            ),
+        });
+        let error =
+            ConversationSession::from_reader_with_report(reader, Path::new("fixture.jsonl"))
+                .unwrap_err();
+
+        let io_error = error
+            .chain()
+            .find_map(|cause| cause.downcast_ref::<io::Error>())
+            .expect("original reader error should remain in anyhow chain");
+        assert_eq!(io_error.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    #[test]
+    fn report_counts_malformed_lines_even_when_valid_entries_remain() {
+        let mut temp_file = NamedTempFile::new().unwrap();
+        writeln!(temp_file, "{{not valid json").unwrap();
+        writeln!(
+            temp_file,
+            r#"{{"type":"user","sessionId":"partial","timestamp":"2026-08-02T00:00:00Z"}}"#
+        )
+        .unwrap();
+
+        let outcome = ConversationSession::from_file_with_report(temp_file.path()).unwrap();
+        assert_eq!(outcome.malformed_lines, 1);
+        assert_eq!(outcome.value.session_id, "partial");
+        assert_eq!(outcome.value.entries.len(), 1);
+    }
 
     #[test]
     fn test_parse_conversation_entry() {

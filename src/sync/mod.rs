@@ -1,4 +1,5 @@
 // Module declarations
+pub mod delete_unlock;
 pub(crate) mod discovery;
 mod init;
 mod pull;
@@ -7,7 +8,6 @@ mod remote;
 mod state;
 mod status;
 pub mod tombstone;
-pub mod delete_unlock;
 
 // Re-export public types and functions
 pub use init::{init_from_onboarding, init_sync_repo};

@@ -215,7 +215,7 @@ fn test_verbosity_in_struct() {
 fn test_verbosity_clone_copy() {
     let original = VerbosityLevel::Normal;
     let copied = original; // Copy
-    let cloned = original.clone(); // Clone
+    let cloned = original; // Copy
 
     assert_eq!(original, copied);
     assert_eq!(original, cloned);
@@ -231,16 +231,10 @@ fn test_interactive_flag_logic() {
     let interactive = true;
 
     // Interactive mode should be checkable
-    if interactive {
-        // Would show preview and ask for confirmation
-        assert!(true);
-    }
+    assert!(interactive);
 
     let interactive = false;
-    if !interactive {
-        // Would skip preview
-        assert!(true);
-    }
+    assert!(!interactive);
 }
 
 /// Test verbosity with Option wrapper (as might be used in config)
@@ -248,7 +242,7 @@ fn test_interactive_flag_logic() {
 fn test_verbosity_option() {
     let maybe_verbosity: Option<VerbosityLevel> = Some(VerbosityLevel::Verbose);
     assert!(maybe_verbosity.is_some());
-    assert_eq!(maybe_verbosity.unwrap(), VerbosityLevel::Verbose);
+    assert_eq!(maybe_verbosity, Some(VerbosityLevel::Verbose));
 
     let maybe_verbosity: Option<VerbosityLevel> = None;
     assert!(maybe_verbosity.is_none());

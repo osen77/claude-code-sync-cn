@@ -12,8 +12,14 @@ use crate::history::{
 };
 use crate::interactive_conflict;
 use crate::parser::ConversationSession;
+use crate::path_security::{
+    prepare_regular_file_destination, safe_join_within_root, safe_join_within_sync_projects_root,
+    validate_directory_candidate, validate_directory_root, validate_project_component,
+    validate_regular_candidate, validate_sync_projects_root,
+};
 use crate::report::{save_conflict_report, ConflictReport};
 use crate::scm;
+use crate::sync::tombstone::TombstoneRegistry;
 use crate::undo::Snapshot;
 use crate::BINARY_NAME;
 
@@ -22,6 +28,215 @@ use super::discovery::{
 };
 use super::state::SyncState;
 use super::MAX_CONVERSATIONS_TO_DISPLAY;
+
+fn prepare_local_session_destination(local_root: &Path, relative: &Path) -> Result<PathBuf> {
+    prepare_regular_file_destination(local_root, relative)
+}
+
+fn write_session_within_local_root(
+    session: &ConversationSession,
+    local_root: &Path,
+    relative: &Path,
+) -> Result<PathBuf> {
+    prepare_local_session_destination(local_root, relative)?;
+    // Rebuild and revalidate immediately before the write. A same-UID
+    // replacement after this check remains the documented narrow TOCTOU residual.
+    let destination = prepare_local_session_destination(local_root, relative)?;
+    session.write_to_file(&destination)?;
+    Ok(destination)
+}
+
+fn propagate_tombstones(local_projects_root: &Path, registry: &TombstoneRegistry) -> Result<usize> {
+    validate_directory_root(local_projects_root)?;
+    let mut propagated = 0;
+    let entries = match fs::read_dir(local_projects_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
+    };
+
+    for entry in entries {
+        let entry = entry?;
+        let local_project_dir = entry.path();
+        let metadata = fs::symlink_metadata(&local_project_dir)?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            log::warn!(
+                "Skipping unsafe local project while applying tombstones: {}",
+                local_project_dir.display()
+            );
+            continue;
+        }
+        if let Err(error) = validate_directory_candidate(local_projects_root, &local_project_dir) {
+            log::warn!(
+                "Skipping unsafe local project while applying tombstones: {}",
+                error
+            );
+            continue;
+        }
+
+        for file in fs::read_dir(&local_project_dir)? {
+            let file = file?;
+            let file_name = file.file_name();
+            let Some(name) = file_name.to_str() else {
+                continue;
+            };
+            if !name.ends_with(".jsonl") {
+                continue;
+            }
+
+            let session_id = name
+                .strip_suffix(".jsonl")
+                .unwrap_or(name)
+                .trim_start_matches("session-");
+            if !registry.contains(session_id) {
+                continue;
+            }
+
+            let file_path = file.path();
+            let metadata = fs::symlink_metadata(&file_path)?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                log::warn!(
+                    "Skipping unsafe tombstone deletion candidate: {}",
+                    file_path.display()
+                );
+                continue;
+            }
+            validate_regular_candidate(local_projects_root, &file_path)?;
+            let relative = file_path
+                .strip_prefix(local_projects_root)
+                .with_context(|| {
+                    format!(
+                        "local session path is outside projects root: {}",
+                        file_path.display()
+                    )
+                })?;
+            let candidate = safe_join_within_root(local_projects_root, relative)?;
+            validate_regular_candidate(local_projects_root, &candidate)?;
+            fs::remove_file(&candidate)
+                .with_context(|| format!("failed to propagate tombstone for {session_id}"))?;
+            propagated += 1;
+            log::debug!("Propagated remote deletion: {}", candidate.display());
+        }
+    }
+
+    Ok(propagated)
+}
+
+fn sync_auto_memory_from_remote(
+    sync_repo_path: &Path,
+    remote_projects_dir: &Path,
+    local_projects_root: &Path,
+    use_project_name_only: bool,
+) -> Result<Vec<String>> {
+    validate_sync_projects_root(sync_repo_path, remote_projects_dir)?;
+    validate_directory_root(local_projects_root)?;
+    let mut synced_projects = Vec::new();
+
+    for entry in fs::read_dir(remote_projects_dir)? {
+        let entry = entry?;
+        let project_name = match entry.file_name().to_str() {
+            Some(name) if !name.starts_with('.') && !name.is_empty() => name.to_string(),
+            _ => continue,
+        };
+        validate_project_component(&project_name)?;
+
+        let project_relative = PathBuf::from(&project_name);
+        let sync_project_dir = safe_join_within_sync_projects_root(
+            sync_repo_path,
+            remote_projects_dir,
+            &project_relative,
+        )?;
+        let project_metadata = fs::symlink_metadata(&sync_project_dir)?;
+        if project_metadata.file_type().is_symlink() {
+            anyhow::bail!("remote auto-memory project path must not be a symlink");
+        }
+        if !project_metadata.is_dir() {
+            continue;
+        }
+        validate_directory_candidate(remote_projects_dir, &sync_project_dir)?;
+
+        let memory_relative = project_relative.join("memory");
+        let remote_memory_path = safe_join_within_sync_projects_root(
+            sync_repo_path,
+            remote_projects_dir,
+            &memory_relative,
+        )?;
+        let remote_memory_metadata = match fs::symlink_metadata(&remote_memory_path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if remote_memory_metadata.file_type().is_symlink() || !remote_memory_metadata.is_dir() {
+            anyhow::bail!("remote auto-memory path must be a non-symlink directory");
+        }
+        validate_directory_candidate(remote_projects_dir, &remote_memory_path)?;
+
+        let local_project_dir = if use_project_name_only {
+            find_local_project_by_name(local_projects_root, &project_name)
+        } else {
+            let local_path = safe_join_within_root(local_projects_root, &project_relative)?;
+            match fs::symlink_metadata(&local_path) {
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {
+                    Some(local_path)
+                }
+                Ok(_) => None,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                Err(error) => return Err(error.into()),
+            }
+        };
+
+        let Some(local_project_dir) = local_project_dir else {
+            log::debug!(
+                "No local project found for '{}', skipping memory sync",
+                project_name
+            );
+            continue;
+        };
+        validate_directory_candidate(local_projects_root, &local_project_dir)?;
+
+        let local_memory_path = safe_join_within_root(&local_project_dir, Path::new("memory"))?;
+        match fs::symlink_metadata(&local_memory_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                anyhow::bail!("local auto-memory path must be a non-symlink directory");
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir_all(&local_memory_path)?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        validate_directory_candidate(local_projects_root, &local_memory_path)?;
+
+        for memory_entry in fs::read_dir(&remote_memory_path)? {
+            let memory_entry = memory_entry?;
+            let source = memory_entry.path();
+            let source_metadata = fs::symlink_metadata(&source)?;
+            if source_metadata.file_type().is_symlink() {
+                anyhow::bail!("remote auto-memory contains a symlink file");
+            }
+            if !source_metadata.is_file() {
+                continue;
+            }
+            validate_regular_candidate(remote_projects_dir, &source)?;
+
+            let destination =
+                safe_join_within_root(&local_memory_path, Path::new(&memory_entry.file_name()))?;
+            if let Ok(metadata) = fs::symlink_metadata(&destination) {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    anyhow::bail!("local auto-memory destination is not a regular file");
+                }
+            }
+
+            validate_regular_candidate(remote_projects_dir, &source)?;
+            let destination =
+                safe_join_within_root(&local_memory_path, Path::new(&memory_entry.file_name()))?;
+            fs::copy(&source, &destination)?;
+        }
+        synced_projects.push(project_name);
+    }
+
+    Ok(synced_projects)
+}
 
 /// Pull and merge history from sync repository
 pub fn pull_history(
@@ -40,6 +255,7 @@ pub fn pull_history(
     let repo = scm::open(&state.sync_repo_path)?;
     let filter = FilterConfig::load()?;
     let claude_dir = claude_projects_dir()?;
+    validate_directory_root(&claude_dir)?;
 
     // Get the current branch name for operation record
     let branch_name = branch
@@ -65,53 +281,12 @@ pub fn pull_history(
     // ============================================================================
     // Before discovering local sessions, check if the sync repo has any
     // registered tombstones that we haven't applied locally yet.
-    let mut propagated_deletes = 0;
-    if let Ok(registry) = crate::sync::tombstone::TombstoneRegistry::load(&state.sync_repo_path) {
-        if !registry.is_empty() {
+    match TombstoneRegistry::load(&state.sync_repo_path) {
+        Ok(registry) if !registry.is_empty() => {
             if verbosity != VerbosityLevel::Quiet {
                 println!("  {} tombstones...", "Checking".cyan());
             }
-            // We just scan all local jsonl files. If their session ID (from the filename)
-            // is in the registry, we remove them locally. We don't need full parsing here
-            // since filenames contain the session UUID.
-            if let Ok(entries) = fs::read_dir(&claude_dir) {
-                for entry in entries.filter_map(|e| e.ok()) {
-                    let local_project_dir = entry.path();
-                    if !local_project_dir.is_dir() {
-                        continue;
-                    }
-                    if let Ok(files) = fs::read_dir(&local_project_dir) {
-                        for file in files.filter_map(|f| f.ok()) {
-                            let fname = file.file_name().to_string_lossy().to_string();
-                            if fname.ends_with(".jsonl") {
-                                // Extract UUID from filename: "session-uuid.jsonl" or "uuid.jsonl"
-                                // Claude Code filenames are typically either just the UUID or prefixed.
-                                let session_id = fname
-                                    .strip_suffix(".jsonl")
-                                    .unwrap_or(&fname)
-                                    .trim_start_matches("session-");
-
-                                if registry.contains(session_id) {
-                                    let file_path = file.path();
-                                    if let Err(e) = fs::remove_file(&file_path) {
-                                        log::warn!(
-                                            "Failed to propagate remote deletion for {}: {}",
-                                            session_id,
-                                            e
-                                        );
-                                    } else {
-                                        propagated_deletes += 1;
-                                        log::debug!(
-                                            "Propagated remote deletion: {}",
-                                            file_path.display()
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            let propagated_deletes = propagate_tombstones(&claude_dir, &registry)?;
             if propagated_deletes > 0 && verbosity != VerbosityLevel::Quiet {
                 println!(
                     "  {} Propagated {} intentional deletion(s) from other devices",
@@ -119,6 +294,10 @@ pub fn pull_history(
                     propagated_deletes
                 );
             }
+        }
+        Ok(_) => {}
+        Err(error) => {
+            log::warn!("Failed to load tombstone registry safely: {}", error);
         }
     }
 
@@ -133,6 +312,7 @@ pub fn pull_history(
 
     // Discover remote sessions
     let remote_projects_dir = state.sync_repo_path.join(&filter.sync_subdirectory);
+    validate_sync_projects_root(&state.sync_repo_path, &remote_projects_dir)?;
     println!("  {} remote sessions...", "Discovering".cyan());
     let remote_sessions = discover_sessions(&remote_projects_dir, &filter)?;
     println!(
@@ -311,8 +491,16 @@ pub fn pull_history(
                                 file_path: conflict.local_file.to_string_lossy().to_string(),
                             };
 
-                            // Write merged session to local path
-                            if let Err(e) = merged_session.write_to_file(&conflict.local_file) {
+                            // Rebuild the destination from the trusted local root.
+                            let local_relative = conflict
+                                .local_file
+                                .strip_prefix(&claude_dir)
+                                .context("conflict destination is outside Claude projects root")?;
+                            if let Err(e) = write_session_within_local_root(
+                                &merged_session,
+                                &claude_dir,
+                                local_relative,
+                            ) {
                                 log::warn!(
                                     "Failed to write merged session {}: {}",
                                     conflict.session_id,
@@ -407,12 +595,19 @@ pub fn pull_history(
                             relative_renamed.display().to_string().cyan()
                         );
 
-                        // Find and write the remote session
+                        // Find and write the remote session through the trusted local root.
                         if let Some(session) = remote_sessions
                             .iter()
                             .find(|s| s.session_id == conflict.session_id)
                         {
-                            session.write_to_file(&renamed_path)?;
+                            let renamed_relative = renamed_path.strip_prefix(&claude_dir).context(
+                                "conflict copy destination is outside Claude projects root",
+                            )?;
+                            write_session_within_local_root(
+                                session,
+                                &claude_dir,
+                                renamed_relative,
+                            )?;
                         }
 
                         renames.push((conflict.remote_file.clone(), renamed_path));
@@ -501,54 +696,50 @@ pub fn pull_history(
             continue;
         }
 
-        let (dest_path, relative_path_for_tracking) = if filter.use_project_name_only {
-            // Extract project name and session filename from remote path
+        let relative_path_for_tracking = if filter.use_project_name_only {
+            // Extract project name and session filename from remote path.
             let remote_relative = Path::new(&remote_session.file_path)
                 .strip_prefix(&remote_projects_dir)
                 .ok()
                 .unwrap_or_else(|| Path::new(&remote_session.file_path));
-
-            // Get the project name from the remote path structure
             let project_name = remote_relative
                 .components()
                 .next()
-                .and_then(|c| c.as_os_str().to_str())
+                .and_then(|component| component.as_os_str().to_str())
                 .unwrap_or("unknown");
+            validate_project_component(project_name)?;
 
-            // Find matching local Claude project directory
-            if let Some(local_project_dir) = find_local_project_by_name(&claude_dir, project_name) {
-                // Get just the session filename
-                if let Some(filename) = remote_relative.file_name() {
-                    let dest = local_project_dir.join(filename);
-                    // Compute relative path for tracking from the destination
-                    let tracking_path = dest
-                        .strip_prefix(&claude_dir)
-                        .map(|p| p.to_path_buf())
-                        .unwrap_or_else(|_| remote_relative.to_path_buf());
-                    (dest, tracking_path)
-                } else {
-                    log::warn!(
-                        "Could not extract filename from remote path: {:?}",
-                        remote_relative
-                    );
-                    skipped_no_local_match += 1;
-                    continue; // Skip this session
-                }
-            } else {
+            let Some(local_project_dir) = find_local_project_by_name(&claude_dir, project_name)
+            else {
                 log::debug!(
                     "No matching local project found for '{}', skipping",
                     project_name
                 );
                 skipped_no_local_match += 1;
-                continue; // Skip this session - no local match
-            }
+                continue;
+            };
+            validate_directory_candidate(&claude_dir, &local_project_dir)?;
+
+            let Some(filename) = remote_relative.file_name() else {
+                log::warn!(
+                    "Could not extract filename from remote path: {:?}",
+                    remote_relative
+                );
+                skipped_no_local_match += 1;
+                continue;
+            };
+            let local_project_relative = local_project_dir
+                .strip_prefix(&claude_dir)
+                .context("matched local project is outside Claude projects root")?;
+            local_project_relative.join(filename)
         } else {
-            let relative_path = Path::new(&remote_session.file_path)
+            Path::new(&remote_session.file_path)
                 .strip_prefix(&remote_projects_dir)
-                .ok()
-                .unwrap_or_else(|| Path::new(&remote_session.file_path));
-            (claude_dir.join(relative_path), relative_path.to_path_buf())
+                .context("remote session is outside the sync projects root")?
+                .to_path_buf()
         };
+
+        prepare_local_session_destination(&claude_dir, &relative_path_for_tracking)?;
 
         // Determine operation type based on local state
         let operation = if let Some(local) = local_map.get(&remote_session.session_id) {
@@ -566,7 +757,11 @@ pub fn pull_history(
 
         // Copy file if it's not unchanged
         if operation != SyncOperation::Unchanged {
-            remote_session.write_to_file(&dest_path)?;
+            write_session_within_local_root(
+                remote_session,
+                &claude_dir,
+                &relative_path_for_tracking,
+            )?;
             merged_count += 1;
         }
 
@@ -714,78 +909,18 @@ pub fn pull_history(
     if filter.auto_memory.enabled {
         println!("  {} auto memory directories...", "Syncing".cyan());
 
-        // Scan sync repo projects directory for memory directories directly.
-        // Don't use extract_project_name() - it splits by '-' and fails
-        // for project names containing hyphens (e.g. "claude-openclaw" -> "openclaw").
-        // The sync repo directory names ARE the correct project names.
-        let mut synced_count = 0;
-
-        if let Ok(entries) = std::fs::read_dir(&remote_projects_dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let sync_project_dir = entry.path();
-                if !sync_project_dir.is_dir() {
-                    continue;
-                }
-
-                let remote_memory_path = sync_project_dir.join("memory");
-                if !remote_memory_path.is_dir() {
-                    continue;
-                }
-
-                let project_name = sync_project_dir
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default();
-
-                if project_name.starts_with('.') || project_name.is_empty() {
-                    continue;
-                }
-
-                // Find the corresponding local project directory
-                let local_project_dir = if filter.use_project_name_only {
-                    find_local_project_by_name(&claude_dir, project_name)
-                } else {
-                    let local_path = claude_dir.join(project_name);
-                    if local_path.is_dir() {
-                        Some(local_path)
-                    } else {
-                        None
-                    }
-                };
-
-                let Some(local_project_dir) = local_project_dir else {
-                    log::debug!(
-                        "No local project found for '{}', skipping memory sync",
-                        project_name
-                    );
-                    continue;
-                };
-
-                // Create local memory directory
-                let local_memory_path = local_project_dir.join("memory");
-                if let Err(e) = std::fs::create_dir_all(&local_memory_path) {
-                    log::warn!("Failed to create local memory directory: {}", e);
-                    continue;
-                }
-
-                // Copy memory files from remote to local
-                if let Ok(mem_entries) = std::fs::read_dir(&remote_memory_path) {
-                    for mem_entry in mem_entries.filter_map(|e| e.ok()) {
-                        if mem_entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-                            let local_file = local_memory_path.join(mem_entry.file_name());
-                            if let Err(e) = std::fs::copy(mem_entry.path(), &local_file) {
-                                log::warn!("Failed to copy memory file: {}", e);
-                            }
-                        }
-                    }
-                    synced_count += 1;
-                }
-
-                if verbosity == VerbosityLevel::Verbose {
-                    println!("    {} {}/memory", "←".cyan(), project_name);
-                }
+        let synced_projects = sync_auto_memory_from_remote(
+            &state.sync_repo_path,
+            &remote_projects_dir,
+            &claude_dir,
+            filter.use_project_name_only,
+        )?;
+        if verbosity == VerbosityLevel::Verbose {
+            for project_name in &synced_projects {
+                println!("    {} {}/memory", "←".cyan(), project_name);
             }
         }
+        let synced_count = synced_projects.len();
 
         if verbosity != VerbosityLevel::Quiet {
             println!(
@@ -804,4 +939,240 @@ pub fn pull_history(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tombstone_record(session_id: &str) -> crate::sync::tombstone::DeletionRecord {
+        crate::sync::tombstone::DeletionRecord {
+            session_id: session_id.to_string(),
+            repo_relative_path: format!("projects/project/{session_id}.jsonl"),
+            project_name: "project".to_string(),
+            source: "claude".to_string(),
+            deleted_at: "2026-08-03T00:00:00Z".to_string(),
+            device: "test".to_string(),
+            reason: crate::sync::tombstone::DeleteReason::Explicit,
+        }
+    }
+
+    #[test]
+    fn guarded_session_write_creates_normal_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let local_root = temp.path().join("local");
+        fs::create_dir_all(&local_root).unwrap();
+        let session = ConversationSession {
+            session_id: "session-id".to_string(),
+            entries: Vec::new(),
+            file_path: String::new(),
+        };
+
+        let destination = write_session_within_local_root(
+            &session,
+            &local_root,
+            Path::new("project/session-id.jsonl"),
+        )
+        .unwrap();
+        assert_eq!(destination, local_root.join("project/session-id.jsonl"));
+        assert!(destination.is_file());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn guarded_session_write_rejects_project_and_file_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        for mode in ["root", "project", "file"] {
+            let temp = tempfile::tempdir().unwrap();
+            let local_root = temp.path().join("local");
+            let outside = temp.path().join("outside");
+            let outside_file = if mode == "root" {
+                outside.join("project/session-id.jsonl")
+            } else {
+                outside.join("session-id.jsonl")
+            };
+            fs::create_dir_all(outside_file.parent().unwrap()).unwrap();
+            fs::write(&outside_file, b"outside-marker").unwrap();
+
+            match mode {
+                "root" => symlink(&outside, &local_root).unwrap(),
+                "project" => {
+                    fs::create_dir_all(&local_root).unwrap();
+                    symlink(&outside, local_root.join("project")).unwrap();
+                }
+                "file" => {
+                    fs::create_dir_all(local_root.join("project")).unwrap();
+                    symlink(&outside_file, local_root.join("project/session-id.jsonl")).unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            let session = ConversationSession {
+                session_id: "session-id".to_string(),
+                entries: Vec::new(),
+                file_path: String::new(),
+            };
+            assert!(write_session_within_local_root(
+                &session,
+                &local_root,
+                Path::new("project/session-id.jsonl"),
+            )
+            .is_err());
+            assert_eq!(fs::read(&outside_file).unwrap(), b"outside-marker");
+        }
+    }
+
+    #[test]
+    fn tombstone_propagation_deletes_regular_local_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let local_root = temp.path().join("local");
+        let local_file = local_root.join("project/abc-id.jsonl");
+        fs::create_dir_all(local_file.parent().unwrap()).unwrap();
+        fs::write(&local_file, b"session").unwrap();
+        let mut registry = TombstoneRegistry::default();
+        registry.add(tombstone_record("abc-id"));
+
+        assert_eq!(propagate_tombstones(&local_root, &registry).unwrap(), 1);
+        assert!(!local_file.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tombstone_propagation_rejects_project_and_file_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        for mode in ["root", "project", "file"] {
+            let temp = tempfile::tempdir().unwrap();
+            let local_root = temp.path().join("local");
+            let outside = temp.path().join("outside");
+            let outside_file = if mode == "root" {
+                outside.join("project/abc-id.jsonl")
+            } else {
+                outside.join("abc-id.jsonl")
+            };
+            fs::create_dir_all(outside_file.parent().unwrap()).unwrap();
+            fs::write(&outside_file, b"outside-marker").unwrap();
+
+            match mode {
+                "root" => symlink(&outside, &local_root).unwrap(),
+                "project" => {
+                    fs::create_dir_all(&local_root).unwrap();
+                    symlink(&outside, local_root.join("project")).unwrap();
+                }
+                "file" => {
+                    fs::create_dir_all(local_root.join("project")).unwrap();
+                    symlink(&outside_file, local_root.join("project/abc-id.jsonl")).unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            let mut registry = TombstoneRegistry::default();
+            registry.add(tombstone_record("abc-id"));
+            let result = propagate_tombstones(&local_root, &registry);
+            if mode == "root" {
+                assert!(result.is_err());
+            } else {
+                assert_eq!(result.unwrap(), 0);
+            }
+            assert_eq!(fs::read(&outside_file).unwrap(), b"outside-marker");
+        }
+    }
+
+    #[test]
+    fn auto_memory_pull_copies_normal_file_within_guarded_roots() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let remote_projects = repo.join("projects");
+        let remote_memory = remote_projects.join("project/memory");
+        let local_projects = temp.path().join("local");
+        let local_project = local_projects.join("project");
+        fs::create_dir_all(&remote_memory).unwrap();
+        fs::create_dir_all(&local_project).unwrap();
+        fs::write(remote_memory.join("note.md"), b"remote memory").unwrap();
+
+        let synced =
+            sync_auto_memory_from_remote(&repo, &remote_projects, &local_projects, false).unwrap();
+        assert_eq!(synced, vec!["project"]);
+        assert_eq!(
+            fs::read(local_project.join("memory/note.md")).unwrap(),
+            b"remote memory"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auto_memory_pull_rejects_remote_and_local_symlink_boundaries() {
+        use std::os::unix::fs::symlink;
+
+        for mode in [
+            "remote-root",
+            "remote-project",
+            "remote-memory",
+            "remote-file",
+            "local-root",
+            "local-project",
+            "local-memory",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let repo = temp.path().join("repo");
+            let remote_projects = repo.join("projects");
+            let local_projects = temp.path().join("local");
+            let local_project = local_projects.join("project");
+            let outside = temp.path().join("outside");
+            let outside_memory = outside.join("memory");
+            let outside_file = outside.join("secret.md");
+            fs::create_dir_all(&repo).unwrap();
+            fs::create_dir_all(&outside_memory).unwrap();
+            fs::write(&outside_file, b"must not copy").unwrap();
+
+            if mode == "remote-root" {
+                fs::create_dir_all(&local_project).unwrap();
+                symlink(&outside, &remote_projects).unwrap();
+            } else {
+                let remote_memory = remote_projects.join("project/memory");
+                fs::create_dir_all(&remote_projects).unwrap();
+                match mode {
+                    "remote-project" => {
+                        symlink(&outside, remote_projects.join("project")).unwrap();
+                    }
+                    "remote-memory" => {
+                        fs::create_dir_all(remote_projects.join("project")).unwrap();
+                        symlink(&outside, &remote_memory).unwrap();
+                    }
+                    "remote-file" => {
+                        fs::create_dir_all(&remote_memory).unwrap();
+                        symlink(&outside_file, remote_memory.join("secret.md")).unwrap();
+                    }
+                    _ => {
+                        fs::create_dir_all(&remote_memory).unwrap();
+                        fs::write(remote_memory.join("note.md"), b"remote memory").unwrap();
+                    }
+                }
+
+                match mode {
+                    "local-root" => {
+                        symlink(&outside, &local_projects).unwrap();
+                    }
+                    "local-project" => {
+                        fs::create_dir_all(&local_projects).unwrap();
+                        symlink(&outside, &local_project).unwrap();
+                    }
+                    "local-memory" => {
+                        fs::create_dir_all(&local_project).unwrap();
+                        symlink(&outside_memory, local_project.join("memory")).unwrap();
+                    }
+                    _ => fs::create_dir_all(&local_project).unwrap(),
+                }
+            }
+
+            assert!(
+                sync_auto_memory_from_remote(&repo, &remote_projects, &local_projects, false)
+                    .is_err(),
+                "mode={mode}"
+            );
+            assert!(!local_project.join("memory/secret.md").exists());
+            assert_eq!(fs::read(&outside_file).unwrap(), b"must not copy");
+        }
+    }
 }

@@ -47,7 +47,7 @@ impl Platform {
     }
 
     /// Parse platform from tag name
-#[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn from_tag_name(name: &str) -> Option<Self> {
         match name.to_lowercase().as_str() {
             "macos" | "mac" | "darwin" => Some(Platform::MacOS),

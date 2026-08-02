@@ -576,7 +576,8 @@ fn test_deleted_files_tracking() {
     println!("Deleting file3...");
     fs::remove_file(&file3).unwrap();
 
-    let (snapshot3, _) = push_and_get_snapshot(&snapshots_dir, &[file1.clone()], None).unwrap();
+    let (snapshot3, _) =
+        push_and_get_snapshot(&snapshots_dir, std::slice::from_ref(&file1), None).unwrap();
 
     println!("  Snapshot 3 deleted files: {:?}", snapshot3.deleted_files);
 
@@ -615,17 +616,17 @@ fn test_broken_snapshot_chain() {
 
     // Create snapshot 1
     let (snapshot1, _snapshot1_path) =
-        push_and_get_snapshot(&snapshots_dir, &[file1.clone()], None).unwrap();
+        push_and_get_snapshot(&snapshots_dir, std::slice::from_ref(&file1), None).unwrap();
 
     // Modify and create snapshot 2
     fs::write(&file1, b"content2").unwrap();
     let (_snapshot2, snapshot2_path) =
-        push_and_get_snapshot(&snapshots_dir, &[file1.clone()], None).unwrap();
+        push_and_get_snapshot(&snapshots_dir, std::slice::from_ref(&file1), None).unwrap();
 
     // Modify and create snapshot 3
     fs::write(&file1, b"content3").unwrap();
     let (snapshot3, _snapshot3_path) =
-        push_and_get_snapshot(&snapshots_dir, &[file1.clone()], None).unwrap();
+        push_and_get_snapshot(&snapshots_dir, std::slice::from_ref(&file1), None).unwrap();
 
     println!("Created chain: snapshot1 <- snapshot2 <- snapshot3");
 
@@ -681,8 +682,12 @@ fn test_differential_snapshot_with_scm() {
 
     // Create first snapshot with commit hash
     println!("Creating snapshot with commit information...");
-    let (snapshot1, _) =
-        push_and_get_snapshot(&snapshots_dir, &[file1.clone()], Some(&initial_commit)).unwrap();
+    let (snapshot1, _) = push_and_get_snapshot(
+        &snapshots_dir,
+        std::slice::from_ref(&file1),
+        Some(&initial_commit),
+    )
+    .unwrap();
 
     assert!(
         snapshot1.git_commit_hash.is_some(),
@@ -703,8 +708,12 @@ fn test_differential_snapshot_with_scm() {
     println!("Second commit: {}", &second_commit[..8]);
 
     // Create differential snapshot
-    let (snapshot2, _) =
-        push_and_get_snapshot(&snapshots_dir, &[file1.clone()], Some(&second_commit)).unwrap();
+    let (snapshot2, _) = push_and_get_snapshot(
+        &snapshots_dir,
+        std::slice::from_ref(&file1),
+        Some(&second_commit),
+    )
+    .unwrap();
 
     assert!(
         snapshot2.base_snapshot_id.is_some(),
@@ -813,14 +822,14 @@ fn test_empty_differential_snapshot() {
     // Create first snapshot
     println!("Creating initial snapshot...");
     let (_snapshot1, snapshot1_path) =
-        push_and_get_snapshot(&snapshots_dir, &[file1.clone()], None).unwrap();
+        push_and_get_snapshot(&snapshots_dir, std::slice::from_ref(&file1), None).unwrap();
     let size1 = calculate_snapshot_size(&snapshot1_path).unwrap();
     println!("  Initial snapshot: {} bytes", size1);
 
     // Create second snapshot with NO changes
     println!("Creating differential snapshot with no changes...");
     let (snapshot2, snapshot2_path) =
-        push_and_get_snapshot(&snapshots_dir, &[file1.clone()], None).unwrap();
+        push_and_get_snapshot(&snapshots_dir, std::slice::from_ref(&file1), None).unwrap();
     let size2 = calculate_snapshot_size(&snapshot2_path).unwrap();
     println!("  Differential snapshot: {} bytes", size2);
 

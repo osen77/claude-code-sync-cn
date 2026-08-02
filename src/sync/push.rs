@@ -10,6 +10,11 @@ use crate::history::{
     ConversationSummary, OperationHistory, OperationRecord, OperationType, SyncOperation,
 };
 use crate::interactive_conflict;
+use crate::path_security::{
+    safe_join_within_root, safe_join_within_sync_projects_root, safe_project_relative_path,
+    safe_relative_path_within_root, validate_directory_candidate, validate_directory_root,
+    validate_regular_candidate, validate_sync_projects_root,
+};
 use crate::scm;
 use crate::BINARY_NAME;
 
@@ -42,7 +47,13 @@ fn scan_for_conflict_files(dir: &Path, conflicts: &mut Vec<PathBuf>) {
     };
     for entry in entries.filter_map(|e| e.ok()) {
         let path = entry.path();
-        if path.is_dir() {
+        let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        if metadata.is_dir() {
             // Skip hidden directories (.git, etc.)
             let is_hidden = path
                 .file_name()
@@ -70,8 +81,10 @@ fn scan_for_conflict_files(dir: &Path, conflicts: &mut Vec<PathBuf>) {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum PushResult {
     Clean,
-    Degraded { conflicts: Vec<PathBuf> },
-#[allow(dead_code)]
+    Degraded {
+        conflicts: Vec<PathBuf>,
+    },
+    #[allow(dead_code)]
     NothingToPush,
 }
 
@@ -203,12 +216,43 @@ fn collect_missing_repo_sessions(
 ) -> Vec<PathBuf> {
     let mut missing = Vec::new();
 
+    // Return only validated relative paths. Callers must reconstruct the
+    // destination under the guarded projects root before deleting anything.
+    let mut collect_files = |sync_project_dir: &Path,
+                             local_files: &std::collections::HashSet<String>,
+                             project_name: &str| {
+        let Ok(project_metadata) = fs::symlink_metadata(sync_project_dir) else {
+            return;
+        };
+        if project_metadata.file_type().is_symlink() || !project_metadata.is_dir() {
+            return;
+        }
+        let Ok(files) = fs::read_dir(sync_project_dir) else {
+            return;
+        };
+        for file in files.filter_map(|f| f.ok()) {
+            let file_path = file.path();
+            let Ok(file_name) = file.file_name().into_string() else {
+                continue;
+            };
+            if !file_name.ends_with(".jsonl") || local_files.contains(&file_name) {
+                continue;
+            }
+            if validate_regular_candidate(projects_dir, &file_path).is_err() {
+                continue;
+            }
+            if let Ok(relative) = safe_relative_path_within_root(projects_dir, &file_path) {
+                if relative.starts_with(project_name) {
+                    missing.push(relative);
+                }
+            }
+        }
+    };
+
     if filter.use_project_name_only {
-        // Map project_name -> set of local file names (union of all matching dirs).
         let mut local_files_by_name: HashMap<String, std::collections::HashSet<String>> =
             HashMap::new();
-        let mut project_name_has_local: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut project_name_has_local = std::collections::HashSet::new();
 
         for session in sessions {
             if let Some(pname) = session.project_name() {
@@ -225,68 +269,197 @@ fn collect_missing_repo_sessions(
             }
         }
 
-        if let Ok(entries) = fs::read_dir(projects_dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let sync_project_dir = entry.path();
-                if !sync_project_dir.is_dir() {
-                    continue;
-                }
-                let project_name = sync_project_dir
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default()
-                    .to_string();
-
-                if !project_name_has_local.contains(&project_name) {
-                    continue;
-                }
-
-                let local_files = local_files_by_name
-                    .get(&project_name)
-                    .cloned()
-                    .unwrap_or_default();
-
-                if let Ok(files) = fs::read_dir(&sync_project_dir) {
-                    for file in files.filter_map(|f| f.ok()) {
-                        let fname = file.file_name().to_string_lossy().to_string();
-                        if fname.ends_with(".jsonl") && !local_files.contains(&fname) {
-                            missing.push(file.path());
-                        }
-                    }
-                }
+        let Ok(entries) = fs::read_dir(projects_dir) else {
+            return missing;
+        };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let sync_project_dir = entry.path();
+            let Some(project_name) = sync_project_dir.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if !project_name_has_local.contains(project_name) {
+                continue;
             }
+            let local_files = local_files_by_name
+                .get(project_name)
+                .cloned()
+                .unwrap_or_default();
+            collect_files(&sync_project_dir, &local_files, project_name);
         }
     } else {
-        // Full-path mode: sync repo dir names match local dir names exactly.
-        if let Ok(entries) = fs::read_dir(projects_dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                let sync_project_dir = entry.path();
-                if !sync_project_dir.is_dir() {
-                    continue;
-                }
-                let dir_name = sync_project_dir
-                    .file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or_default()
-                    .to_string();
-
-                let Some(local_files) = local_files_by_project.get(&dir_name) else {
-                    continue;
-                };
-
-                if let Ok(files) = fs::read_dir(&sync_project_dir) {
-                    for file in files.filter_map(|f| f.ok()) {
-                        let fname = file.file_name().to_string_lossy().to_string();
-                        if fname.ends_with(".jsonl") && !local_files.contains(&fname) {
-                            missing.push(file.path());
-                        }
-                    }
-                }
-            }
+        let Ok(entries) = fs::read_dir(projects_dir) else {
+            return missing;
+        };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let sync_project_dir = entry.path();
+            let Some(dir_name) = sync_project_dir.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            let Some(local_files) = local_files_by_project.get(dir_name) else {
+                continue;
+            };
+            collect_files(&sync_project_dir, local_files, dir_name);
         }
     }
 
     missing
+}
+
+fn prune_missing_repo_sessions(
+    sync_repo_path: &Path,
+    projects_dir: &Path,
+    missing: &[PathBuf],
+) -> Result<usize> {
+    let _ = validate_sync_projects_root(sync_repo_path, projects_dir)?;
+    let mut deleted = 0;
+    for relative in missing {
+        let file_path =
+            safe_join_within_sync_projects_root(sync_repo_path, projects_dir, relative)?;
+        let canonical_root = validate_sync_projects_root(sync_repo_path, projects_dir)?;
+        validate_regular_candidate(&canonical_root, &file_path)?;
+        fs::remove_file(&file_path)
+            .with_context(|| format!("failed to prune session: {}", relative.display()))?;
+        deleted += 1;
+    }
+    Ok(deleted)
+}
+
+fn sync_auto_memory_directories(
+    sync_repo_path: &Path,
+    projects_dir: &Path,
+    local_projects_root: &Path,
+    project_dir_to_sync: &HashMap<PathBuf, PathBuf>,
+) -> Result<(usize, usize)> {
+    validate_sync_projects_root(sync_repo_path, projects_dir)?;
+    validate_directory_root(local_projects_root)?;
+
+    let mut synced_count = 0;
+    let mut local_memory_by_sync: HashMap<PathBuf, std::collections::HashSet<std::ffi::OsString>> =
+        HashMap::new();
+
+    for (local_dir, sync_project) in project_dir_to_sync {
+        validate_directory_candidate(local_projects_root, local_dir)?;
+        let local_memory = local_dir.join("memory");
+        let local_memory_metadata = match fs::symlink_metadata(&local_memory) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if local_memory_metadata.file_type().is_symlink() {
+            anyhow::bail!("local auto-memory path must not be a symlink");
+        }
+        if !local_memory_metadata.is_dir() {
+            continue;
+        }
+        validate_directory_candidate(local_projects_root, &local_memory)?;
+
+        let memory_relative = sync_project.join("memory");
+        let dest_memory_dir =
+            safe_join_within_sync_projects_root(sync_repo_path, projects_dir, &memory_relative)?;
+        fs::create_dir_all(&dest_memory_dir)?;
+
+        // Recheck the created directory and all of its parents before reading
+        // or writing below it.
+        let dest_memory_dir =
+            safe_join_within_sync_projects_root(sync_repo_path, projects_dir, &memory_relative)?;
+        let memory_metadata = fs::symlink_metadata(&dest_memory_dir)?;
+        if memory_metadata.file_type().is_symlink() || !memory_metadata.is_dir() {
+            anyhow::bail!(
+                "auto-memory destination is not a regular directory: {}",
+                memory_relative.display()
+            );
+        }
+
+        let file_set = local_memory_by_sync
+            .entry(sync_project.clone())
+            .or_default();
+        for entry in fs::read_dir(&local_memory)? {
+            let entry = entry?;
+            let source_path = entry.path();
+            let source_metadata = fs::symlink_metadata(&source_path)?;
+            if source_metadata.file_type().is_symlink() || !source_metadata.is_file() {
+                continue;
+            }
+
+            let file_name = entry.file_name();
+            file_set.insert(file_name.clone());
+            let relative = memory_relative.join(&file_name);
+            let destination =
+                safe_join_within_sync_projects_root(sync_repo_path, projects_dir, &relative)?;
+            if let Ok(metadata) = fs::symlink_metadata(&destination) {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    anyhow::bail!(
+                        "auto-memory destination is not a regular file: {}",
+                        relative.display()
+                    );
+                }
+            }
+
+            // Final fail-safe revalidation immediately before copy.
+            let destination =
+                safe_join_within_sync_projects_root(sync_repo_path, projects_dir, &relative)?;
+            if let Ok(metadata) = fs::symlink_metadata(&destination) {
+                if metadata.file_type().is_symlink() || !metadata.is_file() {
+                    anyhow::bail!(
+                        "auto-memory destination is not a regular file: {}",
+                        relative.display()
+                    );
+                }
+            }
+            fs::copy(&source_path, &destination)?;
+        }
+
+        synced_count += 1;
+    }
+
+    let mut deleted_memory_count = 0;
+    for (sync_project, local_files) in &local_memory_by_sync {
+        let memory_relative = sync_project.join("memory");
+        let remote_memory =
+            safe_join_within_sync_projects_root(sync_repo_path, projects_dir, &memory_relative)?;
+        let metadata = match fs::symlink_metadata(&remote_memory) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            anyhow::bail!(
+                "auto-memory destination is not a regular directory: {}",
+                memory_relative.display()
+            );
+        }
+
+        for entry in fs::read_dir(&remote_memory)? {
+            let entry = entry?;
+            let file_name = entry.file_name();
+            let entry_path = entry.path();
+            let metadata = fs::symlink_metadata(&entry_path)?;
+            if metadata.file_type().is_symlink() {
+                anyhow::bail!(
+                    "auto-memory destination contains a symlink: {}",
+                    file_name.to_string_lossy()
+                );
+            }
+            if !metadata.is_file() || local_files.contains(&file_name) {
+                continue;
+            }
+
+            let relative = memory_relative.join(&file_name);
+            let canonical_root = validate_sync_projects_root(sync_repo_path, projects_dir)?;
+            let candidate =
+                safe_join_within_sync_projects_root(sync_repo_path, projects_dir, &relative)?;
+            validate_regular_candidate(&canonical_root, &candidate)?;
+            // Final fail-safe revalidation immediately before unlink.
+            let canonical_root = validate_sync_projects_root(sync_repo_path, projects_dir)?;
+            let candidate =
+                safe_join_within_sync_projects_root(sync_repo_path, projects_dir, &relative)?;
+            validate_regular_candidate(&canonical_root, &candidate)?;
+            fs::remove_file(candidate)?;
+            deleted_memory_count += 1;
+        }
+    }
+
+    Ok((synced_count, deleted_memory_count))
 }
 
 /// Push local Claude Code history to sync repository
@@ -334,10 +507,17 @@ pub fn push_history(
     }
 
     let claude_dir = claude_projects_dir()?;
+    validate_directory_root(&claude_dir)?;
 
-    // Check directory structure consistency before pushing
+    // Check directory structure consistency before pushing. The projects root
+    // is an untrusted checkout boundary: it must be a real directory inside
+    // the sync repository, never a symlink to an external tree.
     let projects_dir = state.sync_repo_path.join(&filter.sync_subdirectory);
-    if projects_dir.exists() {
+    if !projects_dir.exists() {
+        fs::create_dir_all(&projects_dir)?;
+    }
+    let projects_dir = validate_sync_projects_root(&state.sync_repo_path, &projects_dir)?;
+    {
         let structure_check =
             check_directory_structure_consistency(&projects_dir, filter.use_project_name_only);
 
@@ -431,8 +611,7 @@ pub fn push_history(
     // ============================================================================
     // COPY SESSIONS AND TRACK CHANGES
     // ============================================================================
-    // Note: projects_dir was already defined above for consistency check
-    fs::create_dir_all(&projects_dir)?;
+    // Note: projects_dir was validated above as the trusted sync root.
 
     // Discover existing sessions in sync repo to determine operation type
     if verbosity != VerbosityLevel::Quiet {
@@ -457,27 +636,26 @@ pub fn push_history(
     let mut project_dir_to_sync: HashMap<PathBuf, PathBuf> = HashMap::new();
 
     // Closure to compute the relative path for a session, respecting use_project_name_only
-    let compute_relative_path = |session: &crate::parser::ConversationSession| -> Option<PathBuf> {
-        if filter.use_project_name_only {
-            let full_relative = Path::new(&session.file_path)
-                .strip_prefix(&claude_dir)
-                .unwrap_or(Path::new(&session.file_path));
-
-            let filename = full_relative.file_name()?;
-            let project_name = session.project_name()?;
-            Some(PathBuf::from(project_name).join(filename))
-        } else {
-            Some(
-                Path::new(&session.file_path)
-                    .strip_prefix(&claude_dir)
-                    .unwrap_or(Path::new(&session.file_path))
-                    .to_path_buf(),
-            )
-        }
-    };
+    let compute_relative_path =
+        |session: &crate::parser::ConversationSession| -> Result<Option<PathBuf>> {
+            if filter.use_project_name_only {
+                let filename = Path::new(&session.file_path)
+                    .file_name()
+                    .ok_or_else(|| anyhow::anyhow!("session file has no filename"))?;
+                let Some(project_name) = session.project_name() else {
+                    return Ok(None);
+                };
+                Ok(Some(safe_project_relative_path(project_name, filename)?))
+            } else {
+                Ok(Some(safe_relative_path_within_root(
+                    &claude_dir,
+                    Path::new(&session.file_path),
+                )?))
+            }
+        };
 
     for session in &sessions {
-        let relative_path = match compute_relative_path(session) {
+        let relative_path = match compute_relative_path(session)? {
             Some(path) => path,
             None => {
                 skipped_no_cwd += 1;
@@ -498,7 +676,7 @@ pub fn push_history(
             }
         }
 
-        let dest_path = projects_dir.join(&relative_path);
+        let dest_path = safe_join_within_root(&projects_dir, &relative_path)?;
 
         // Determine operation type based on existing state
         let operation = if let Some(existing) = existing_map.get(&session.session_id) {
@@ -554,7 +732,7 @@ pub fn push_history(
     if verbosity == VerbosityLevel::Verbose {
         println!("{}", "Files to be pushed:".bold());
         for (idx, session) in sessions.iter().enumerate().take(20) {
-            let Some(relative_path) = compute_relative_path(session) else {
+            let Some(relative_path) = compute_relative_path(session)? else {
                 continue;
             };
 
@@ -690,12 +868,19 @@ pub fn push_history(
                 // Physical sync of the deletion. No tombstone is written —
                 // prune/window are physical syncs, not intentional-delete
                 // registrations.
-                for file_path in &missing_in_repo {
-                    if let Err(e) = fs::remove_file(file_path) {
-                        log::warn!("Failed to prune missing session: {}", e);
-                    } else {
-                        deleted_from_repo += 1;
-                        log::debug!("Pruned missing session: {}", file_path.display());
+                match prune_missing_repo_sessions(
+                    &state.sync_repo_path,
+                    &projects_dir,
+                    &missing_in_repo,
+                ) {
+                    Ok(count) => {
+                        deleted_from_repo = count;
+                        for relative in &missing_in_repo {
+                            log::debug!("Pruned missing session: {}", relative.display());
+                        }
+                    }
+                    Err(error) => {
+                        log::warn!("Failed to prune missing sessions safely: {}", error);
                     }
                 }
                 if verbosity != VerbosityLevel::Quiet {
@@ -752,59 +937,12 @@ pub fn push_history(
             println!("  {} auto memory directories...", "Syncing".cyan());
         }
 
-        // project_dir_to_sync was built during session loop above.
-        // NOTE: We cannot use extract_project_name() because it splits by '-'
-        // and fails for project names containing hyphens (e.g. "claude-openclaw").
-        let mut synced_count = 0;
-        // Collect local memory file names per sync project during copy,
-        // so we can detect deletions without re-scanning directories.
-        let mut local_memory_by_sync: HashMap<
-            PathBuf,
-            std::collections::HashSet<std::ffi::OsString>,
-        > = HashMap::new();
-        for (local_dir, sync_project) in &project_dir_to_sync {
-            let local_memory = local_dir.join("memory");
-            if !local_memory.is_dir() {
-                continue;
-            }
-
-            let dest_memory_dir = projects_dir.join(sync_project).join("memory");
-
-            // Create destination directory
-            if let Err(e) = fs::create_dir_all(&dest_memory_dir) {
-                log::warn!(
-                    "Failed to create memory directory for {}: {}",
-                    sync_project.display(),
-                    e
-                );
-                continue;
-            }
-
-            // Copy memory files and collect names for deletion detection
-            let file_set = local_memory_by_sync
-                .entry(sync_project.clone())
-                .or_default();
-            if let Ok(entries) = fs::read_dir(&local_memory) {
-                for entry in entries.filter_map(|e| e.ok()) {
-                    if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-                        file_set.insert(entry.file_name());
-                        let dest_file = dest_memory_dir.join(entry.file_name());
-                        if let Err(e) = fs::copy(entry.path(), &dest_file) {
-                            log::warn!("Failed to copy memory file: {}", e);
-                        }
-                    }
-                }
-            }
-
-            synced_count += 1;
-            if verbosity == VerbosityLevel::Verbose {
-                println!(
-                    "    {} {}",
-                    "→".cyan(),
-                    sync_project.join("memory").display()
-                );
-            }
-        }
+        let (synced_count, deleted_memory_count) = sync_auto_memory_directories(
+            &state.sync_repo_path,
+            &projects_dir,
+            &claude_dir,
+            &project_dir_to_sync,
+        )?;
 
         if synced_count > 0 {
             if verbosity != VerbosityLevel::Quiet {
@@ -816,31 +954,6 @@ pub fn push_history(
             }
         } else if verbosity == VerbosityLevel::Verbose {
             println!("  {} No memory directories found", "ℹ".dimmed());
-        }
-
-        // Remove remote memory files that no longer exist locally.
-        // local_memory_by_sync was populated during the copy phase above.
-        let mut deleted_memory_count = 0;
-        for (sync_project, local_files) in &local_memory_by_sync {
-            let remote_memory = projects_dir.join(sync_project).join("memory");
-            if !remote_memory.is_dir() {
-                continue;
-            }
-
-            if let Ok(entries) = fs::read_dir(&remote_memory) {
-                for entry in entries.filter_map(|e| e.ok()) {
-                    if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-                        let file_name = entry.file_name();
-                        if !local_files.contains(&file_name) {
-                            if let Err(e) = fs::remove_file(entry.path()) {
-                                log::warn!("Failed to remove deleted memory file: {}", e);
-                            } else {
-                                deleted_memory_count += 1;
-                            }
-                        }
-                    }
-                }
-            }
         }
 
         if deleted_memory_count > 0 && verbosity != VerbosityLevel::Quiet {
@@ -1179,6 +1292,206 @@ mod push_auto_heal_tests {
         assert!(conflicts[0].ends_with("session.jsonl"));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn rebase_conflict_scan_skips_directory_and_file_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_conflict = outside.path().join("conflict.jsonl");
+        fs::write(&outside_conflict, "<<<<<<< HEAD\nconflict\n").unwrap();
+        symlink(outside.path(), temp.path().join("escape")).unwrap();
+        symlink(&outside_conflict, temp.path().join("alias.jsonl")).unwrap();
+
+        assert!(find_rebase_conflict_files(temp.path()).is_empty());
+    }
+
+    #[test]
+    fn auto_memory_sync_writes_normal_destination_under_guarded_projects_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let projects = repo.join("projects");
+        let local_project = temp.path().join("local/project");
+        let local_memory = local_project.join("memory");
+        fs::create_dir_all(&local_memory).unwrap();
+        fs::write(local_memory.join("note.md"), b"local memory").unwrap();
+        fs::create_dir_all(&projects).unwrap();
+
+        let mut mappings = HashMap::new();
+        mappings.insert(local_project, PathBuf::from("project"));
+
+        let (synced, deleted) =
+            sync_auto_memory_directories(&repo, &projects, &temp.path().join("local"), &mappings)
+                .unwrap();
+        assert_eq!((synced, deleted), (1, 0));
+        assert_eq!(
+            fs::read(projects.join("project/memory/note.md")).unwrap(),
+            b"local memory"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auto_memory_sync_rejects_root_project_memory_and_file_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        fn run_case(repo: &Path, projects: &Path, local_project: &Path, outside_marker: &Path) {
+            let mut mappings = HashMap::new();
+            mappings.insert(local_project.to_path_buf(), PathBuf::from("project"));
+            assert!(sync_auto_memory_directories(
+                repo,
+                projects,
+                local_project.parent().unwrap(),
+                &mappings,
+            )
+            .is_err());
+            assert_eq!(fs::read(outside_marker).unwrap(), b"must survive");
+        }
+
+        // A symlink at the projects root must never redefine the sync boundary.
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let projects = repo.join("projects");
+        let outside = temp.path().join("outside");
+        let outside_marker = outside.join("marker");
+        let local_project = temp.path().join("local/project");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(&outside_marker, b"must survive").unwrap();
+        fs::create_dir_all(local_project.join("memory")).unwrap();
+        fs::write(local_project.join("memory/note.md"), b"local").unwrap();
+        symlink(&outside, &projects).unwrap();
+        run_case(&repo, &projects, &local_project, &outside_marker);
+
+        // Project, memory, and destination file symlinks are each rejected.
+        for mode in ["project", "memory", "file"] {
+            let temp = tempfile::tempdir().unwrap();
+            let repo = temp.path().join("repo");
+            let projects = repo.join("projects");
+            let outside = temp.path().join("outside");
+            let outside_marker = outside.join("marker");
+            let local_project = temp.path().join("local/project");
+            fs::create_dir_all(&projects).unwrap();
+            fs::create_dir_all(&outside).unwrap();
+            fs::write(&outside_marker, b"must survive").unwrap();
+            fs::create_dir_all(local_project.join("memory")).unwrap();
+            fs::write(local_project.join("memory/note.md"), b"local").unwrap();
+
+            match mode {
+                "project" => symlink(&outside, projects.join("project")).unwrap(),
+                "memory" => {
+                    fs::create_dir_all(projects.join("project")).unwrap();
+                    symlink(&outside, projects.join("project/memory")).unwrap();
+                }
+                "file" => {
+                    fs::create_dir_all(projects.join("project/memory")).unwrap();
+                    symlink(&outside_marker, projects.join("project/memory/note.md")).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            run_case(&repo, &projects, &local_project, &outside_marker);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auto_memory_sync_rejects_local_project_and_memory_symlinks_without_copy_or_prune() {
+        use std::os::unix::fs::symlink;
+
+        for mode in ["project", "memory"] {
+            let temp = tempfile::tempdir().unwrap();
+            let repo = temp.path().join("repo");
+            let projects = repo.join("projects");
+            let local_root = temp.path().join("local");
+            let local_project = local_root.join("project");
+            let outside_project = temp.path().join("outside-project");
+            let outside_memory = outside_project.join("memory");
+            fs::create_dir_all(&projects).unwrap();
+            fs::create_dir_all(&outside_memory).unwrap();
+            fs::write(outside_memory.join("secret.md"), b"must not copy").unwrap();
+
+            let remote_memory = projects.join("project/memory");
+            fs::create_dir_all(&remote_memory).unwrap();
+            let remote_marker = remote_memory.join("keep.md");
+            fs::write(&remote_marker, b"must survive").unwrap();
+
+            match mode {
+                "project" => {
+                    fs::create_dir_all(&local_root).unwrap();
+                    symlink(&outside_project, &local_project).unwrap();
+                }
+                "memory" => {
+                    fs::create_dir_all(&local_project).unwrap();
+                    symlink(&outside_memory, local_project.join("memory")).unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            let mut mappings = HashMap::new();
+            mappings.insert(local_project, PathBuf::from("project"));
+            assert!(
+                sync_auto_memory_directories(&repo, &projects, &local_root, &mappings).is_err()
+            );
+            assert!(!remote_memory.join("secret.md").exists());
+            assert_eq!(fs::read(&remote_marker).unwrap(), b"must survive");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auto_memory_sync_rejects_local_projects_root_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let repo = temp.path().join("repo");
+        let projects = repo.join("projects");
+        let outside = temp.path().join("outside");
+        let outside_memory = outside.join("project/memory");
+        let local_root = temp.path().join("local-link");
+        fs::create_dir_all(&projects).unwrap();
+        fs::create_dir_all(&outside_memory).unwrap();
+        fs::write(outside_memory.join("secret.md"), b"must not copy").unwrap();
+        symlink(&outside, &local_root).unwrap();
+
+        let remote_memory = projects.join("project/memory");
+        fs::create_dir_all(&remote_memory).unwrap();
+        let remote_marker = remote_memory.join("keep.md");
+        fs::write(&remote_marker, b"must survive").unwrap();
+
+        let mut mappings = HashMap::new();
+        mappings.insert(local_root.join("project"), PathBuf::from("project"));
+        assert!(sync_auto_memory_directories(&repo, &projects, &local_root, &mappings).is_err());
+        assert!(!remote_memory.join("secret.md").exists());
+        assert_eq!(fs::read(&remote_marker).unwrap(), b"must survive");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn push_and_prune_reject_projects_root_symlink_without_external_write_or_delete() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let sync_repo = temp.path().join("repo");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&sync_repo).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let outside_file = outside.join("demo/session.jsonl");
+        fs::create_dir_all(outside_file.parent().unwrap()).unwrap();
+        fs::write(&outside_file, b"must survive\n").unwrap();
+        let projects = sync_repo.join("projects");
+        symlink(&outside, &projects).unwrap();
+
+        assert!(validate_sync_projects_root(&sync_repo, &projects).is_err());
+        assert!(prune_missing_repo_sessions(
+            &sync_repo,
+            &projects,
+            &[PathBuf::from("demo/session.jsonl")],
+        )
+        .is_err());
+        assert_eq!(fs::read_to_string(&outside_file).unwrap(), "must survive\n");
+    }
+
     #[test]
     fn test_decide_missing_action_protect() {
         assert_eq!(decide_missing_action(false, None), MissingAction::Protect);
@@ -1186,7 +1499,10 @@ mod push_auto_heal_tests {
 
     #[test]
     fn test_decide_missing_action_manual_prune_wins_over_window() {
-        assert_eq!(decide_missing_action(true, None), MissingAction::PruneManual);
+        assert_eq!(
+            decide_missing_action(true, None),
+            MissingAction::PruneManual
+        );
         assert_eq!(
             decide_missing_action(true, Some(600)),
             MissingAction::PruneManual

@@ -5,6 +5,9 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+use crate::parser::ParseOutcome;
+use crate::session_diagnostics::legacy_walk_entry;
+
 #[derive(Debug, Clone)]
 pub struct CodexSession {
     pub session_id: String,
@@ -29,6 +32,10 @@ pub struct CodexDisplayMessage {
 
 impl CodexSession {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
+        Ok(Self::from_file_with_report(path)?.value)
+    }
+
+    pub fn from_file_with_report<P: AsRef<Path>>(path: P) -> Result<ParseOutcome<Self>> {
         let path = path.as_ref();
         let file =
             File::open(path).with_context(|| format!("Failed to open file: {}", path.display()))?;
@@ -37,6 +44,7 @@ impl CodexSession {
         let mut entries = Vec::new();
         let mut session_id = None;
         let mut cwd = None;
+        let mut malformed_lines = 0;
 
         for (line_num, line) in reader.lines().enumerate() {
             let line = line.with_context(|| {
@@ -49,6 +57,7 @@ impl CodexSession {
             let value: Value = match serde_json::from_str(&line) {
                 Ok(value) => value,
                 Err(e) => {
+                    malformed_lines += 1;
                     log::debug!(
                         "Skipping malformed Codex line {} in {}: {}",
                         line_num + 1,
@@ -96,11 +105,14 @@ impl CodexSession {
             .or_else(|| session_id_from_filename(path))
             .with_context(|| format!("No Codex session ID found: {}", path.display()))?;
 
-        Ok(Self {
-            session_id,
-            entries,
-            file_path: path.to_path_buf(),
-            cwd,
+        Ok(ParseOutcome {
+            value: Self {
+                session_id,
+                entries,
+                file_path: path.to_path_buf(),
+                cwd,
+            },
+            malformed_lines,
         })
     }
 
@@ -191,18 +203,20 @@ pub fn discover_codex_sessions(base_path: &Path) -> Result<Vec<CodexSession>> {
     }
 
     let mut sessions = Vec::new();
-    for entry in WalkDir::new(base_path)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(base_path).follow_links(false).into_iter() {
+        let Some(entry) = legacy_walk_entry(entry, "codex") else {
+            continue;
+        };
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
             continue;
         }
         match CodexSession::from_file(path) {
             Ok(session) => sessions.push(session),
-            Err(e) => log::warn!("Failed to parse Codex session {}: {}", path.display(), e),
+            Err(_) => log::warn!(
+                target: crate::logger::SCAN_DIAGNOSTICS_TARGET,
+                "legacy codex session discovery skipped an unparseable file"
+            ),
         }
     }
 
@@ -314,6 +328,26 @@ pub(crate) fn is_system_content(text: &str) -> bool {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn report_counts_malformed_lines_and_keeps_valid_codex_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rollout-2026-05-10T00-00-00-abc123.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                "{not valid json\n",
+                r#"{"type":"session_meta","payload":{"id":"partial-codex","cwd":"/tmp/demo"}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let outcome = CodexSession::from_file_with_report(&path).unwrap();
+        assert_eq!(outcome.malformed_lines, 1);
+        assert_eq!(outcome.value.session_id, "partial-codex");
+        assert_eq!(outcome.value.entries.len(), 1);
+    }
 
     #[test]
     fn parses_codex_session_messages() {

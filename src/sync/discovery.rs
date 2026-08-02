@@ -7,6 +7,10 @@ use walkdir::WalkDir;
 
 use crate::filter::FilterConfig;
 use crate::parser::ConversationSession;
+use crate::path_security::{
+    validate_directory_candidate, validate_directory_root, validate_regular_candidate,
+};
+use crate::session_diagnostics::legacy_walk_entry;
 
 /// Threshold for warning about large conversation files (10 MB)
 pub(crate) const LARGE_FILE_WARNING_THRESHOLD: u64 = 10 * 1024 * 1024;
@@ -29,22 +33,24 @@ pub(crate) fn discover_sessions(
 ) -> Result<Vec<ConversationSession>> {
     let mut sessions = Vec::new();
 
-    for entry in WalkDir::new(base_path)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(base_path).follow_links(false).into_iter() {
+        let Some(entry) = legacy_walk_entry(entry, "claude") else {
+            continue;
+        };
         let path = entry.path();
 
         if path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
             if !filter.should_include(path) {
                 continue;
             }
+            if validate_regular_candidate(base_path, path).is_err() {
+                continue;
+            }
 
             match ConversationSession::from_file(path) {
                 Ok(session) => sessions.push(session),
-                Err(e) => {
-                    log::warn!("Failed to parse {}: {}", path.display(), e);
+                Err(_) => {
+                    log::warn!(target: crate::logger::SCAN_DIAGNOSTICS_TARGET, "legacy Claude session discovery skipped an unparseable file");
                 }
             }
         }
@@ -154,10 +160,17 @@ pub fn find_local_project_by_name(
     claude_projects_dir: &Path,
     project_name: &str,
 ) -> Option<PathBuf> {
+    validate_directory_root(claude_projects_dir).ok()?;
     let entries: Vec<_> = std::fs::read_dir(claude_projects_dir)
         .ok()?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_dir())
+        .filter_map(|entry| entry.ok())
+        .filter(|entry| {
+            let path = entry.path();
+            matches!(
+                std::fs::symlink_metadata(&path),
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink()
+            ) && validate_directory_candidate(claude_projects_dir, &path).is_ok()
+        })
         .collect();
 
     // Pass 1 (fast): match by encoded directory name.
@@ -214,14 +227,25 @@ pub fn find_local_project_by_name(
 
 /// Extract the real project name from a local project directory by reading its JSONL files.
 fn get_project_name_from_dir(dir_path: &Path) -> Option<String> {
+    validate_directory_root(dir_path).ok()?;
     let files = std::fs::read_dir(dir_path).ok()?;
-    for file_entry in files.filter_map(|f| f.ok()) {
+    for file_entry in files.filter_map(|file| file.ok()) {
         let file_path = file_entry.path();
-        if file_path.extension().and_then(|s| s.to_str()) == Some("jsonl") {
-            if let Ok(session) = crate::parser::ConversationSession::from_file(&file_path) {
-                if let Some(real_name) = session.project_name() {
-                    return Some(real_name.to_string());
-                }
+        if file_path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Ok(metadata) = std::fs::symlink_metadata(&file_path) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            continue;
+        }
+        if validate_regular_candidate(dir_path, &file_path).is_err() {
+            continue;
+        }
+        if let Ok(session) = crate::parser::ConversationSession::from_file(&file_path) {
+            if let Some(real_name) = session.project_name() {
+                return Some(real_name.to_string());
             }
         }
     }
@@ -237,26 +261,37 @@ pub fn find_colliding_projects(
 
     let mut collisions: HashMap<String, Vec<PathBuf>> = HashMap::new();
 
+    if validate_directory_root(claude_projects_dir).is_err() {
+        return collisions;
+    }
     if let Ok(entries) = std::fs::read_dir(claude_projects_dir) {
-        for entry in entries.filter_map(|e| e.ok()) {
+        for entry in entries.filter_map(|entry| entry.ok()) {
             let path = entry.path();
-            if path.is_dir() {
-                // Prefer real project name from JSONL cwd, fall back to dir name extraction.
-                // Skip the fallback when the dir name ends with '-': a non-ASCII
-                // project name (e.g. Chinese) encodes to trailing dashes, and
-                // extract_project_name would misread the PARENT segment as the
-                // project name, producing a false collision with a real sibling.
-                // Without a reliable name such a dir cannot be grouped at all.
-                let project_name = get_project_name_from_dir(&path).unwrap_or_else(|| {
-                    path.file_name()
-                        .and_then(|n| n.to_str())
-                        .filter(|n| !n.ends_with('-'))
-                        .map(|n| extract_project_name(n).to_string())
-                        .unwrap_or_default()
-                });
-                if !project_name.is_empty() {
-                    collisions.entry(project_name).or_default().push(path);
-                }
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink()
+                || !metadata.is_dir()
+                || validate_directory_candidate(claude_projects_dir, &path).is_err()
+            {
+                continue;
+            }
+
+            // Prefer real project name from JSONL cwd, fall back to dir name extraction.
+            // Skip the fallback when the dir name ends with '-': a non-ASCII
+            // project name (e.g. Chinese) encodes to trailing dashes, and
+            // extract_project_name would misread the PARENT segment as the
+            // project name, producing a false collision with a real sibling.
+            // Without a reliable name such a dir cannot be grouped at all.
+            let project_name = get_project_name_from_dir(&path).unwrap_or_else(|| {
+                path.file_name()
+                    .and_then(|n| n.to_str())
+                    .filter(|n| !n.ends_with('-'))
+                    .map(|n| extract_project_name(n).to_string())
+                    .unwrap_or_default()
+            });
+            if !project_name.is_empty() {
+                collisions.entry(project_name).or_default().push(path);
             }
         }
     }
@@ -716,6 +751,22 @@ mod tests {
     }
 
     #[test]
+    fn legacy_claude_parser_warning_uses_safe_diagnostics_record() {
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/sync/discovery.rs"
+        ));
+        let implementation = source.split("#[cfg(test)]").next().unwrap();
+
+        assert!(implementation.contains("target: crate::logger::SCAN_DIAGNOSTICS_TARGET"));
+        assert!(
+            implementation.contains("legacy Claude session discovery skipped an unparseable file")
+        );
+        assert!(!implementation.contains("Failed to parse {}: {}"));
+        assert!(!implementation.contains("path.display(), e"));
+    }
+
+    #[test]
     fn test_find_colliding_projects_non_ascii_no_cwd_no_false_collision() {
         // When a non-ASCII project dir has NO cwd (only snapshot/summary files),
         // get_project_name_from_dir returns None and the code falls back to
@@ -740,6 +791,48 @@ mod tests {
         assert!(
             collisions.is_empty(),
             "Non-ASCII dir without cwd must not collide with parent-named project via fallback"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_matching_rejects_root_and_project_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().unwrap();
+        let outside = temp.path().join("outside");
+        let outside_project = outside.join("myproject");
+        fs::create_dir_all(&outside_project).unwrap();
+
+        let root_link = temp.path().join("projects-link");
+        symlink(&outside, &root_link).unwrap();
+        assert!(find_local_project_by_name(&root_link, "myproject").is_none());
+        assert!(find_colliding_projects(&root_link).is_empty());
+
+        let projects = temp.path().join("projects");
+        fs::create_dir_all(&projects).unwrap();
+        symlink(&outside_project, projects.join("myproject")).unwrap();
+        assert!(find_local_project_by_name(&projects, "myproject").is_none());
+        assert!(find_colliding_projects(&projects).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discover_sessions_rejects_file_symlink_candidates() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempdir().unwrap();
+        let root = temp_dir.path().join("projects");
+        fs::create_dir_all(&root).unwrap();
+        let outside = temp_dir.path().join("outside.jsonl");
+        create_session_with_cwd(temp_dir.path(), "outside", "/tmp/outside");
+        symlink(&outside, root.join("alias.jsonl")).unwrap();
+
+        let sessions =
+            discover_sessions(&root, &crate::filter::FilterConfig::no_size_limit()).unwrap();
+        assert!(
+            sessions.is_empty(),
+            "file symlink must not be parsed as a session"
         );
     }
 }

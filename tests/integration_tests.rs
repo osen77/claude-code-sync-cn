@@ -65,6 +65,7 @@ fn test_end_to_end_sync_workflow() {
     // Test infrastructure is set up correctly
 }
 
+#[cfg(unix)]
 #[test]
 fn test_file_permissions() {
     use std::os::unix::fs::PermissionsExt;
@@ -196,12 +197,12 @@ fn test_path_handling_with_spaces() {
 fn test_symlink_handling() {
     let temp_dir = TempDir::new().unwrap();
     let real_file = temp_dir.path().join("real.jsonl");
-    let link_file = temp_dir.path().join("link.jsonl");
 
     fs::write(&real_file, r#"{"test":"data"}"#).unwrap();
 
     #[cfg(unix)]
     {
+        let link_file = temp_dir.path().join("link.jsonl");
         std::os::unix::fs::symlink(&real_file, &link_file).unwrap();
         assert!(link_file.exists());
     }

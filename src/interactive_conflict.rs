@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::conflict::{Conflict, ConflictResolution};
 use crate::parser::ConversationSession;
+use crate::path_security::prepare_regular_file_destination;
 
 /// Resolution action chosen by the user
 #[derive(Debug, Clone)]
@@ -328,6 +329,22 @@ pub fn resolve_conflicts_interactive(conflicts: &mut [Conflict]) -> Result<Resol
     resolve_conflicts_interactive_with_sessions(conflicts, None, None)
 }
 
+fn write_session_within_root(
+    session: &ConversationSession,
+    root: &Path,
+    destination: &Path,
+) -> Result<()> {
+    let relative = destination.strip_prefix(root).with_context(|| {
+        format!(
+            "conflict destination is outside root: {}",
+            destination.display()
+        )
+    })?;
+    prepare_regular_file_destination(root, relative)?;
+    let guarded = prepare_regular_file_destination(root, relative)?;
+    session.write_to_file(guarded)
+}
+
 /// Apply the resolution results by copying/writing files
 ///
 /// # Arguments
@@ -359,9 +376,8 @@ pub fn apply_resolutions(
                 file_path: conflict.local_file.to_string_lossy().to_string(),
             };
 
-            // Write to local file
-            merged_session
-                .write_to_file(&conflict.local_file)
+            // Write to the local file through the trusted Claude projects root.
+            write_session_within_root(&merged_session, claude_dir, &conflict.local_file)
                 .with_context(|| {
                     format!(
                         "Failed to write smart merged file: {}",
@@ -385,8 +401,7 @@ pub fn apply_resolutions(
             .find(|s| s.session_id == conflict.session_id)
         {
             // Write remote session to local path (overwrite)
-            remote_session
-                .write_to_file(&conflict.local_file)
+            write_session_within_root(remote_session, claude_dir, &conflict.local_file)
                 .with_context(|| {
                     format!(
                         "Failed to overwrite local file with remote: {}",
@@ -417,14 +432,14 @@ pub fn apply_resolutions(
             .iter()
             .find(|s| s.session_id == conflict.session_id)
         {
-            remote_session
-                .write_to_file(&renamed_path)
-                .with_context(|| {
+            write_session_within_root(remote_session, claude_dir, &renamed_path).with_context(
+                || {
                     format!(
                         "Failed to write remote conflict version: {}",
                         renamed_path.display()
                     )
-                })?;
+                },
+            )?;
 
             let relative_renamed = renamed_path
                 .strip_prefix(claude_dir)
@@ -447,6 +462,8 @@ pub fn apply_resolutions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::fs;
 
     #[test]
     fn test_resolution_result() {
@@ -455,6 +472,62 @@ mod tests {
         assert_eq!(result.keep_local.len(), 0);
         assert_eq!(result.keep_remote.len(), 0);
         assert_eq!(result.keep_both.len(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn smart_merge_rejects_root_project_and_file_symlink_destinations() {
+        use std::os::unix::fs::symlink;
+
+        for mode in ["root", "project", "file"] {
+            let temp = tempfile::tempdir().unwrap();
+            let real_root = temp.path().join("local");
+            let outside = temp.path().join("outside");
+            let outside_file = outside.join("session.jsonl");
+            fs::create_dir_all(&outside).unwrap();
+            fs::write(&outside_file, b"outside-marker").unwrap();
+
+            let claude_dir = if mode == "root" {
+                let root_link = temp.path().join("local-link");
+                symlink(&outside, &root_link).unwrap();
+                root_link
+            } else {
+                fs::create_dir_all(&real_root).unwrap();
+                if mode == "project" {
+                    symlink(&outside, real_root.join("project")).unwrap();
+                } else {
+                    fs::create_dir_all(real_root.join("project")).unwrap();
+                    symlink(&outside_file, real_root.join("project/session.jsonl")).unwrap();
+                }
+                real_root.clone()
+            };
+
+            let local_file = if mode == "root" {
+                claude_dir.join("session.jsonl")
+            } else {
+                claude_dir.join("project/session.jsonl")
+            };
+            let conflict = Conflict {
+                session_id: "session".to_string(),
+                local_file,
+                remote_file: temp.path().join("remote/session.jsonl"),
+                local_timestamp: None,
+                remote_timestamp: None,
+                local_message_count: 0,
+                remote_message_count: 0,
+                local_hash: "local".to_string(),
+                remote_hash: "remote".to_string(),
+                resolution: ConflictResolution::SmartMerge {
+                    merged_entries: Vec::new(),
+                    stats: crate::merge::MergeStats::default(),
+                },
+            };
+            let mut result = ResolutionResult::new();
+            result.smart_merge.push(conflict);
+
+            assert!(apply_resolutions(&result, &[], &claude_dir, temp.path()).is_err());
+            assert_eq!(fs::read(&outside_file).unwrap(), b"outside-marker");
+        }
     }
 
     #[test]

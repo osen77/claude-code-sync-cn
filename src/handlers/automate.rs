@@ -136,6 +136,7 @@ fn print_success_message(wrapper_path: &std::path::Path) -> Result<()> {
 
     #[cfg(windows)]
     {
+        let _ = wrapper_path;
         println!(
             "  1. Use '{}' instead of 'claude' to start Claude Code",
             "claude-sync".cyan()

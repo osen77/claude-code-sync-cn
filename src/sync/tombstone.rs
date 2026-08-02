@@ -14,10 +14,16 @@
 //! `session_id`. Records are never removed in the first version (no GC); see
 //! the plan's "known limitations" section.
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use tempfile::NamedTempFile;
+
+use crate::path_security::{
+    safe_join_within_root, validate_directory_candidate, validate_regular_candidate,
+};
 
 /// Subdirectory inside the sync repo that holds ccs bookkeeping files.
 const CCS_DIR: &str = ".ccs";
@@ -27,6 +33,50 @@ const DELETIONS_FILE: &str = "deletions.json";
 
 /// Current schema version of the registry file.
 const CURRENT_VERSION: u32 = 1;
+
+fn validate_repo_root(repo_path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(repo_path).with_context(|| {
+        format!(
+            "Failed to inspect tombstone repository root: {}",
+            repo_path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(anyhow!(
+            "tombstone repository root must be a non-symlink directory: {}",
+            repo_path.display()
+        ));
+    }
+    fs::canonicalize(repo_path).with_context(|| {
+        format!(
+            "Failed to resolve tombstone repository root: {}",
+            repo_path.display()
+        )
+    })?;
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn repo_root_from_registry_path(file_path: &Path) -> Result<&Path> {
+    if file_path.file_name() != Some(std::ffi::OsStr::new(DELETIONS_FILE)) {
+        return Err(anyhow!(
+            "invalid tombstone registry filename: {}",
+            file_path.display()
+        ));
+    }
+    let ccs_dir = file_path
+        .parent()
+        .ok_or_else(|| anyhow!("tombstone registry path has no parent"))?;
+    if ccs_dir.file_name() != Some(std::ffi::OsStr::new(CCS_DIR)) {
+        return Err(anyhow!(
+            "tombstone registry must be stored below {CCS_DIR}: {}",
+            file_path.display()
+        ));
+    }
+    ccs_dir
+        .parent()
+        .ok_or_else(|| anyhow!("tombstone registry path has no repository root"))
+}
 
 /// Why a session was deleted. Drives commit message wording and lets future
 /// tooling distinguish user-driven deletes from batch cleanup or forced prune.
@@ -93,6 +143,7 @@ impl Default for TombstoneRegistry {
 
 impl TombstoneRegistry {
     /// Path to the registry file inside a given sync repo.
+    #[allow(dead_code)]
     pub fn file_path(repo_path: &Path) -> PathBuf {
         repo_path.join(CCS_DIR).join(DELETIONS_FILE)
     }
@@ -100,57 +151,137 @@ impl TombstoneRegistry {
     /// Load the registry from a sync repo. Returns an empty registry when the
     /// file does not exist yet (first deletion on this device).
     pub fn load(repo_path: &Path) -> Result<Self> {
-        Self::load_from_path(&Self::file_path(repo_path))
-    }
-
-    /// Load from an explicit file path. Mainly for tests, but also used by
-    /// `load` to centralise the read logic.
-    pub fn load_from_path(file_path: &Path) -> Result<Self> {
-        if !file_path.exists() {
-            return Ok(Self::default());
+        validate_repo_root(repo_path)?;
+        let ccs_dir = safe_join_within_root(repo_path, Path::new(CCS_DIR))?;
+        match fs::symlink_metadata(&ccs_dir) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(anyhow!(
+                    "tombstone directory must be a non-symlink directory: {}",
+                    ccs_dir.display()
+                ));
+            }
+            Ok(_) => validate_directory_candidate(repo_path, &ccs_dir)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(error) => return Err(error.into()),
         }
 
-        let content = fs::read_to_string(file_path).with_context(|| {
+        let file_path =
+            safe_join_within_root(repo_path, Path::new(CCS_DIR).join(DELETIONS_FILE).as_path())?;
+        match fs::symlink_metadata(&file_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err(anyhow!(
+                    "tombstone registry must be a regular non-symlink file: {}",
+                    file_path.display()
+                ));
+            }
+            Ok(_) => validate_regular_candidate(repo_path, &file_path)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Self::default());
+            }
+            Err(error) => return Err(error.into()),
+        }
+
+        let content = fs::read_to_string(&file_path).with_context(|| {
             format!(
                 "Failed to read tombstone registry from: {}",
                 file_path.display()
             )
         })?;
-
-        let registry: TombstoneRegistry = serde_json::from_str(&content).with_context(|| {
+        serde_json::from_str(&content).with_context(|| {
             format!(
                 "Failed to parse tombstone registry JSON from: {}",
                 file_path.display()
             )
-        })?;
+        })
+    }
 
-        Ok(registry)
+    /// Load from an explicit canonical registry path.
+    ///
+    /// The path must use the standard `<repo>/.ccs/deletions.json` layout so
+    /// the repository root can be validated before reading.
+    #[allow(dead_code)]
+    pub fn load_from_path(file_path: &Path) -> Result<Self> {
+        Self::load(repo_root_from_registry_path(file_path)?)
     }
 
     /// Save the registry to its default location inside the sync repo.
     pub fn save(&self, repo_path: &Path) -> Result<()> {
-        self.save_to_path(&Self::file_path(repo_path))
-    }
+        validate_repo_root(repo_path)?;
+        let ccs_dir = safe_join_within_root(repo_path, Path::new(CCS_DIR))?;
+        match fs::symlink_metadata(&ccs_dir) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+                return Err(anyhow!(
+                    "tombstone directory must be a non-symlink directory: {}",
+                    ccs_dir.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::create_dir(&ccs_dir).with_context(|| {
+                    format!(
+                        "Failed to create tombstone directory: {}",
+                        ccs_dir.display()
+                    )
+                })?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+        validate_directory_candidate(repo_path, &ccs_dir)?;
 
-    /// Save to an explicit file path, creating parent directories as needed.
-    pub fn save_to_path(&self, file_path: &Path) -> Result<()> {
-        if let Some(parent) = file_path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("Failed to create tombstone directory: {}", parent.display())
-            })?;
+        let file_path =
+            safe_join_within_root(repo_path, Path::new(CCS_DIR).join(DELETIONS_FILE).as_path())?;
+        match fs::symlink_metadata(&file_path) {
+            Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+                return Err(anyhow!(
+                    "tombstone registry must be a regular non-symlink file: {}",
+                    file_path.display()
+                ));
+            }
+            Ok(_) => validate_regular_candidate(repo_path, &file_path)?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
 
         let content =
-            serde_json::to_string_pretty(self).context("Failed to serialize tombstone registry")?;
-
-        fs::write(file_path, content).with_context(|| {
+            serde_json::to_vec_pretty(self).context("Failed to serialize tombstone registry")?;
+        let mut temp = NamedTempFile::new_in(&ccs_dir).with_context(|| {
             format!(
-                "Failed to write tombstone registry to: {}",
-                file_path.display()
+                "Failed to create temporary tombstone registry in: {}",
+                ccs_dir.display()
             )
         })?;
+        temp.write_all(&content)
+            .context("Failed to write temporary tombstone registry")?;
+        temp.flush()
+            .context("Failed to flush temporary tombstone registry")?;
+        temp.as_file()
+            .sync_all()
+            .context("Failed to sync temporary tombstone registry")?;
 
+        validate_directory_candidate(repo_path, &ccs_dir)?;
+        if file_path.exists() {
+            validate_regular_candidate(repo_path, &file_path)?;
+        }
+        temp.persist(&file_path)
+            .map_err(|error| error.error)
+            .with_context(|| {
+                format!(
+                    "Failed to atomically replace tombstone registry: {}",
+                    file_path.display()
+                )
+            })?;
         Ok(())
+    }
+
+    /// Save to an explicit canonical registry path.
+    ///
+    /// The path must use the standard `<repo>/.ccs/deletions.json` layout so
+    /// the repository root can be validated before writing.
+    #[allow(dead_code)]
+    pub fn save_to_path(&self, file_path: &Path) -> Result<()> {
+        self.save(repo_root_from_registry_path(file_path)?)
     }
 
     /// Add a deletion record. If a record with the same `session_id` already
@@ -182,13 +313,13 @@ impl TombstoneRegistry {
     }
 
     /// Convenience alias for [`contains`].
-#[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn is_deleted(&self, session_id: &str) -> bool {
         self.contains(session_id)
     }
 
     /// Number of records held.
-#[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.records.len()
     }
@@ -297,6 +428,36 @@ mod tests {
         // .ccs/ does not exist yet; save must create it.
         registry.save(tmp.path()).unwrap();
         assert!(TombstoneRegistry::file_path(tmp.path()).exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn load_and_save_reject_tombstone_directory_and_file_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        for mode in ["directory", "file"] {
+            let tmp = TempDir::new().unwrap();
+            let repo = tmp.path().join("repo");
+            let outside = tmp.path().join("outside");
+            let outside_file = outside.join("deletions.json");
+            fs::create_dir_all(&repo).unwrap();
+            fs::create_dir_all(&outside).unwrap();
+            fs::write(&outside_file, b"outside-marker").unwrap();
+
+            if mode == "directory" {
+                symlink(&outside, repo.join(CCS_DIR)).unwrap();
+            } else {
+                fs::create_dir_all(repo.join(CCS_DIR)).unwrap();
+                symlink(&outside_file, TombstoneRegistry::file_path(&repo)).unwrap();
+            }
+
+            assert!(TombstoneRegistry::load(&repo).is_err(), "mode={mode}");
+            assert!(
+                TombstoneRegistry::default().save(&repo).is_err(),
+                "mode={mode}"
+            );
+            assert_eq!(fs::read(&outside_file).unwrap(), b"outside-marker");
+        }
     }
 
     #[test]
