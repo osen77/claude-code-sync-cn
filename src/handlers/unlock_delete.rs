@@ -9,10 +9,7 @@ use colored::Colorize;
 pub fn handle_unlock_delete(minutes: u64, off: bool, status: bool) -> Result<()> {
     if off {
         delete_unlock::disable()?;
-        println!(
-            "{} 删除放行窗口已关闭，恢复保护模式。",
-            "✓".green()
-        );
+        println!("{} 删除放行窗口已关闭，恢复保护模式。", "✓".green());
         return Ok(());
     }
 
@@ -23,10 +20,7 @@ pub fn handle_unlock_delete(minutes: u64, off: bool, status: bool) -> Result<()>
                 "🔓".yellow(),
                 secs / 60
             ),
-            None => println!(
-                "{} 当前处于保护状态（删除不会同步到云端）。",
-                "🔒".green()
-            ),
+            None => println!("{} 当前处于保护状态（删除不会同步到云端）。", "🔒".green()),
         }
         return Ok(());
     }
@@ -37,7 +31,11 @@ pub fn handle_unlock_delete(minutes: u64, off: bool, status: bool) -> Result<()>
 
     let expires_at = delete_unlock::unlock(minutes)?;
     let expire_local = chrono::DateTime::from_timestamp(expires_at as i64, 0)
-        .map(|dt| dt.with_timezone(&chrono::Local).format("%H:%M:%S").to_string())
+        .map(|dt| {
+            dt.with_timezone(&chrono::Local)
+                .format("%H:%M:%S")
+                .to_string()
+        })
         .unwrap_or_else(|| "?".to_string());
 
     println!(

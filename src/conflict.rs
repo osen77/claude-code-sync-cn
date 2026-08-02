@@ -260,7 +260,9 @@ impl Conflict {
             .and_then(|s| s.to_str())
             .unwrap_or("jsonl");
 
-        let parent = self.remote_file.parent().unwrap_or_else(|| Path::new("."));
+        // Conflict copies are local history files. Derive the destination from
+        // the trusted local side rather than writing back into the sync repo.
+        let parent = self.local_file.parent().unwrap_or_else(|| Path::new("."));
 
         let new_name = format!("{remote_file_name}-{conflict_suffix}.{remote_file_ext}");
         let renamed_path = parent.join(new_name);

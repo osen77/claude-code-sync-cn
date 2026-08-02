@@ -13,6 +13,24 @@ use crate::BINARY_NAME;
 /// Identifiers for hooks installed by us (old name + new name)
 const HOOK_MARKERS: &[&str] = &["claude-code-sync", "ccs"];
 
+fn append_hook_debug(message: &str) {
+    use std::io::Write;
+
+    let Ok(config_dir) = crate::config::ConfigManager::ensure_config_dir() else {
+        return;
+    };
+    let debug_log = config_dir.join("hook-debug.log");
+    let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(debug_log)
+    else {
+        return;
+    };
+    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let _ = writeln!(file, "[{timestamp}] {message}");
+}
+
 /// Spawn a ccs subcommand as a detached child process.
 ///
 /// Uses `current_exe()` so the child resolves to the same binary regardless of
@@ -466,21 +484,7 @@ pub fn handle_new_project_check() -> Result<()> {
 /// This is called by the Stop hook after each AI response to push history
 /// Reads JSON from stdin
 pub fn handle_stop() -> Result<()> {
-    use std::io::Write;
-
-    // Log hook execution for debugging
-    if let Ok(home) = std::env::var("HOME") {
-        let debug_log = std::path::PathBuf::from(&home)
-            .join("Library/Application Support/claude-code-sync/hook-debug.log");
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&debug_log)
-        {
-            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-            let _ = writeln!(file, "[{}] Stop hook executed", timestamp);
-        }
-    }
+    append_hook_debug("Stop hook executed");
 
     // Read hook input from stdin (required by Claude Code hooks)
     let _input: Value = serde_json::from_reader(std::io::stdin()).unwrap_or(json!({}));
@@ -490,35 +494,15 @@ pub fn handle_stop() -> Result<()> {
     // PATH does not include the cargo bin directory.
     let push_result = spawn_ccs_subcommand("push", &["--quiet"]);
 
-    // Log result
-    if let Ok(home) = std::env::var("HOME") {
-        let debug_log = std::path::PathBuf::from(&home)
-            .join("Library/Application Support/claude-code-sync/hook-debug.log");
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&debug_log)
-        {
-            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-            match &push_result {
-                Ok(status) if status.success() => {
-                    let _ = writeln!(
-                        file,
-                        "[{}] Stop push completed: exit code {}",
-                        timestamp, status
-                    );
-                }
-                Ok(status) => {
-                    let _ = writeln!(
-                        file,
-                        "[{}] Stop push FAILED: exit code {}",
-                        timestamp, status
-                    );
-                }
-                Err(e) => {
-                    let _ = writeln!(file, "[{}] Stop push failed to execute: {}", timestamp, e);
-                }
-            }
+    match &push_result {
+        Ok(status) if status.success() => {
+            append_hook_debug(&format!("Stop push completed: exit code {status}"));
+        }
+        Ok(status) => {
+            append_hook_debug(&format!("Stop push FAILED: exit code {status}"));
+        }
+        Err(error) => {
+            append_hook_debug(&format!("Stop push failed to execute: {error}"));
         }
     }
 
@@ -553,8 +537,8 @@ pub fn handle_stop() -> Result<()> {
 /// Extra protection layer to prevent duplicate pulls
 const SESSION_START_DEBOUNCE_SECS: u64 = 300; // 5 minutes
 
-/// Count running Claude Code processes
-/// Uses ps + grep to detect Claude Code native-binary processes
+/// Count running Claude Code processes.
+#[cfg(unix)]
 fn count_claude_processes() -> usize {
     let output = std::process::Command::new("sh")
         .args([
@@ -567,9 +551,29 @@ fn count_claude_processes() -> usize {
         Ok(out) => String::from_utf8_lossy(&out.stdout)
             .trim()
             .parse()
-            .unwrap_or(0),
-        Err(_) => 0, // If detection fails, assume first start
+            .unwrap_or(1),
+        Err(_) => 1,
     }
+}
+
+#[cfg(windows)]
+fn count_claude_processes() -> usize {
+    let output = std::process::Command::new("tasklist")
+        .args(["/FI", "IMAGENAME eq claude.exe", "/FO", "CSV", "/NH"])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .filter(|line| line.to_ascii_lowercase().contains("claude.exe"))
+            .count()
+            .max(1),
+        _ => 1,
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn count_claude_processes() -> usize {
+    1
 }
 
 /// Handle the hook-session-start command
@@ -581,8 +585,6 @@ fn count_claude_processes() -> usize {
 /// 2. source = "startup" (not resume/compact)
 /// 3. Debounce not active (extra protection)
 pub fn handle_session_start() -> Result<()> {
-    use std::io::Write;
-
     // Read hook input from stdin (required by Claude Code hooks)
     let input: Value = serde_json::from_reader(std::io::stdin()).unwrap_or(json!({}));
 
@@ -623,78 +625,23 @@ pub fn handle_session_start() -> Result<()> {
         false
     };
 
-    // Log hook execution with all conditions
-    if let Ok(home) = std::env::var("HOME") {
-        let debug_log = std::path::PathBuf::from(&home)
-            .join("Library/Application Support/claude-code-sync/hook-debug.log");
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&debug_log)
-        {
-            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-            let _ = writeln!(
-                file,
-                "[{}] SessionStart (source: {}, processes: {}, debounce: {})",
-                timestamp, source, process_count, debounce_active
-            );
-        }
-    }
+    append_hook_debug(&format!(
+        "SessionStart (source: {source}, processes: {process_count}, debounce: {debounce_active})"
+    ));
 
     // Triple-condition check: first instance + startup + no debounce
     if !is_first_instance {
-        if let Ok(home) = std::env::var("HOME") {
-            let debug_log = std::path::PathBuf::from(&home)
-                .join("Library/Application Support/claude-code-sync/hook-debug.log");
-            if let Ok(mut file) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&debug_log)
-            {
-                let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                let _ = writeln!(
-                    file,
-                    "[{}] pull skipped (other instances: {})",
-                    timestamp, process_count
-                );
-            }
-        }
+        append_hook_debug(&format!("pull skipped (other instances: {process_count})"));
         return Ok(());
     }
 
     if !is_startup {
-        if let Ok(home) = std::env::var("HOME") {
-            let debug_log = std::path::PathBuf::from(&home)
-                .join("Library/Application Support/claude-code-sync/hook-debug.log");
-            if let Ok(mut file) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&debug_log)
-            {
-                let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                let _ = writeln!(
-                    file,
-                    "[{}] pull skipped (source: {} != startup)",
-                    timestamp, source
-                );
-            }
-        }
+        append_hook_debug(&format!("pull skipped (source: {source} != startup)"));
         return Ok(());
     }
 
     if debounce_active {
-        if let Ok(home) = std::env::var("HOME") {
-            let debug_log = std::path::PathBuf::from(&home)
-                .join("Library/Application Support/claude-code-sync/hook-debug.log");
-            if let Ok(mut file) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&debug_log)
-            {
-                let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-                let _ = writeln!(file, "[{}] pull skipped (debounce active)", timestamp);
-            }
-        }
+        append_hook_debug("pull skipped (debounce active)");
         return Ok(());
     }
 
@@ -708,28 +655,12 @@ pub fn handle_session_start() -> Result<()> {
     // PATH does not include the cargo bin directory.
     let pull_result = spawn_ccs_subcommand("pull", &["--quiet"]);
 
-    // Log result
-    if let Ok(home) = std::env::var("HOME") {
-        let debug_log = std::path::PathBuf::from(&home)
-            .join("Library/Application Support/claude-code-sync/hook-debug.log");
-        if let Ok(mut file) = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&debug_log)
-        {
-            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-            match &pull_result {
-                Ok(status) => {
-                    let _ = writeln!(
-                        file,
-                        "[{}] SessionStart pull completed: exit code {}",
-                        timestamp, status
-                    );
-                }
-                Err(e) => {
-                    let _ = writeln!(file, "[{}] SessionStart pull failed: {}", timestamp, e);
-                }
-            }
+    match &pull_result {
+        Ok(status) => {
+            append_hook_debug(&format!("SessionStart pull completed: exit code {status}"));
+        }
+        Err(error) => {
+            append_hook_debug(&format!("SessionStart pull failed: {error}"));
         }
     }
 

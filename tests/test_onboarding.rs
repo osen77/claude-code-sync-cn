@@ -6,25 +6,41 @@ use claude_code_sync::sync::SyncState;
 use serial_test::serial;
 use tempfile::TempDir;
 
-/// Test helper to setup a temporary config directory for testing.
-/// Returns TempDir and sets CLAUDE_CODE_SYNC_CONFIG_DIR to point to
-/// a `claude-code-sync` subdirectory inside it.
-fn setup_test_config_env() -> Result<TempDir> {
+/// RAII-isolated config environment for tests.
+struct TestConfigEnv {
+    temp: TempDir,
+}
+
+impl TestConfigEnv {
+    fn path(&self) -> &std::path::Path {
+        self.temp.path()
+    }
+}
+
+impl Drop for TestConfigEnv {
+    fn drop(&mut self) {
+        std::env::remove_var(CONFIG_DIR_ENV);
+    }
+}
+
+/// Set up a temporary config directory for testing.
+fn setup_test_config_env() -> Result<TestConfigEnv> {
     let temp = TempDir::new()?;
-    // Create the config subdirectory so tests don't need to
     let config_dir = temp.path().join("claude-code-sync");
     std::fs::create_dir_all(&config_dir)?;
     std::env::set_var(CONFIG_DIR_ENV, &config_dir);
-    Ok(temp)
+    Ok(TestConfigEnv { temp })
 }
 
-/// Clean up the test config environment variable
+/// Clean up the test config environment variable.
 fn cleanup_test_config_env() {
     std::env::remove_var(CONFIG_DIR_ENV);
 }
 
 #[test]
+#[serial]
 fn test_config_manager_paths() -> Result<()> {
+    let _env = setup_test_config_env()?;
     // Test that all config paths can be retrieved
     let config_dir = ConfigManager::config_dir()?;
     assert!(config_dir.to_string_lossy().contains("claude-code-sync"));
@@ -48,9 +64,9 @@ fn test_config_manager_paths() -> Result<()> {
 }
 
 #[test]
+#[serial]
 fn test_ensure_config_dir_creates_directory() -> Result<()> {
-    // This test will create the directory if it doesn't exist
-    // Note: This modifies the actual user's home directory, so we can only verify it succeeds
+    let _env = setup_test_config_env()?;
     let config_dir = ConfigManager::ensure_config_dir()?;
     assert!(config_dir.exists());
     assert!(config_dir.is_dir());
@@ -101,7 +117,7 @@ fn test_sync_state_backwards_compatible() -> Result<()> {
 #[test]
 #[serial]
 fn test_filter_config_save_and_load() -> Result<()> {
-    let temp_dir = setup_test_config_env()?;
+    let _temp_dir = setup_test_config_env()?;
 
     // Set XDG_CONFIG_HOME to isolate test config
     // Config env already set by setup_test_config_env()
@@ -206,7 +222,7 @@ fn test_init_from_onboarding_with_remote() -> Result<()> {
 #[test]
 #[serial]
 fn test_config_directory_structure() -> Result<()> {
-    let temp_dir = setup_test_config_env()?;
+    let _temp_dir = setup_test_config_env()?;
 
     // Ensure config directory can be created
     let config_dir = ConfigManager::ensure_config_dir()?;
@@ -256,7 +272,7 @@ fn test_filter_config_with_attachments() -> Result<()> {
 #[test]
 #[serial]
 fn test_multiple_config_operations() -> Result<()> {
-    let temp_dir = setup_test_config_env()?;
+    let _temp_dir = setup_test_config_env()?;
 
     // Set XDG_CONFIG_HOME to isolate test config
     // Config env already set by setup_test_config_env()
@@ -637,7 +653,7 @@ fn test_multi_repo_state_serialization() -> Result<()> {
 #[test]
 #[serial]
 fn test_v1_to_v2_migration() -> Result<()> {
-    let temp_dir = setup_test_config_env()?;
+    let _temp_dir = setup_test_config_env()?;
     // Config env already set by setup_test_config_env()
 
     let config_dir = ConfigManager::config_dir()?;
@@ -679,7 +695,7 @@ fn test_v1_to_v2_migration() -> Result<()> {
 #[test]
 #[serial]
 fn test_sync_state_loads_v2_format() -> Result<()> {
-    let temp_dir = setup_test_config_env()?;
+    let _temp_dir = setup_test_config_env()?;
     // Config env already set by setup_test_config_env()
 
     let config_dir = ConfigManager::config_dir()?;
@@ -719,7 +735,7 @@ fn test_sync_state_loads_v2_format() -> Result<()> {
 #[test]
 #[serial]
 fn test_multi_repo_state_multiple_repos() -> Result<()> {
-    let temp_dir = setup_test_config_env()?;
+    let _temp_dir = setup_test_config_env()?;
     // Config env already set by setup_test_config_env()
 
     let config_dir = ConfigManager::config_dir()?;
@@ -769,7 +785,7 @@ fn test_multi_repo_state_multiple_repos() -> Result<()> {
 #[test]
 #[serial]
 fn test_switch_active_repo() -> Result<()> {
-    let temp_dir = setup_test_config_env()?;
+    let _temp_dir = setup_test_config_env()?;
     // Config env already set by setup_test_config_env()
 
     let config_dir = ConfigManager::config_dir()?;
@@ -983,7 +999,7 @@ fn test_operations_use_active_repo() -> Result<()> {
 #[test]
 #[serial]
 fn test_invalid_active_repo_error() -> Result<()> {
-    let temp_dir = setup_test_config_env()?;
+    let _temp_dir = setup_test_config_env()?;
     // Config env already set by setup_test_config_env()
 
     let config_dir = ConfigManager::config_dir()?;
@@ -1051,7 +1067,7 @@ fn test_init_from_onboarding_creates_v2() -> Result<()> {
 #[test]
 #[serial]
 fn test_config_handles_uninitialized_state() -> Result<()> {
-    let temp_dir = setup_test_config_env()?;
+    let _temp_dir = setup_test_config_env()?;
     // Config env already set by setup_test_config_env()
 
     // Don't create any state file - simulate fresh install

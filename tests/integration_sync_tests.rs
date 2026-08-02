@@ -1,3 +1,4 @@
+use serial_test::serial;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -16,6 +17,14 @@ use claude_code_sync::undo::{undo_pull, undo_push, Snapshot};
 /// Path to test data directory
 // Use relative path from the workspace root
 const TEST_DATA_DIR: &str = "data";
+
+struct ConfigEnvGuard;
+
+impl Drop for ConfigEnvGuard {
+    fn drop(&mut self) {
+        std::env::remove_var(CONFIG_DIR_ENV);
+    }
+}
 
 /// Helper function to copy test data to a destination directory
 fn copy_test_data(dest_projects_dir: &Path) -> anyhow::Result<()> {
@@ -116,6 +125,7 @@ fn create_test_filter_config(config_dir: &Path) -> anyhow::Result<()> {
 }
 
 #[test]
+#[serial]
 fn test_full_push_pull_cycle() {
     // Setup: Create temporary directories for sync repo and fake claude projects
     let sync_repo_dir = TempDir::new().unwrap();
@@ -151,6 +161,7 @@ fn test_full_push_pull_cycle() {
 
     // Isolate config directory for tests (works on all platforms including macOS)
     std::env::set_var(CONFIG_DIR_ENV, config_dir.path());
+    let _config_env = ConfigEnvGuard;
 
     // Discover sessions from test data
     let original_sessions = discover_test_sessions(&claude_projects_dir).unwrap();
@@ -301,9 +312,6 @@ fn test_full_push_pull_cycle() {
             "Modified session should have more messages"
         );
     }
-
-    // Clean up
-    std::env::remove_var(CONFIG_DIR_ENV);
 }
 
 #[test]

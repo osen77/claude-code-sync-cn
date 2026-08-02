@@ -14,6 +14,7 @@
 - [会话管理](#会话管理)
 - [常用命令示例](#常用命令示例)
 - [高级配置](#高级配置)
+- [日志排查](#日志排查)
 - [故障排查](#故障排查)
 - [卸载](#卸载)
 
@@ -246,7 +247,7 @@ ccs wrapper show       # 查看状态
 
 ### 调试
 
-如果自动同步未生效，检查调试日志：
+如果自动同步未生效，可先查看下方的通用日志排查章节。Hook 目前仍有独立的 `hook-debug.log` 调试输出，**Hook debug 尚未统一到 ccs 的 DualLogger**，这是后续工作；这里的文件不是 `claude-code-sync.log`。
 
 ```bash
 # macOS
@@ -374,13 +375,26 @@ sync-repo/
 
 ## 会话管理
 
-`ccs` 提供交互式会话管理功能，可以查看、重命名和删除 Claude Code 对话会话。
+`ccs` 提供交互式会话管理功能，默认可展示 Claude Code、Codex 和 OMP 三个来源的会话。来源能力不同：Claude Code 支持完整的打开、重命名、删除和同步；Codex 与 OMP 是只读来源，只有 OMP 可以从交互菜单打开原始会话。
+
+### 来源能力矩阵
+
+| 来源 | 查询 | 打开 | 重命名 | 删除 | 参与同步 |
+|------|------|------|--------|------|----------|
+| Claude Code | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Codex | ✅ | ❌ | ❌ | ❌ | ❌ |
+| OMP | ✅ | ✅ | ❌ | ❌ | ❌ |
+
+Codex 和 OMP 不参与同步，也不能通过 `ccs` Rename/Delete；Rename/Delete 只对 Claude Code 会话生效。交互菜单会按来源能力隐藏不适用的操作，非交互命令也会拒绝对只读来源执行写操作。
 
 ### 交互模式（推荐）
 
 ```bash
-# 进入交互式界面
+# 进入交互式界面，默认展示三个来源
 ccs session
+
+# 只展示 Codex
+ccs session --source codex
 ```
 
 **在项目目录中运行：**
@@ -392,7 +406,10 @@ ccs session
 - 选择项目后进入该项目的会话列表
 
 **导航操作：**
-- 选择会话 → 进入操作菜单（详情/重命名/删除）
+- 选择会话 → 进入按来源过滤的操作菜单
+- Claude Code 可选择详情、打开、重命名或删除
+- OMP 可选择详情或打开原始 OMP 会话
+- Codex 只能查看详情
 - 选择「← 切换到其他项目」→ 返回项目列表
 - 选择「✕ 退出」→ 退出程序
 - 操作完成后可返回上一级继续操作
@@ -400,11 +417,12 @@ ccs session
 ### 非交互模式
 
 ```bash
-# 列出所有项目和会话数量
+# 列出所有来源的会话
 ccs session list
 
-# 列出特定项目的会话
-ccs session list --project my-project
+# 只列出 Codex 会话
+ccs session --source codex list
+ccs session list --source codex   # 等价
 
 # 显示完整会话 ID
 ccs session list --show-ids
@@ -412,10 +430,13 @@ ccs session list --show-ids
 # 查看会话详情
 ccs session show <session-id>
 
-# 重命名会话
+# 查看 OMP 会话详情
+ccs session --source omp show <session-id>
+
+# 重命名会话（仅 Claude Code）
 ccs session rename <session-id> "新的标题"
 
-# 删除会话（需确认）
+# 删除会话（仅 Claude Code，需确认）
 ccs session delete <session-id>
 
 # 强制删除（跳过确认）
@@ -426,8 +447,53 @@ ccs session delete <session-id> --force
 ccs session restore <session-id>
 ```
 
+`--source` 支持 `all`、`claude`、`codex`、`omp`，默认是 `all`。当同一个 session ID 出现在多个来源时，`show` 会列出候选并要求使用 `--source` 消歧；`rename` 和 `delete` 也不会静默选择错误来源。
+
+### 扫描诊断与 JSON 输出
+
+正常扫描保持安静。只有扫描发现损坏文件、I/O/权限错误、cache 错误，或 warning 超过保留上限时，才判定为 degraded：文本命令仍尽量输出已有结果，并在 stderr 输出一条聚合 warning；详细的逐条诊断写入文件日志。JSON 命令不输出这条文本 warning，而是把完整的计数和受限诊断放进业务 JSON。Claude、Codex、OMP 的 source root 存在但不是目录时，都会按 best-effort 记录 I/O degraded 并跳过该来源，仍继续保留其他来源结果，不会让整个多来源查询失败。
+
+`session overview --json`、`session search --json` 和 `session show --json` 的顶层字段如下：
+
+- `schema_version`：JSON 输出契约版本，当前为 `1`。
+- `diagnostics`：本次扫描的诊断对象；其中也带有 `schema_version: 1`。
+- `diagnostics.diagnostic_id`：本次扫描关联 ID，格式为 `I-XXXXXXXX`。它与同一次进程文件日志中的 `invocation=I-XXXXXXXX` 相同，可用这个值关联 JSON 结果与日志 invocation。
+
+| 字段 | 语义 |
+|------|------|
+| `files_seen` | 发现的 `.jsonl` 候选文件数；在过滤前计数。 |
+| `files_parsed` | parser 成功解析的候选文件数；后续被项目过滤或判定无有效摘要仍算已解析。 |
+| `files_skipped` | 因过滤、项目不匹配或摘要无有效消息/标题而跳过的文件数。 |
+| `malformed_files` | parser/data 错误的文件数。 |
+| `io_errors` | WalkDir、目录项、metadata、mtime 或历史文件读取等 I/O 错误数；单项错误会继续扫描。 |
+| `cache_errors` | cache 加载或保存错误数；cache 失败不会丢弃已解析的会话。 |
+| `cache_hits` / `cache_misses` | 候选文件命中或未命中 cache 的次数；命中同时要求 size、mtime 和流式 BLAKE3 内容 fingerprint 全部一致。 |
+| `bytes_considered` | 成功取得 metadata 的候选文件字节数。 |
+| `elapsed_ms` | 扫描、排序及 cache 保存总耗时（毫秒）。 |
+| `source_discovery_ms` | 生产环境发现 Claude/Codex/OMP 根目录耗时。 |
+| `metadata_ms` | 候选文件 metadata 与 mtime 获取累计耗时。 |
+| `fingerprint_ms` | 对候选文件执行内容 fingerprint 的累计耗时；不计入 parser 时间。 |
+| `fingerprinted_bytes` | fingerprint 实际读取的字节数；cache hit 也会计入。 |
+| `cache_load_ms` / `cache_save_ms` | session index cache 读写耗时。 |
+| `parse_ms` | 三类 parser 实际调用累计耗时。 |
+| `search_load_ms` | `session search` 的 memory/session full-load 与搜索阶段耗时；非 search 为 0。 |
+| `claude_scan_ms` / `codex_scan_ms` / `omp_scan_ms` | 各来源扫描阶段耗时。 |
+| `parsed_bytes` | 实际调用 parser 的候选文件字节数；cache hit 不计。 |
+| `suppressed_warnings` | 超过 warning 保留上限、只计数而未放入 JSON `warnings` 的条数。 |
+| `degraded` | 始终输出的 computed boolean；`malformed_files`、`io_errors`、`cache_errors` 或 `suppressed_warnings` 任一大于 0 时为 `true`，否则为 `false`。 |
+
+部分 malformed JSONL 文件仍会保留有效行对应的 summary，但会记录一次 data/parse warning，并且不会写入 session index cache；如果已有 clean cache entry，也会在 partial 或 parser error 分支中删除，避免后续 warm scan 错误命中。当前 cache version 为 3，旧版本会失效；每个候选文件的命中还必须同时满足 size、mtime 和流式 BLAKE3 内容 fingerprint，fingerprint 读取耗时与字节数分别记录在 `fingerprint_ms`、`fingerprinted_bytes`，不混入 parser metrics。fingerprint I/O 失败时只跳过该候选并记录受控 I/O warning。warning 及日志只保留受控类别、操作、稳定 `path_hash` 和安全摘要，不包含完整路径、会话内容、原始错误文本或凭据。cache 的缺失是正常冷启动；不可读、非法 JSON 或版本不匹配只产生 `cache_errors` 与受控的 `cache read failed`、`cache data invalid` 或 `cache version mismatch` 摘要。cache 原始路径和底层错误不会进入 stderr 或文件日志，详细诊断仍只通过安全摘要和 `path_hash` 表达。Claude/Codex/OMP 的 legacy discovery 遇到 WalkDir error 会记录受控 I/O warning 并继续扫描其他 entry，不再静默丢弃错误。DualLogger 的 console/file sink 统一脱敏 home 外 Unix/Windows（含盘符正斜杠、反斜杠和 UNC）绝对路径、任意 host 的 `file://` URI path，以及支持 escaped quote/控制字符/换行的完整引号凭据；文件 logger 初始化失败时 stderr 只输出固定安全 warning，不泄露日志路径或底层错误。轮转在锁内使用 staging/transaction rollback，拒绝 current、lock、generation 的 symlink；sink write/flush/poison 失败只发一次安全 stderr fallback，并在内部保留失败计数。warning detail 达到 `MAX_SCAN_WARNINGS` 后不再逐条写 file log，只写一次固定的 suppressed 记录，但 JSON `suppressed_warnings` 仍按实际条数计数。`session list --json` 与 `session doctor` 尚未提供；当前应使用 overview/search/show 的 JSON `diagnostics` 和日志 invocation 做排查。
+
+#### Cache retention 与并发边界
+
+Session index cache 只是可重建的 advisory 加速层，不是会话历史的权威存储。Retention 按 source 分区：只有本次选择且完整完成扫描的 Claude、Codex 或 OMP 来源才会参与清理，source-filter 未选择的来源不会被 prune。来源根目录缺失、变成 regular file、目录遍历失败、metadata/mtime/fingerprint 无法确认时，扫描标记为 incomplete 并 fail-safe 保留该来源旧 entries。
+
+完整来源的旧 entry 只有在 merge 阶段重新确认文件为 `NotFound` 时才会删除；文件仍存在但内容变化、权限错误、读取失败或 fingerprint 不稳定时一律保留。扫描先产生按来源的 delta，merge 在独立 lock file 的阻塞锁内重新读取 latest cache，再复核文件状态并合并，避免两个进程互相覆盖更新。写入先写同一目录的临时文件、flush/sync 后 atomic replace；Windows 也使用相同的 atomic persist 流程，锁文件与 JSON target 分离，避免替换 target inode 后失去互斥。
+
+如果 cache 读取、解析、版本校验或持久化失败，`ccs` 仍返回已扫描的业务结果，并尽量跳过不安全的 cache 更新；不要把 `session_index.json` 当作备份或同步数据，可靠数据仍以 session JSONL 和同步仓库为准。
+
 > **提示：误删保护与跨设备同步**
-> `ccs` 为你的会话历史启用了**误删保护 (Deletion Protection)**。当你使用 `ccs session delete` 或在交互式菜单里删除会话时，它会生成一个标准的意图记录（Tombstone），该记录会随着 `push` 同步至远端，从而让其他设备在 `pull` 时也同步删除该会话。
+> `ccs` 为 Claude Code 会话历史启用了**误删保护 (Deletion Protection)**。当你使用 `ccs session delete` 或在交互式菜单里删除会话时，它会生成一个标准的意图记录（Tombstone），该记录会随着 `push` 同步至远端，从而让其他设备在 `pull` 时也同步删除该会话。
 > 如果你没有通过 `ccs` 命令而是意外在本地终端使用了 `rm` 或者清空了目录，下次 `push` 时程序会**拦截**这一操作（以防止远程备份也被误删）。它会保留云端副本，并提示你使用 `ccs session restore` 找回丢失的会话。如果你确实想连带云端一起强制物理销毁，可以通过 `ccs push --prune` 逃生舱绕过保护。
 
 ### 会话标题
@@ -592,6 +658,40 @@ Set-Alias ccs ccs
 ```
 
 ---
+
+## 日志排查
+
+### 先看哪里
+
+正常在终端运行 `ccs` 时，先查看 stderr；它会显示当前 console 日志级别下的记录。后台任务、自动同步或难以复现的问题，再查看平台日志文件：
+
+- macOS：`~/Library/Application Support/claude-code-sync/claude-code-sync.log`
+- Linux：`~/.config/claude-code-sync/claude-code-sync.log`（设置 `XDG_CONFIG_HOME` 时位于 `$XDG_CONFIG_HOME/claude-code-sync/claude-code-sync.log`）
+- Windows：`%APPDATA%\\claude-code-sync\\claude-code-sync.log`
+
+每次 ccs 初始化文件 logger 时都会检查日志大小；超过 10 MiB 会在下一次 ccs 调用打开日志时轮转，最多保留 3 代备份。也可以用 `--log-file` 把一次运行隔离到指定路径，避免和其他运行混在一起。
+
+### 临时提高日志级别
+
+```bash
+# 临时开启 DEBUG，适合定位一次运行
+ccs --debug session list
+
+# 收集一次隔离日志
+ccs --log-file ./ccs-debug.log session search "keyword"
+
+# 只显示错误；文件日志仍继续写入
+RUST_LOG=error ccs session list
+
+# RUST_LOG=off 只关闭 console，不关闭 file sink
+RUST_LOG=off ccs session list
+```
+
+`--debug` 适合短时间排查，不建议长期运行。每次进程会生成一个 `invocation=I-...`，在 stderr 和文件中用它关联同一次运行的记录。日志只用于运行诊断：系统会自动脱敏常见 token/password/secret/API key、Authorization、URL userinfo，以及完整的 `file://` URI path（包括 hosted path 中合法的逗号、引号、`]`、`)` 等字符），不主动记录会话正文；建议不要把其他未识别的敏感内容放进 CLI 参数或日志消息。每次 file write/flush 都重新获取同一 per-log lock；rotation staging 从已打开的 no-follow handle 复制，live rename 前还会复核 inode/metadata，且 current 使用 no-follow fresh open。长生命周期进程不会继续写入已轮转的旧 inode；轮转失败会回滚，rollback 自身失败时会保留 transaction 目录并返回可见的安全错误。
+
+> **外部 rotator 边界**：`.lock` 是 advisory lock，只约束同样取得该锁的 `ccs` 进程或协作工具。未取得锁的系统 `logrotate`、用户脚本或其他程序直接 rename/copy/append 日志时，ccs 无法对其与 staging/rename 的并发提供原子协调保证；文档不把跨进程 ccs 测试泛化为所有外部 rotator 均受保护。
+
+> **Hook debug 的范围**：Hook debug 尚未统一到 ccs 的 DualLogger，仍是后续工作。自动同步 Hook 可能另外写入 `hook-debug.log`；不要把它当成上述平台日志，也不要据此宣称 Hook logging 已完成。
 
 ## 故障排查
 

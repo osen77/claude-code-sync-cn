@@ -518,8 +518,8 @@ mod tests {
 
         // The restore should either fail during path validation
         // or the path should not be outside home dir after canonicalization
-        if result.is_err() {
-            let err_msg = result.unwrap_err().to_string();
+        if let Err(error) = result {
+            let err_msg = error.to_string();
             // Should contain security error message
             assert!(
                 err_msg.contains("Security") || err_msg.contains("outside home"),

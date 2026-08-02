@@ -5,6 +5,9 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
+use crate::parser::ParseOutcome;
+use crate::session_diagnostics::legacy_walk_entry;
+
 #[derive(Debug, Clone)]
 pub struct OmpSession {
     pub session_id: String,
@@ -37,6 +40,10 @@ pub struct OmpDisplayMessage {
 
 impl OmpSession {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
+        Ok(Self::from_file_with_report(path)?.value)
+    }
+
+    pub fn from_file_with_report<P: AsRef<Path>>(path: P) -> Result<ParseOutcome<Self>> {
         let path = path.as_ref();
         let file =
             File::open(path).with_context(|| format!("Failed to open file: {}", path.display()))?;
@@ -46,6 +53,7 @@ impl OmpSession {
         let mut session_id: Option<String> = None;
         let mut cwd: Option<String> = None;
         let mut title: Option<String> = None;
+        let mut malformed_lines = 0;
 
         for (line_num, line) in reader.lines().enumerate() {
             let line = line.with_context(|| {
@@ -58,6 +66,7 @@ impl OmpSession {
             let value: Value = match serde_json::from_str(&line) {
                 Ok(value) => value,
                 Err(e) => {
+                    malformed_lines += 1;
                     log::debug!(
                         "Skipping malformed OMP line {} in {}: {}",
                         line_num + 1,
@@ -149,12 +158,15 @@ impl OmpSession {
             .or_else(|| session_id_from_path(path))
             .with_context(|| format!("No OMP session ID found: {}", path.display()))?;
 
-        Ok(Self {
-            session_id,
-            entries,
-            file_path: path.to_path_buf(),
-            cwd,
-            title,
+        Ok(ParseOutcome {
+            value: Self {
+                session_id,
+                entries,
+                file_path: path.to_path_buf(),
+                cwd,
+                title,
+            },
+            malformed_lines,
         })
     }
 
@@ -197,7 +209,7 @@ impl OmpSession {
         messages
     }
 
-#[allow(dead_code)]
+    #[allow(dead_code)]
     pub fn title(&self) -> String {
         self.title_from_messages(&self.display_messages())
     }
@@ -260,18 +272,20 @@ pub fn discover_omp_sessions(base_path: &Path) -> Result<Vec<OmpSession>> {
     }
 
     let mut sessions = Vec::new();
-    for entry in WalkDir::new(base_path)
-        .follow_links(false)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
+    for entry in WalkDir::new(base_path).follow_links(false).into_iter() {
+        let Some(entry) = legacy_walk_entry(entry, "omp") else {
+            continue;
+        };
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
             continue;
         }
         match OmpSession::from_file(path) {
             Ok(session) => sessions.push(session),
-            Err(e) => log::warn!("Failed to parse OMP session {}: {}", path.display(), e),
+            Err(_) => log::warn!(
+                target: crate::logger::SCAN_DIAGNOSTICS_TARGET,
+                "legacy OMP session discovery skipped an unparseable file"
+            ),
         }
     }
 
@@ -302,6 +316,23 @@ mod tests {
     }
 
     #[test]
+    fn report_counts_malformed_lines_and_keeps_valid_omp_entries() {
+        let (_dir, path) = write_session(
+            concat!(
+                "{not valid json\n",
+                r#"{"type":"session","id":"partial-omp","cwd":"/tmp/demo"}"#,
+                "\n"
+            ),
+            "partial-omp",
+        );
+
+        let outcome = OmpSession::from_file_with_report(&path).unwrap();
+        assert_eq!(outcome.malformed_lines, 1);
+        assert_eq!(outcome.value.session_id, "partial-omp");
+        assert_eq!(outcome.value.entries.len(), 1);
+    }
+
+    #[test]
     fn parses_omp_session_messages() {
         let (dir, path) = write_session(
             r##"{"type":"session","version":3,"id":"omp-abc","timestamp":"2026-06-23T11:53:13.905Z","cwd":"/tmp/demo","title":"Demo Title"}
@@ -323,7 +354,10 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].role, "user");
         assert_eq!(messages[0].content, "hello omp");
-        assert_eq!(messages[0].timestamp.as_deref(), Some("2026-06-23T11:53:52.345Z"));
+        assert_eq!(
+            messages[0].timestamp.as_deref(),
+            Some("2026-06-23T11:53:52.345Z")
+        );
         assert_eq!(messages[1].role, "assistant");
         assert_eq!(messages[1].content, "hi user");
     }

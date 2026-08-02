@@ -144,34 +144,30 @@ pub fn check_for_update_silent() -> Option<String> {
     }
 }
 
-/// Get the asset name for the current platform
-fn get_asset_name() -> Result<String> {
-    let os = if cfg!(target_os = "macos") {
-        "macos"
-    } else if cfg!(target_os = "linux") {
-        "linux"
-    } else if cfg!(target_os = "windows") {
-        "windows"
-    } else {
-        return Err(anyhow::anyhow!("Unsupported operating system"));
+fn asset_name_for(os: &str, arch: &str, target_env: &str) -> Result<String> {
+    let name = match (os, arch, target_env) {
+        ("linux", "x86_64", "musl") => format!("{BINARY_NAME}-linux-x86_64-musl.tar.gz"),
+        ("linux", "x86_64", _) => format!("{BINARY_NAME}-linux-x86_64.tar.gz"),
+        ("macos", "x86_64", _) => format!("{BINARY_NAME}-macos-x86_64.tar.gz"),
+        ("macos", "aarch64", _) => format!("{BINARY_NAME}-macos-aarch64.tar.gz"),
+        ("windows", "x86_64", _) => format!("{BINARY_NAME}-windows-x86_64.zip"),
+        _ => {
+            return Err(anyhow::anyhow!(
+                "Automatic updates are not available for {os}/{arch}/{target_env}"
+            ));
+        }
     };
-
-    let arch = if cfg!(target_arch = "x86_64") {
-        "x86_64"
-    } else if cfg!(target_arch = "aarch64") {
-        "aarch64"
-    } else {
-        return Err(anyhow::anyhow!("Unsupported architecture"));
-    };
-
-    // release-new.yml creates .tar.gz for Unix and .zip for Windows
-    let name = if cfg!(target_os = "windows") {
-        format!("{}-{}-{}.zip", BINARY_NAME, os, arch)
-    } else {
-        format!("{}-{}-{}.tar.gz", BINARY_NAME, os, arch)
-    };
-
     Ok(name)
+}
+
+/// Get the asset name for the current platform.
+fn get_asset_name() -> Result<String> {
+    let target_env = if cfg!(target_env = "musl") {
+        "musl"
+    } else {
+        "default"
+    };
+    asset_name_for(std::env::consts::OS, std::env::consts::ARCH, target_env)
 }
 
 /// Download a file using curl
@@ -438,6 +434,28 @@ mod tests {
         assert!(name.contains("x86_64") || name.contains("aarch64"));
         // Should have archive extension
         assert!(name.ends_with(".tar.gz") || name.ends_with(".zip"));
+    }
+
+    #[test]
+    fn test_asset_names_match_release_matrix() {
+        assert_eq!(
+            asset_name_for("linux", "x86_64", "gnu").unwrap(),
+            "ccs-linux-x86_64.tar.gz"
+        );
+        assert_eq!(
+            asset_name_for("linux", "x86_64", "musl").unwrap(),
+            "ccs-linux-x86_64-musl.tar.gz"
+        );
+        assert_eq!(
+            asset_name_for("macos", "aarch64", "default").unwrap(),
+            "ccs-macos-aarch64.tar.gz"
+        );
+        assert_eq!(
+            asset_name_for("windows", "x86_64", "msvc").unwrap(),
+            "ccs-windows-x86_64.zip"
+        );
+        assert!(asset_name_for("linux", "aarch64", "gnu").is_err());
+        assert!(asset_name_for("windows", "aarch64", "msvc").is_err());
     }
 
     #[test]
