@@ -16,7 +16,7 @@
 - tombstone registry 验证 repo、`.ccs`、`deletions.json`，拒绝 symlink/non-regular 对象，并通过同目录 `NamedTempFile` + `sync_all` + atomic persist 保存。
 - 普通 pull/status 在扫描远端 session 前验证 sync projects root；push rebase conflict scanner 跳过目录/文件 symlink；legacy 与缓存版 session scanner、project matching/collision/列表扫描拒绝 CC/CX/OM source root 及 local project/file symlink。
 - memory search 验证 project root、memory directory 和 Markdown file 均为 containment 内 non-symlink regular candidate，不读取外部链接目标。
-- Release 先创建 draft，五平台使用 `cargo build --release --locked`；每个资产上传显式保持 `draft: true`，最终 job 核对五个归档和五个 SHA256 后才发布。
+- Release 先创建 draft，五平台使用 `cargo build --release --locked`；CLI 仓库开始跟踪 `Cargo.lock`，确保 CI checkout 可执行 locked build；每个资产上传显式保持 `draft: true`，最终 job 核对五个归档和五个 SHA256 后才发布。
 
 ### 影响范围
 - `src/path_security.rs`、`src/sync/pull.rs`、`src/sync/tombstone.rs`、`src/interactive_conflict.rs`、`src/conflict.rs`、`.github/workflows/release-new.yml` 及 tempfile symlink 回归测试。
