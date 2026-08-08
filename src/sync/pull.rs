@@ -1564,11 +1564,11 @@ mod tests {
     fn tombstone_propagation_deletes_regular_local_session() {
         let temp = tempfile::tempdir().unwrap();
         let local_root = temp.path().join("local");
-        let local_file = local_root.join("project/abc-id.jsonl");
+        let local_file = local_root.join("project/session-abc-id.jsonl");
         fs::create_dir_all(local_file.parent().unwrap()).unwrap();
         fs::write(&local_file, b"session").unwrap();
         let mut registry = TombstoneRegistry::default();
-        registry.add(tombstone_record("abc-id"));
+        registry.add(tombstone_record("session-abc-id"));
 
         assert_eq!(propagate_tombstones(&local_root, &registry).unwrap(), 1);
         assert!(!local_file.exists());

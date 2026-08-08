@@ -5479,7 +5479,9 @@ fn finalize_claude_local_recovery(
             .get(&key)
             .cloned()
             .with_context(|| format!("maintenance entry not found: {key}"))?;
-        if current.identity.source != SessionSource::Claude
+        if current.identity != requested.identity
+            || current.identity.source != SessionSource::Claude
+            || current.fingerprint != requested.fingerprint
             || current.original_relative_path != requested.original_relative_path
             || !matches!(
                 current.lifecycle,
@@ -8402,6 +8404,68 @@ mod tests {
         assert_eq!(report.diagnostics.files_seen, 2);
         assert_eq!(report.diagnostics.files_parsed, 2);
         assert_eq!(report.diagnostics.files_skipped, 2);
+    }
+
+    #[test]
+    fn stale_claude_recovery_request_does_not_finalize_current_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let claude_root = temp.path().join("claude");
+        let session_path = claude_root.join("project/session-stale.jsonl");
+        fs::create_dir_all(session_path.parent().unwrap()).unwrap();
+        fs::write(
+            &session_path,
+            "{\"type\":\"user\",\"sessionId\":\"session-stale\",\"cwd\":\"/workspace/project\",\"timestamp\":\"2026-08-08T12:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"restore\"}}\n{\"type\":\"assistant\",\"sessionId\":\"session-stale\",\"timestamp\":\"2026-08-08T12:00:01Z\",\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}\n",
+        )
+        .unwrap();
+
+        let config_dir = temp.path().join("config");
+        let store = StateStore::from_config_dir(&config_dir);
+        let identity = SessionIdentity {
+            source: SessionSource::Claude,
+            session_id: "session-stale".to_string(),
+        };
+        let current_fingerprint = fingerprint_file(&session_path).unwrap().digest;
+        let current = MaintenanceEntry {
+            identity: identity.clone(),
+            original_relative_path: PathBuf::from("project/session-stale.jsonl"),
+            project_name: "project".to_string(),
+            fingerprint: current_fingerprint.clone(),
+            lifecycle: LifecycleState::Recycled,
+            classifier_version: CLASSIFIER_VERSION,
+            score: 100,
+            reason_codes: Vec::new(),
+            hidden_since: None,
+            recycled_at: None,
+            purged_at: None,
+            keep: false,
+            explicit_test: false,
+        };
+        store
+            .update(|state| {
+                state
+                    .entries
+                    .insert(identity_key(&identity), current.clone());
+                Ok(())
+            })
+            .unwrap();
+
+        let roots = MaintenanceRoots {
+            claude: claude_root,
+            codex: temp.path().join("codex"),
+            omp: temp.path().join("omp"),
+            recycle: temp.path().join("recycle"),
+        };
+        let mut stale_request = current.clone();
+        stale_request.fingerprint = "stale-request-fingerprint".to_string();
+
+        assert!(finalize_claude_local_recovery(&store, &roots, &stale_request).is_err());
+        let after = store.load().unwrap();
+        let saved = after
+            .entries
+            .get(&identity_key(&identity))
+            .expect("current entry must remain");
+        assert_eq!(saved.lifecycle, LifecycleState::Recycled);
+        assert_eq!(saved.fingerprint, current_fingerprint);
     }
 
     #[test]

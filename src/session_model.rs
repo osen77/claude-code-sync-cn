@@ -399,11 +399,7 @@ pub(crate) fn format_relative_time(timestamp: &str) -> String {
 /// Extract a Claude session ID from a JSONL filename without depending on project layout.
 pub(crate) fn claude_session_id_from_path(path: &Path) -> Option<String> {
     let name = path.file_name()?.to_str()?;
-    Some(
-        name.strip_suffix(".jsonl")?
-            .trim_start_matches("session-")
-            .to_string(),
-    )
+    Some(name.strip_suffix(".jsonl")?.to_string())
 }
 
 #[cfg(test)]
@@ -437,14 +433,16 @@ mod tests {
     }
 
     #[test]
-    fn claude_session_id_from_path_extracts_ids_without_layout_assumptions() {
+    fn claude_session_id_from_path_preserves_file_stem_exactly() {
         assert_eq!(
             claude_session_id_from_path(Path::new("encoded/project/session-abc.jsonl")),
-            Some("abc".to_string())
+            Some("session-abc".to_string())
         );
         assert_eq!(
-            claude_session_id_from_path(Path::new("project/abc.jsonl")),
-            Some("abc".to_string())
+            claude_session_id_from_path(Path::new(
+                "project/550e8400-e29b-41d4-a716-446655440000.jsonl"
+            )),
+            Some("550e8400-e29b-41d4-a716-446655440000".to_string())
         );
         assert_eq!(
             claude_session_id_from_path(Path::new("project/abc.txt")),

@@ -475,8 +475,13 @@ fn test_protected_suppressed_missing_session_survives_push_policies_without_tomb
 
     let local_projects = home_dir.path().join(".claude/projects");
     let remote_projects = repo_dir.path().join("projects/project");
-    fs::create_dir_all(&local_projects).unwrap();
+    fs::create_dir_all(local_projects.join("project")).unwrap();
     fs::create_dir_all(&remote_projects).unwrap();
+    fs::write(
+        local_projects.join("project/local-presence.jsonl"),
+        b"{\"type\":\"user\",\"sessionId\":\"local-presence\",\"cwd\":\"/workspace/project\",\"timestamp\":\"2026-08-08T12:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"local\"}}\n{\"type\":\"assistant\",\"sessionId\":\"local-presence\",\"timestamp\":\"2026-08-08T12:00:01Z\",\"message\":{\"role\":\"assistant\",\"content\":\"reply\"}}\n",
+    )
+    .unwrap();
 
     let session_id = "session-protected";
     let content = format!(
@@ -538,6 +543,136 @@ fn test_protected_suppressed_missing_session_survives_push_policies_without_tomb
         assert!(remote_file.is_file());
         assert!(!repo_dir.path().join(".ccs/deletions.json").exists());
     }
+}
+
+#[test]
+#[serial]
+fn test_malformed_maintenance_state_blocks_unlock_but_manual_prune_remains_explicit() {
+    let home_dir = TempDir::new().unwrap();
+    let config_dir = TempDir::new().unwrap();
+    let repo_dir = TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard(std::env::var_os("HOME"));
+    std::env::set_var("HOME", home_dir.path());
+    let _config_env = ConfigEnvGuard::set(config_dir.path());
+
+    let local_projects = home_dir.path().join(".claude/projects/project");
+    let remote_projects = repo_dir.path().join("projects/project");
+    fs::create_dir_all(&local_projects).unwrap();
+    fs::create_dir_all(&remote_projects).unwrap();
+    fs::write(
+        local_projects.join("local-presence.jsonl"),
+        b"{\"type\":\"user\",\"sessionId\":\"local-presence\",\"cwd\":\"/workspace/project\",\"timestamp\":\"2026-08-08T12:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"local\"}}\n{\"type\":\"assistant\",\"sessionId\":\"local-presence\",\"timestamp\":\"2026-08-08T12:00:01Z\",\"message\":{\"role\":\"assistant\",\"content\":\"reply\"}}\n",
+    )
+    .unwrap();
+    let session_id = "session-malformed";
+    let remote_file = remote_projects.join(format!("{session_id}.jsonl"));
+    fs::write(
+        &remote_file,
+        format!(
+            "{{\"type\":\"user\",\"sessionId\":\"{session_id}\",\"cwd\":\"/workspace/project\",\"timestamp\":\"2026-08-08T12:00:00Z\",\"message\":{{\"role\":\"user\",\"content\":\"protected\"}}}}\n{{\"type\":\"assistant\",\"sessionId\":\"{session_id}\",\"timestamp\":\"2026-08-08T12:00:01Z\",\"message\":{{\"role\":\"assistant\",\"content\":\"reply\"}}}}\n"
+        ),
+    )
+    .unwrap();
+
+    let repo = scm::init(repo_dir.path()).unwrap();
+    repo.stage_all().unwrap();
+    repo.commit("remote malformed-state fixture").unwrap();
+    create_test_sync_state(repo_dir.path(), config_dir.path()).unwrap();
+    fs::write(
+        config_dir.path().join("session-maintenance.json"),
+        b"not-json",
+    )
+    .unwrap();
+
+    claude_code_sync::sync::push_history(
+        None,
+        false,
+        None,
+        false,
+        false,
+        false,
+        false,
+        claude_code_sync::VerbosityLevel::Quiet,
+    )
+    .expect("Protect must remain safe when maintenance state is malformed");
+    assert!(remote_file.is_file());
+
+    claude_code_sync::sync::delete_unlock::unlock(15).unwrap();
+    let error = claude_code_sync::sync::push_history(
+        None,
+        false,
+        None,
+        false,
+        false,
+        false,
+        false,
+        claude_code_sync::VerbosityLevel::Quiet,
+    )
+    .expect_err("unlock must fail closed when maintenance state is malformed");
+    assert!(error.to_string().contains("maintenance state"));
+    assert!(remote_file.is_file());
+    assert!(!repo_dir.path().join(".ccs/deletions.json").exists());
+
+    claude_code_sync::sync::push_history(
+        None,
+        false,
+        None,
+        false,
+        false,
+        false,
+        true,
+        claude_code_sync::VerbosityLevel::Quiet,
+    )
+    .expect("explicit manual prune remains the user's deletion authority");
+    assert!(!remote_file.exists());
+    assert!(!repo_dir.path().join(".ccs/deletions.json").exists());
+}
+
+#[test]
+#[serial]
+fn test_missing_maintenance_state_allows_unlock_prune_as_ordinary_missing() {
+    let home_dir = TempDir::new().unwrap();
+    let config_dir = TempDir::new().unwrap();
+    let repo_dir = TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard(std::env::var_os("HOME"));
+    std::env::set_var("HOME", home_dir.path());
+    let _config_env = ConfigEnvGuard::set(config_dir.path());
+
+    let local_projects = home_dir.path().join(".claude/projects/project");
+    let remote_projects = repo_dir.path().join("projects/project");
+    fs::create_dir_all(&local_projects).unwrap();
+    fs::create_dir_all(&remote_projects).unwrap();
+    fs::write(
+        local_projects.join("local-presence.jsonl"),
+        b"{\"type\":\"user\",\"sessionId\":\"local-presence\",\"cwd\":\"/workspace/project\",\"timestamp\":\"2026-08-08T12:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"local\"}}\n{\"type\":\"assistant\",\"sessionId\":\"local-presence\",\"timestamp\":\"2026-08-08T12:00:01Z\",\"message\":{\"role\":\"assistant\",\"content\":\"reply\"}}\n",
+    )
+    .unwrap();
+    let remote_file = remote_projects.join("ordinary.jsonl");
+    fs::write(
+        &remote_file,
+        b"{\"type\":\"user\",\"sessionId\":\"ordinary\",\"cwd\":\"/workspace/project\",\"timestamp\":\"2026-08-08T12:00:00Z\",\"message\":{\"role\":\"user\",\"content\":\"ordinary\"}}\n{\"type\":\"assistant\",\"sessionId\":\"ordinary\",\"timestamp\":\"2026-08-08T12:00:01Z\",\"message\":{\"role\":\"assistant\",\"content\":\"reply\"}}\n",
+    )
+    .unwrap();
+
+    let repo = scm::init(repo_dir.path()).unwrap();
+    repo.stage_all().unwrap();
+    repo.commit("remote missing-state fixture").unwrap();
+    create_test_sync_state(repo_dir.path(), config_dir.path()).unwrap();
+
+    claude_code_sync::sync::delete_unlock::unlock(15).unwrap();
+    claude_code_sync::sync::push_history(
+        None,
+        false,
+        None,
+        false,
+        false,
+        false,
+        false,
+        claude_code_sync::VerbosityLevel::Quiet,
+    )
+    .expect("missing maintenance state should load as safe default");
+    assert!(!remote_file.exists());
+    assert!(!repo_dir.path().join(".ccs/deletions.json").exists());
 }
 
 #[test]

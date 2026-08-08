@@ -883,18 +883,36 @@ pub fn push_history(
     // intentional deletions (same as --prune, no tombstone). Maintenance-suppressed
     // Claude sessions remain protected unless the user explicitly passes --prune.
     let unlock_remaining = crate::sync::delete_unlock::status().ok().flatten();
-    let maintenance_state = ConfigManager::config_dir().ok().and_then(|config_dir| {
-        crate::session_maintenance::state::StateStore::from_config_dir(&config_dir)
-            .load()
-            .ok()
-    });
+    let action = decide_missing_action(prune, unlock_remaining);
+    let maintenance_state = if missing_in_repo.is_empty() {
+        None
+    } else {
+        match ConfigManager::config_dir().and_then(|config_dir| {
+            crate::session_maintenance::state::StateStore::from_config_dir(&config_dir).load()
+        }) {
+            Ok(state) => Some(state),
+            Err(error) => {
+                if matches!(action, MissingAction::PruneUnlock(_)) {
+                    return Err(error).context(
+                        "maintenance state is unavailable; refusing delete-unlock prune. "
+                            .to_string()
+                            + "Repair the state file or use explicit --prune",
+                    );
+                }
+                log::warn!(
+                    "Failed to load maintenance state; continuing without suppression classification: {}",
+                    error
+                );
+                None
+            }
+        }
+    };
     let (_suppressed_missing, ordinary_missing) =
         partition_missing_repo_sessions(&missing_in_repo, maintenance_state.as_ref());
 
     if missing_in_repo.is_empty() {
         // Nothing missing locally — no protection or pruning needed.
     } else {
-        let action = decide_missing_action(prune, unlock_remaining);
         match action {
             MissingAction::PruneManual | MissingAction::PruneUnlock(_) => {
                 let actionable_missing =
@@ -1568,7 +1586,7 @@ mod tests {
 
         let identity = SessionIdentity {
             source: SessionSource::Claude,
-            session_id: "suppressed".to_string(),
+            session_id: "session-suppressed".to_string(),
         };
         let mut state = MaintenanceState::default();
         state.entries.insert(
