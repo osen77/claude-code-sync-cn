@@ -101,9 +101,13 @@ pub struct SessionIdentity {
 /// Filter selecting one or all session sources.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionSourceFilter {
+    /// Include sessions from every supported source.
     All,
+    /// Include only Claude Code sessions.
     Claude,
+    /// Include only Codex sessions.
     Codex,
+    /// Include only Oh My Pi sessions.
     Omp,
 }
 
@@ -134,27 +138,44 @@ impl SessionSourceFilter {
 /// Project summary for listing.
 #[derive(Debug, Clone)]
 pub struct ProjectSummary {
+    /// Display name of the project.
     pub name: String,
+    /// Filesystem directory containing the project's sessions.
     pub dir_path: PathBuf,
+    /// Number of sessions found for the project.
     pub session_count: usize,
+    /// Timestamp of the most recent session activity, if available.
     pub last_activity: Option<String>,
 }
 
 /// Session summary for listing and operations.
 #[derive(Debug, Clone)]
 pub struct SessionSummary {
+    /// Stable source identifier retained for cache and JSON compatibility.
     pub source: String,
+    /// Source-local session identifier.
     pub session_id: String,
+    /// User-visible session title.
     pub title: String,
+    /// Name of the project associated with the session.
     pub project_name: String,
+    /// Filesystem directory associated with the project.
     pub project_dir: PathBuf,
+    /// Filesystem path of the source session file.
     pub file_path: PathBuf,
+    /// Total number of user and assistant turns.
     pub message_count: usize,
+    /// Number of user turns in the session.
     pub user_message_count: usize,
+    /// Number of assistant turns in the session.
     pub assistant_message_count: usize,
+    /// Timestamp of the first recorded message, if available.
     pub first_timestamp: Option<String>,
+    /// Timestamp of the most recent activity, if available.
     pub last_activity: Option<String>,
+    /// Size of the source session file in bytes.
     pub file_size: u64,
+    /// Whether a user-created custom title protects this session from title replacement.
     pub has_custom_title: bool,
 }
 
@@ -364,5 +385,36 @@ pub(crate) fn format_relative_time(timestamp: &str) -> String {
         }
     } else {
         "Unknown".to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_session_preserves_custom_title_protection_signal() {
+        let user_entry: crate::parser::ConversationEntry = serde_json::from_str(
+            r#"{"type":"user","message":{"role":"user","content":"hello"},"sessionId":"s1"}"#,
+        )
+        .unwrap();
+        let custom_title_entry: crate::parser::ConversationEntry = serde_json::from_str(
+            r#"{"type":"custom-title","customTitle":"renamed","sessionId":"s1"}"#,
+        )
+        .unwrap();
+
+        let plain = ConversationSession {
+            session_id: "s1".to_string(),
+            entries: vec![user_entry.clone()],
+            file_path: "s1.jsonl".to_string(),
+        };
+        let renamed = ConversationSession {
+            session_id: "s1".to_string(),
+            entries: vec![user_entry, custom_title_entry],
+            file_path: "s1.jsonl".to_string(),
+        };
+
+        assert!(!SessionSummary::from_session(&plain, "project", Path::new(".")).has_custom_title);
+        assert!(SessionSummary::from_session(&renamed, "project", Path::new(".")).has_custom_title);
     }
 }
