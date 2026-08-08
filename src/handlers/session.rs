@@ -4844,6 +4844,36 @@ fn update_keep_marker(session_id: &str, keep: bool, source: SessionSourceFilter)
     })
 }
 
+fn render_maintenance_report(
+    run: bool,
+    report: &crate::session_maintenance::MaintenanceReport,
+) -> String {
+    format!(
+        "Maintenance {}: candidates={}, hidden={}, recycled={}, purged={}, restored_visible={}, file_actions={}, remaining_actions={}, warnings={}",
+        if run { "applied" } else { "dry-run" },
+        report.candidates,
+        report.hidden,
+        report.recycled,
+        report.purged,
+        report.restored_visible,
+        report.file_actions,
+        report.remaining_actions,
+        report.warnings,
+    )
+}
+
+fn ensure_maintenance_report_is_safe(
+    report: &crate::session_maintenance::MaintenanceReport,
+) -> Result<()> {
+    if report.warnings > 0 {
+        anyhow::bail!(
+            "maintenance completed with {} warnings; fail-safe is active; check ccs log for details",
+            report.warnings
+        );
+    }
+    Ok(())
+}
+
 /// Run or inspect session maintenance without implicit mutation.
 pub fn handle_session_maintain(
     enable: bool,
@@ -4902,19 +4932,8 @@ pub fn handle_session_maintain(
     let result = scan_all_session_summaries_with_report_mode(None, source, mode)?;
     emit_scan_warning(&result.diagnostics);
     let report = &result.maintenance_report;
-    println!(
-        "Maintenance {}: candidates={}, hidden={}, recycled={}, purged={}, restored_visible={}, file_actions={}, remaining_actions={}, warnings={}",
-        if run { "applied" } else { "dry-run" },
-        report.candidates,
-        report.hidden,
-        report.recycled,
-        report.purged,
-        report.restored_visible,
-        report.file_actions,
-        report.remaining_actions,
-        report.warnings,
-    );
-    Ok(())
+    println!("{}", render_maintenance_report(run, report));
+    ensure_maintenance_report_is_safe(report)
 }
 
 fn maintenance_lifecycle_label(lifecycle: LifecycleState) -> &'static str {
@@ -5942,6 +5961,63 @@ mod tests {
             maintenance_lifecycle_label(LifecycleState::PurgedLocal),
             "purged_local"
         );
+    }
+
+    #[test]
+    fn maintenance_run_warning_returns_fail_safe_error_after_counts() {
+        let report = crate::session_maintenance::MaintenanceReport {
+            candidates: 3,
+            file_actions: 2,
+            remaining_actions: 1,
+            warnings: 2,
+            ..Default::default()
+        };
+
+        let output = render_maintenance_report(true, &report);
+        assert!(output.contains("candidates=3"));
+        assert!(output.contains("file_actions=2"));
+        assert!(output.contains("remaining_actions=1"));
+        assert!(output.contains("warnings=2"));
+        let error = ensure_maintenance_report_is_safe(&report)
+            .expect_err("warnings must make an explicit run fail");
+        assert!(error
+            .to_string()
+            .contains("maintenance completed with 2 warnings"));
+        assert!(error.to_string().contains("fail-safe"));
+        assert!(error.to_string().contains("ccs log"));
+    }
+
+    #[test]
+    fn maintenance_dry_run_warning_returns_fail_safe_error_after_counts() {
+        let report = crate::session_maintenance::MaintenanceReport {
+            candidates: 4,
+            remaining_actions: 2,
+            warnings: 1,
+            ..Default::default()
+        };
+
+        let output = render_maintenance_report(false, &report);
+        assert!(output.contains("Maintenance dry-run"));
+        assert!(output.contains("candidates=4"));
+        assert!(output.contains("remaining_actions=2"));
+        assert!(output.contains("warnings=1"));
+        let error = ensure_maintenance_report_is_safe(&report)
+            .expect_err("warnings must make an explicit dry-run fail");
+        assert!(error
+            .to_string()
+            .contains("maintenance completed with 1 warnings"));
+    }
+
+    #[test]
+    fn maintenance_clean_report_is_ok_and_remaining_actions_are_not_errors() {
+        let report = crate::session_maintenance::MaintenanceReport {
+            remaining_actions: 5,
+            ..Default::default()
+        };
+
+        let output = render_maintenance_report(true, &report);
+        assert!(output.contains("remaining_actions=5"));
+        ensure_maintenance_report_is_safe(&report).expect("clean report should be successful");
     }
 
     #[test]
