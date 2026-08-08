@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+#[cfg(debug_assertions)]
+use std::time::{Duration as StdDuration, Instant};
 
 const STATE_VERSION: u32 = 1;
 
@@ -281,6 +283,36 @@ pub(crate) struct LockedState<'a> {
     pub(crate) state: MaintenanceState,
 }
 
+#[cfg(debug_assertions)]
+pub(crate) fn wait_for_maintenance_test_gate(
+    ready_env: &str,
+    release_env: &str,
+    label: &str,
+) -> Result<()> {
+    let Some(ready) = std::env::var_os(ready_env) else {
+        return Ok(());
+    };
+    let Some(release) = std::env::var_os(release_env) else {
+        anyhow::bail!("{ready_env} requires {release_env}");
+    };
+    let ready = PathBuf::from(ready);
+    let release = PathBuf::from(release);
+    fs::write(&ready, b"ready")
+        .with_context(|| format!("write {label} ready marker {}", ready.display()))?;
+
+    let deadline = Instant::now() + StdDuration::from_secs(30);
+    while !release.exists() {
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "timed out waiting for {label} release marker {}",
+                release.display()
+            );
+        }
+        std::thread::sleep(StdDuration::from_millis(5));
+    }
+    Ok(())
+}
+
 impl LockedState<'_> {
     pub(crate) fn persist(&self) -> Result<()> {
         validate_state(&self.state)?;
@@ -306,6 +338,12 @@ impl StateStore {
     {
         let _lock = FileLock::acquire(&self.lock_path)
             .with_context(|| format!("failed to lock {}", self.lock_path.display()))?;
+        #[cfg(debug_assertions)]
+        wait_for_maintenance_test_gate(
+            "CCS_TEST_MAINTENANCE_LOCK_READY",
+            "CCS_TEST_MAINTENANCE_LOCK_RELEASE",
+            "maintenance lock",
+        )?;
         let state = self.load_unlocked()?;
         let mut locked = LockedState { store: self, state };
         transaction(&mut locked)

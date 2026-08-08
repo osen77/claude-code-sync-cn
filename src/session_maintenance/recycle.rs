@@ -1,3 +1,5 @@
+#[cfg(debug_assertions)]
+use super::state::wait_for_maintenance_test_gate;
 use super::state::{
     identity_key, LifecycleState, MaintenanceEntry, PendingOperation, PendingOperationKind,
     StateStore,
@@ -126,6 +128,12 @@ pub(crate) fn recycle_session(
         // This is the durability boundary: no operation below may touch source
         // until the journal says how to recover it.
         locked.persist()?;
+        #[cfg(debug_assertions)]
+        wait_for_maintenance_test_gate(
+            "CCS_TEST_MAINTENANCE_AFTER_PENDING_READY",
+            "CCS_TEST_MAINTENANCE_AFTER_PENDING_RELEASE",
+            "maintenance pending journal",
+        )?;
 
         if path_is_regular(&final_path)? {
             verify_regular_fingerprint_within_root(
@@ -922,6 +930,10 @@ fn safe_component(value: &str) -> String {
 }
 
 fn force_copy_fallback() -> bool {
+    #[cfg(debug_assertions)]
+    if std::env::var_os("CCS_TEST_MAINTENANCE_FORCE_COPY").is_some() {
+        return true;
+    }
     #[cfg(test)]
     {
         FORCE_COPY_FALLBACK.with(std::cell::Cell::get)

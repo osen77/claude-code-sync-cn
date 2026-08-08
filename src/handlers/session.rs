@@ -5548,11 +5548,30 @@ pub fn handle_session_restore_with_source(
                                 &maintenance_roots,
                             )?;
                             store.update(|state| {
+                                if state.pending.is_some() {
+                                    anyhow::bail!(
+                                        "cannot restore hidden session while a maintenance operation is pending"
+                                    )
+                                }
                                 let key = identity_key(&entry.identity);
                                 let current = state
                                     .entries
                                     .get_mut(&key)
                                     .context("maintenance entry disappeared while restoring")?;
+                                if current.identity != entry.identity
+                                    || current.fingerprint != entry.fingerprint
+                                    || current.original_relative_path != entry.original_relative_path
+                                    || current.lifecycle != LifecycleState::Hidden
+                                {
+                                    anyhow::bail!(
+                                        "maintenance entry changed while restoring hidden session"
+                                    )
+                                }
+                                validate_hidden_restore_candidate(
+                                    current,
+                                    resolved.summary.as_ref(),
+                                    &maintenance_roots,
+                                )?;
                                 current.lifecycle = LifecycleState::Visible;
                                 current.keep = true;
                                 current.hidden_since = None;
