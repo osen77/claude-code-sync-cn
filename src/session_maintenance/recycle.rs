@@ -38,7 +38,7 @@ impl MaintenanceRoots {
 
 /// Return the deterministic path used for a recycled session.
 pub(crate) fn recycle_relative_path(entry: &MaintenanceEntry) -> PathBuf {
-    let session_component = safe_component(&entry.identity.session_id);
+    let session_component = session_component(&entry.identity.session_id);
     let fingerprint_component = safe_component(&entry.fingerprint);
     PathBuf::from(entry.identity.source.as_str())
         .join(session_component)
@@ -401,6 +401,9 @@ fn reconcile_recycle(
         fs::rename(&staging, &final_path).context("failed to promote recycle staging file")?;
         sync_parent_directory(staging.parent().context("staging has no parent")?)?;
         sync_parent_directory(final_path.parent().context("final has no parent")?)?;
+        maybe_replace_reconcile_final_for_test(&final_path)?;
+        validate_regular_candidate(&roots.recycle, &final_path)?;
+        verify_fingerprint(&final_path, &pending.expected_fingerprint)?;
         staging_state = None;
         final_state = Some(pending.expected_fingerprint.clone());
     } else if staging_state.is_some() && final_state.is_some() {
@@ -750,21 +753,22 @@ fn validate_pending_binding(entry: &MaintenanceEntry, pending: &PendingOperation
     Ok(())
 }
 
-fn safe_component(value: &str) -> String {
-    if is_safe_component(value) {
-        value.to_string()
-    } else {
-        blake3::hash(value.as_bytes()).to_hex().to_string()
-    }
+fn session_component(value: &str) -> String {
+    format!("id-{}", blake3::hash(value.as_bytes()).to_hex())
 }
 
-fn is_safe_component(value: &str) -> bool {
-    !value.is_empty()
+fn safe_component(value: &str) -> String {
+    if !value.is_empty()
         && value != "."
         && value != ".."
         && !value.contains(['/', '\\'])
         && !value.starts_with('\\')
         && value.as_bytes().get(1).is_none_or(|byte| *byte != b':')
+    {
+        value.to_string()
+    } else {
+        blake3::hash(value.as_bytes()).to_hex().to_string()
+    }
 }
 
 fn force_copy_fallback() -> bool {
@@ -797,6 +801,26 @@ fn is_cross_device_error(error: &std::io::Error) -> bool {
 thread_local! {
     static FORCE_COPY_FALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FORCE_RESTORE_DESTINATION_REPLACEMENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FORCE_RECONCILE_FINAL_REGULAR_REPLACEMENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FORCE_RECONCILE_FINAL_SYMLINK_REPLACEMENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn maybe_replace_reconcile_final_for_test(path: &Path) -> Result<()> {
+    #[cfg(test)]
+    {
+        if FORCE_RECONCILE_FINAL_REGULAR_REPLACEMENT.with(std::cell::Cell::get) {
+            fs::write(path, b"different final")?;
+        }
+        #[cfg(unix)]
+        if FORCE_RECONCILE_FINAL_SYMLINK_REPLACEMENT.with(std::cell::Cell::get) {
+            let target = path.with_file_name("reconcile-race-outside.jsonl");
+            fs::write(&target, b"outside")?;
+            fs::remove_file(path)?;
+            std::os::unix::fs::symlink(target, path)?;
+        }
+    }
+    let _ = path;
+    Ok(())
 }
 
 fn maybe_replace_restore_destination_for_test(path: &Path) -> Result<()> {
@@ -1010,6 +1034,73 @@ mod tests {
         assert!(!fixture.staging_file().exists());
         assert!(fixture.recycle_file().exists());
         assert_eq!(fixture.load_entry().lifecycle, LifecycleState::Recycled);
+    }
+
+    #[test]
+    fn reconcile_revalidates_promoted_regular_final_before_removing_source() {
+        let fixture = RecycleFixture::new(SessionSource::Codex);
+        fs::create_dir_all(fixture.staging_file().parent().unwrap()).unwrap();
+        fs::copy(&fixture.source_file, fixture.staging_file()).unwrap();
+        fixture.set_pending_recycle();
+        FORCE_RECONCILE_FINAL_REGULAR_REPLACEMENT.with(|flag| flag.set(true));
+        let result = reconcile_pending(&fixture.store, &fixture.roots, fixture.now);
+        FORCE_RECONCILE_FINAL_REGULAR_REPLACEMENT.with(|flag| flag.set(false));
+        assert!(result.is_err());
+        assert!(fixture.source_file.exists());
+        assert!(!fixture.staging_file().exists());
+        assert!(fixture.recycle_file().exists());
+        assert_eq!(
+            fs::read(fixture.recycle_file()).unwrap(),
+            b"different final"
+        );
+        assert!(fixture.store.load().unwrap().pending.is_some());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn reconcile_revalidates_promoted_symlink_final_before_removing_source() {
+        let fixture = RecycleFixture::new(SessionSource::Omp);
+        fs::create_dir_all(fixture.staging_file().parent().unwrap()).unwrap();
+        fs::copy(&fixture.source_file, fixture.staging_file()).unwrap();
+        fixture.set_pending_recycle();
+        FORCE_RECONCILE_FINAL_SYMLINK_REPLACEMENT.with(|flag| flag.set(true));
+        let result = reconcile_pending(&fixture.store, &fixture.roots, fixture.now);
+        FORCE_RECONCILE_FINAL_SYMLINK_REPLACEMENT.with(|flag| flag.set(false));
+        assert!(result.is_err());
+        assert!(fixture.source_file.exists());
+        assert!(!fixture.staging_file().exists());
+        assert!(fixture.recycle_file().is_symlink());
+        assert!(fixture.store.load().unwrap().pending.is_some());
+    }
+
+    #[test]
+    fn recycle_session_id_components_are_always_distinct_digests() {
+        let fixture = RecycleFixture::new(SessionSource::Claude);
+        let ids = ["abc", "ABC", "abc.", "\u{00e9}", "e\u{301}"];
+        let paths: Vec<_> = ids
+            .iter()
+            .map(|session_id| {
+                let mut entry = fixture.entry.clone();
+                entry.identity.session_id = (*session_id).to_string();
+                recycle_relative_path(&entry)
+            })
+            .collect();
+        for path in &paths {
+            let component = path
+                .components()
+                .nth(1)
+                .unwrap()
+                .as_os_str()
+                .to_string_lossy();
+            assert!(component.starts_with("id-"));
+            assert_eq!(component.len(), 67);
+        }
+        for (index, path) in paths.iter().enumerate() {
+            assert!(paths[index + 1..].iter().all(|other| other != path));
+        }
+        let mut same = fixture.entry.clone();
+        same.identity.session_id = "abc".to_string();
+        assert_eq!(recycle_relative_path(&same), paths[0]);
     }
 
     #[test]
