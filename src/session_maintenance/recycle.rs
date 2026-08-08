@@ -83,6 +83,13 @@ pub(crate) fn recycle_session(
             if inspect_file(&roots.recycle, &staging_path, &entry.fingerprint)?.is_some() {
                 remove_verified(&roots.recycle, &staging_path, &entry.fingerprint)?;
             }
+
+            let source_root = roots.source_root(entry.identity.source);
+            validate_directory_root(source_root)?;
+            let source = safe_join_within_root(source_root, &entry.original_relative_path)?;
+            if inspect_file(source_root, &source, &entry.fingerprint)?.is_some() {
+                remove_verified(source_root, &source, &entry.fingerprint)?;
+            }
             return Ok(());
         }
         if entry.lifecycle != LifecycleState::Hidden {
@@ -1227,6 +1234,62 @@ mod tests {
         assert!(!fixture.source_file.exists());
         assert!(fixture.recycle_file().exists());
         assert_eq!(fixture.load_entry().lifecycle, LifecycleState::Recycled);
+    }
+
+    #[test]
+    fn recycled_idempotence_removes_matching_reappeared_source() {
+        let fixture = RecycleFixture::new(SessionSource::Claude);
+        recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now).unwrap();
+        fs::write(&fixture.source_file, b"session contents\n").unwrap();
+
+        recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now).unwrap();
+        assert!(!fixture.source_file.exists());
+        assert!(fixture.recycle_file().exists());
+        assert_eq!(fixture.load_entry().lifecycle, LifecycleState::Recycled);
+
+        // A second idempotent call with the source absent remains successful.
+        recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now).unwrap();
+        assert!(!fixture.source_file.exists());
+        assert!(fixture.recycle_file().exists());
+    }
+
+    #[test]
+    fn recycled_idempotence_rejects_different_reappeared_source() {
+        let fixture = RecycleFixture::new(SessionSource::Codex);
+        recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now).unwrap();
+        fs::write(&fixture.source_file, b"different source\n").unwrap();
+        let result = recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now);
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read(&fixture.source_file).unwrap(),
+            b"different source\n"
+        );
+        assert!(fixture.recycle_file().exists());
+        let state_after = fixture.store.load().unwrap();
+        assert!(state_after.pending.is_none());
+        assert_eq!(fixture.load_entry().lifecycle, LifecycleState::Recycled);
+        assert_eq!(fixture.load_entry().fingerprint, fixture.entry.fingerprint);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn recycled_idempotence_rejects_symlink_reappeared_source() {
+        let fixture = RecycleFixture::new(SessionSource::Omp);
+        recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now).unwrap();
+        let outside = fixture
+            .source_file
+            .with_file_name("reappeared-outside.jsonl");
+        fs::write(&outside, b"outside source\n").unwrap();
+        std::os::unix::fs::symlink(&outside, &fixture.source_file).unwrap();
+        let result = recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now);
+        assert!(result.is_err());
+        assert!(fixture.source_file.is_symlink());
+        assert_eq!(fs::read(&outside).unwrap(), b"outside source\n");
+        assert!(fixture.recycle_file().exists());
+        let state_after = fixture.store.load().unwrap();
+        assert!(state_after.pending.is_none());
+        assert_eq!(fixture.load_entry().lifecycle, LifecycleState::Recycled);
+        assert_eq!(fixture.load_entry().fingerprint, fixture.entry.fingerprint);
     }
 
     #[test]
