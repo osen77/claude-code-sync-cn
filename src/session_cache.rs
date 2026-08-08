@@ -6,9 +6,9 @@
 //! `insert` wrappers intentionally preserve their old size+mtime-only, no-I/O behavior;
 //! scanner code should use the fingerprint-aware APIs instead.
 
-use crate::handlers::session::SessionSummary;
 use crate::path_security::canonical_utf8_key;
 use crate::session_diagnostics::{error_kind_from_error, ChangedDuringRead, ScanWarningErrorKind};
+use crate::session_model::SessionSummary;
 use anyhow::{anyhow, Context, Result};
 use fs4::FileExt;
 use log::{debug, warn};
@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 use tempfile::NamedTempFile;
 
-const CACHE_VERSION: u32 = 3;
+const CACHE_VERSION: u32 = 4;
 const KNOWN_CACHE_SOURCES: [&str; 3] = ["claude", "codex", "omp"];
 const LEGACY_CONTENT_FINGERPRINT: &str = "";
 
@@ -106,6 +106,8 @@ pub struct CachedEntry {
     pub assistant_message_count: usize,
     pub first_timestamp: Option<String>,
     pub last_activity: Option<String>,
+    #[serde(default)]
+    pub has_custom_title: bool,
 }
 
 #[allow(dead_code)]
@@ -375,6 +377,7 @@ impl SessionIndexCache {
             first_timestamp: entry.first_timestamp.clone(),
             last_activity: entry.last_activity.clone(),
             file_size,
+            has_custom_title: entry.has_custom_title,
         })
     }
 
@@ -408,6 +411,7 @@ impl SessionIndexCache {
             first_timestamp: entry.first_timestamp.clone(),
             last_activity: entry.last_activity.clone(),
             file_size,
+            has_custom_title: entry.has_custom_title,
         })
     }
 
@@ -456,6 +460,7 @@ impl SessionIndexCache {
                 assistant_message_count: summary.assistant_message_count,
                 first_timestamp: summary.first_timestamp.clone(),
                 last_activity: summary.last_activity.clone(),
+                has_custom_title: summary.has_custom_title,
             },
         );
     }
@@ -819,6 +824,7 @@ mod tests {
             first_timestamp: Some("2024-01-01T00:00:00Z".to_string()),
             last_activity: Some("2024-01-02T00:00:00Z".to_string()),
             file_size: 1234,
+            has_custom_title: true,
         }
     }
 
@@ -857,6 +863,7 @@ mod tests {
         let s = result.unwrap();
         assert_eq!(s.session_id, "test-session-id");
         assert_eq!(s.file_size, file_size);
+        assert!(s.has_custom_title);
 
         // Different size → None
         assert!(cache
@@ -911,6 +918,7 @@ mod tests {
         assert_eq!(loaded.entries.len(), 1);
         let cached = loaded.entries.values().next().unwrap();
         assert_eq!(cached.source, "claude");
+        assert!(cached.has_custom_title);
 
         let result = loaded.lookup(&key, &file_path, file_size, mtime);
         assert!(result.is_some());
@@ -1250,6 +1258,7 @@ mod tests {
             assistant_message_count: 0,
             first_timestamp: None,
             last_activity: None,
+            has_custom_title: false,
         };
         let delta = CacheDelta {
             upserts: vec![CacheUpsert {
@@ -1490,7 +1499,7 @@ mod tests {
         std::fs::write(&path, b"session").unwrap();
 
         let mut old_cache = test_cache_with_sources(&["future-entry"]);
-        old_cache.version = CACHE_VERSION + 1;
+        old_cache.version = CACHE_VERSION - 1;
         std::fs::write(
             cache_path(temp.path()),
             serde_json::to_vec(&old_cache).unwrap(),
@@ -1694,6 +1703,7 @@ mod tests {
             assistant_message_count: summary.assistant_message_count,
             first_timestamp: summary.first_timestamp,
             last_activity: summary.last_activity,
+            has_custom_title: summary.has_custom_title,
         }
     }
 
@@ -1721,6 +1731,7 @@ mod tests {
                     assistant_message_count: 0,
                     first_timestamp: None,
                     last_activity: None,
+                    has_custom_title: false,
                 },
             );
         }

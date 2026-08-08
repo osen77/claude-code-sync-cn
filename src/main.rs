@@ -15,6 +15,8 @@ mod report;
 mod scm;
 mod session_cache;
 mod session_diagnostics;
+mod session_maintenance;
+mod session_model;
 mod sync;
 mod undo;
 

@@ -137,6 +137,8 @@ pub mod sync;
 
 pub mod session_cache;
 pub mod session_diagnostics;
+pub mod session_maintenance;
+pub mod session_model;
 /// Snapshot-based undo functionality for sync operations.
 ///
 /// Creates point-in-time snapshots of conversation files before sync operations.

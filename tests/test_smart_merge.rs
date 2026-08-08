@@ -19,6 +19,7 @@ fn create_entry(
         cwd: None,
         version: None,
         git_branch: None,
+        custom_title: None,
         extra: serde_json::Value::Null,
     }
 }
@@ -381,6 +382,7 @@ fn test_mixed_uuid_and_non_uuid_entries() {
                 cwd: None,
                 version: None,
                 git_branch: None,
+                custom_title: None,
                 extra: serde_json::Value::Null,
             },
             create_entry("B", Some("A"), "2025-01-01T00:01:00Z", "Assistant response"),

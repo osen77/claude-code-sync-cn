@@ -770,6 +770,7 @@ fn cache_variant(title: &str) -> SessionIndexCache {
         source: "claude".to_string(),
         session_id: format!("session-{title}"),
         title: title.to_string(),
+        has_custom_title: false,
         project_name: "cache-task4".to_string(),
         project_dir: "/tmp/cache-task4".to_string(),
         message_count: 1,

@@ -59,6 +59,7 @@ fn create_large_conversation(
                 cwd: Some("/home/user/project".to_string()),
                 version: Some("1.0.0".to_string()),
                 git_branch: Some("main".to_string()),
+                custom_title: None,
                 extra: serde_json::json!({}),
             };
 
@@ -79,6 +80,7 @@ fn create_large_conversation(
                 cwd: Some("/home/user/project".to_string()),
                 version: Some("1.0.0".to_string()),
                 git_branch: Some("main".to_string()),
+                custom_title: None,
                 extra: serde_json::json!({}),
             };
 
@@ -126,6 +128,7 @@ fn modify_conversation(conv_path: &Path, additional_message: &str) -> Result<()>
         cwd: Some("/home/user/project".to_string()),
         version: Some("1.0.0".to_string()),
         git_branch: Some("main".to_string()),
+        custom_title: None,
         extra: serde_json::json!({}),
     };
 

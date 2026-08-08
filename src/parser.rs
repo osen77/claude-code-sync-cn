@@ -76,6 +76,10 @@ pub struct ConversationEntry {
     #[serde(rename = "gitBranch", skip_serializing_if = "Option::is_none")]
     pub git_branch: Option<String>,
 
+    /// Custom title set by a user renaming the session.
+    #[serde(rename = "customTitle", skip_serializing_if = "Option::is_none")]
+    pub custom_title: Option<String>,
+
     /// Catch-all field for additional JSON properties not explicitly defined
     ///
     /// Preserves any extra fields in the JSON that aren't part of the explicit schema.
@@ -326,8 +330,7 @@ impl ConversationSession {
             .iter()
             .rev()
             .find(|e| e.entry_type == "custom-title")
-            .and_then(|e| e.extra.get("customTitle"))
-            .and_then(|v| v.as_str())
+            .and_then(|e| e.custom_title.as_deref())
         {
             if !custom.is_empty() {
                 return Some(custom.to_string());
@@ -359,6 +362,13 @@ impl ConversationSession {
             }
         }
         None
+    }
+
+    /// Returns whether the session contains a user-created Claude custom title.
+    pub fn has_custom_title(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| entry.entry_type == "custom-title" && entry.custom_title.is_some())
     }
 
     /// Check if the content is system-generated (should be skipped for title)
@@ -785,6 +795,32 @@ mod tests {
         assert_eq!(outcome.malformed_lines, 1);
         assert_eq!(outcome.value.session_id, "partial");
         assert_eq!(outcome.value.entries.len(), 1);
+    }
+
+    #[test]
+    fn has_custom_title_reports_renamed_sessions_only() {
+        let user_entry: ConversationEntry = serde_json::from_str(
+            r#"{"type":"user","message":{"role":"user","content":"hello"},"sessionId":"s1"}"#,
+        )
+        .unwrap();
+        let custom_title_entry: ConversationEntry = serde_json::from_str(
+            r#"{"type":"custom-title","customTitle":"renamed","sessionId":"s1"}"#,
+        )
+        .unwrap();
+
+        let plain = ConversationSession {
+            session_id: "s1".to_string(),
+            entries: vec![user_entry.clone()],
+            file_path: "s1.jsonl".to_string(),
+        };
+        let renamed = ConversationSession {
+            session_id: "s1".to_string(),
+            entries: vec![user_entry, custom_title_entry],
+            file_path: "s1.jsonl".to_string(),
+        };
+
+        assert!(!plain.has_custom_title());
+        assert!(renamed.has_custom_title());
     }
 
     #[test]

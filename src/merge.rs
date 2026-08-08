@@ -584,6 +584,7 @@ mod tests {
             cwd: None,
             version: None,
             git_branch: None,
+            custom_title: None,
             extra: serde_json::Value::Null,
         }
     }
