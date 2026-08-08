@@ -11,19 +11,50 @@ use std::sync::OnceLock;
 pub(crate) const CLASSIFIER_VERSION: u32 = 1;
 pub(crate) const DEFAULT_THRESHOLD: u16 = 70;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassifierPolicy {
     pub threshold: u16,
     pub hide_after_hours: u64,
+    pub(crate) temporary_roots: Vec<PathBuf>,
 }
 
 impl ClassifierPolicy {
-    pub fn conservative(hide_after_hours: u64) -> Self {
+    pub(crate) fn conservative(hide_after_hours: u64) -> Self {
         Self {
             threshold: DEFAULT_THRESHOLD,
             hide_after_hours,
+            temporary_roots: default_temporary_roots(),
         }
     }
+
+    pub(crate) fn with_temporary_roots(
+        hide_after_hours: u64,
+        temporary_roots: Vec<PathBuf>,
+    ) -> Self {
+        Self {
+            threshold: DEFAULT_THRESHOLD,
+            hide_after_hours,
+            temporary_roots,
+        }
+    }
+}
+
+fn default_temporary_roots() -> Vec<PathBuf> {
+    vec![
+        PathBuf::from("/tmp"),
+        PathBuf::from("/private/tmp"),
+        PathBuf::from("/var/tmp"),
+        PathBuf::from(r"C:\Temp"),
+        PathBuf::from(r"C:\Windows\Temp"),
+    ]
+}
+
+#[cfg(not(test))]
+#[allow(dead_code)]
+fn _classifier_api_anchor() {
+    let _ = ClassifierPolicy::conservative;
+    let _ = ClassifierPolicy::with_temporary_roots;
+    let _ = classify;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,7 +112,7 @@ pub struct ClassificationDecision {
 }
 
 /// Classify one session using the conservative, protection-first policy.
-pub fn classify(
+pub(crate) fn classify(
     candidate: &MaintenanceCandidate,
     policy: &ClassifierPolicy,
     now: DateTime<Utc>,
@@ -150,7 +181,7 @@ pub fn classify(
         reasons.push(ReasonCode::ShortDuration);
     }
 
-    if is_temporary_cwd(&candidate.project_dir) {
+    if is_temporary_cwd(&candidate.project_dir, &policy.temporary_roots) {
         score = score.saturating_add(20);
         if is_fixture_session_id(&candidate.identity.session_id)
             && is_fixture_cwd(&candidate.project_dir)
@@ -211,10 +242,10 @@ fn is_fixture_session_id(session_id: &str) -> bool {
         .is_match(session_id)
 }
 
-fn is_temporary_cwd(project_dir: &Path) -> bool {
-    project_dir.starts_with(std::env::temp_dir())
-        || project_dir.starts_with(Path::new("/tmp"))
-        || project_dir.starts_with(Path::new("/private/tmp"))
+fn is_temporary_cwd(project_dir: &Path, temporary_roots: &[PathBuf]) -> bool {
+    temporary_roots
+        .iter()
+        .any(|root| !root.as_os_str().is_empty() && project_dir.starts_with(root))
 }
 
 fn is_fixture_cwd(project_dir: &Path) -> bool {
@@ -239,6 +270,7 @@ mod tests {
     use crate::session_cache::FileFingerprint;
     use crate::session_model::{SessionIdentity, SessionSource};
     use chrono::{DateTime, Duration, Utc};
+    use serial_test::serial;
     use std::path::PathBuf;
 
     fn now() -> DateTime<Utc> {
@@ -248,7 +280,7 @@ mod tests {
     }
 
     fn policy() -> ClassifierPolicy {
-        ClassifierPolicy::conservative(24)
+        ClassifierPolicy::with_temporary_roots(24, vec![PathBuf::from("/tmp")])
     }
 
     fn candidate(
@@ -326,5 +358,96 @@ mod tests {
             classify(&candidate, &policy(), now()).classification,
             Classification::Keep
         );
+    }
+
+    #[test]
+    fn score_at_threshold_is_a_test_candidate() {
+        let candidate = candidate("test", 2, 7, 5, "ordinary-session");
+        let decision = classify(&candidate, &policy(), now());
+        assert_eq!(decision.classification, Classification::TestCandidate);
+        assert_eq!(decision.score, 70);
+    }
+
+    #[test]
+    fn long_conversation_protection_covers_message_count_over_twenty() {
+        let candidate = candidate("test", 2, 21, 5, "ordinary-session");
+        let decision = classify(&candidate, &policy(), now());
+        assert_eq!(decision.classification, Classification::Keep);
+        assert!(decision
+            .reasons
+            .contains(&ReasonCode::LongConversationProtection));
+    }
+
+    #[test]
+    fn long_conversation_protection_covers_duration_over_two_hours() {
+        let candidate = candidate("test", 2, 1, 121, "ordinary-session");
+        let decision = classify(&candidate, &policy(), now());
+        assert_eq!(decision.classification, Classification::Keep);
+        assert!(decision
+            .reasons
+            .contains(&ReasonCode::LongConversationProtection));
+    }
+
+    #[test]
+    fn fixture_id_regex_accepts_only_supported_task_shapes() {
+        for session_id in ["cc-task4", "cx-cache-task9", "om-task1"] {
+            let candidate = candidate("ordinary", 5, 3, 60, session_id);
+            let decision = classify(&candidate, &policy(), now());
+            assert!(decision.reasons.contains(&ReasonCode::FixtureSessionId));
+        }
+        for session_id in ["cc-task", "cc-task4-extra", "claude-task4", "cc-taskx"] {
+            let candidate = candidate("ordinary", 5, 3, 60, session_id);
+            let decision = classify(&candidate, &policy(), now());
+            assert!(!decision.reasons.contains(&ReasonCode::FixtureSessionId));
+        }
+    }
+
+    #[test]
+    fn fixture_temporary_cwd_has_dedicated_reason() {
+        let mut candidate = candidate("ordinary", 5, 3, 60, "cc-task4");
+        candidate.project_dir = PathBuf::from("/tmp/task3-project");
+        let decision = classify(&candidate, &policy(), now());
+        assert!(decision.reasons.contains(&ReasonCode::FixtureTemporaryCwd));
+    }
+
+    #[test]
+    fn automated_validation_title_alone_does_not_cross_threshold() {
+        let candidate = candidate("smoke test", 5, 3, 60, "ordinary-session");
+        let decision = classify(&candidate, &policy(), now());
+        assert_eq!(decision.classification, Classification::Keep);
+        assert!(decision.score < DEFAULT_THRESHOLD);
+        assert!(decision
+            .reasons
+            .contains(&ReasonCode::AutomatedValidationTitle));
+    }
+
+    #[test]
+    fn explicit_test_marker_scores_one_hundred() {
+        let mut candidate = candidate("ordinary", 5, 3, 60, "ordinary-session");
+        candidate.explicit_test = true;
+        let decision = classify(&candidate, &policy(), now());
+        assert_eq!(decision.classification, Classification::TestCandidate);
+        assert_eq!(decision.score, 100);
+        assert_eq!(decision.reasons, vec![ReasonCode::ExplicitTestMarker]);
+    }
+
+    #[test]
+    #[serial]
+    fn changing_tmpdir_does_not_change_same_policy_classification() {
+        let mut candidate = candidate("ordinary", 5, 3, 60, "ordinary-session");
+        candidate.project_dir = PathBuf::from("/tmp/project");
+        let policy = ClassifierPolicy::conservative(24);
+        let original = std::env::var_os("TMPDIR");
+
+        std::env::set_var("TMPDIR", "/tmp/first");
+        let first = classify(&candidate, &policy, now());
+        std::env::set_var("TMPDIR", "/tmp/second");
+        let second = classify(&candidate, &policy, now());
+
+        match original {
+            Some(value) => std::env::set_var("TMPDIR", value),
+            None => std::env::remove_var("TMPDIR"),
+        }
+        assert_eq!(first, second);
     }
 }
