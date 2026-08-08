@@ -158,7 +158,7 @@ Codex/OMP 的普通 rename/delete 仍为只读；本地维护只移动和恢复�
 
 ### 5.2 测试会话维护 (`session_maintenance/`, `handlers/session.rs`)
 
-- 默认关闭；`ccs session maintain --enable` 开启后由 session 命令惰性触发，无 daemon。
+- 默认关闭；`ccs session maintain --enable` 开启后由 list/projects/overview/interactive 惰性推进文件动作，无 daemon；search/show 使用 ObserveOnly。
 - 默认生命周期：活动满 24h 后允许 Hidden；首次隐藏满 7d 后 Recycled；首次隐藏满 30d 后 PurgedLocal；每次最多 50 个文件动作。
 - `list/projects/overview/interactive` 默认隐藏 Hidden/Recycled，`--include-hidden` 显示；`search` 默认包含它们，`--active-only` 排除。
 - `SessionIdentity` 必须始终使用 `(source, session_id)`；所有 mutation 在锁内 reload，degraded source scan 禁止 destructive action。

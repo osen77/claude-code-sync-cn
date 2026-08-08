@@ -463,7 +463,7 @@ ccs session keep <session-id>
 
 ### 测试会话维护
 
-Session maintenance 默认关闭。执行 `ccs session maintain --enable` 后，维护会在 session 查询/管理流程中惰性运行，不安装后台进程。默认采用保守分类器，宁可漏判也不根据单一弱信号误伤：
+Session maintenance 默认关闭。执行 `ccs session maintain --enable` 后，`list`、`projects`、`overview` 和交互界面等路径会惰性推进文件动作，不安装后台进程；`search`/`show` 只读取并展示现有维护状态。默认采用保守分类器，宁可漏判也不根据单一弱信号误伤：
 
 1. 会话最后活动满 **24 小时**后，满足分类阈值才进入 `hidden`；
 2. 从首次隐藏起满 **7 天**后移动到本机 recycle store，进入 `recycled`；

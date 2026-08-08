@@ -176,7 +176,7 @@ ccs session --source codex list
 ccs session --source omp show <session-id>
 ```
 
-维护默认关闭；启用后由 `ccs session` 查询/管理流程惰性执行，不安装后台 daemon。保守分类器的默认生命周期是：最后活动满 24 小时后才允许隐藏，首次隐藏满 7 天后回收到本机 maintenance store，首次隐藏满 30 天后清除本地回收副本；每次最多执行 50 个文件动作。自定义标题、`keep` 和较长会话会受到硬保护。
+维护默认关闭；启用后由 `list`、`projects`、`overview` 和交互界面等 session 流程惰性推进文件动作，不安装后台 daemon；`search`/`show` 只读取并展示现有可见性。保守分类器的默认生命周期是：最后活动满 24 小时后才允许隐藏，首次隐藏满 7 天后回收到本机 maintenance store，首次隐藏满 30 天后清除本地回收副本；每次最多执行 50 个文件动作。自定义标题、`keep` 和较长会话会受到硬保护。
 
 `list`、`overview` 和交互列表默认隐藏 `hidden`/`recycled`，使用 `--include-hidden` 查看；`search` 默认包含它们，使用 `--active-only` 排除。`purged_local` 只表示本机副本已清除，不代表远端永久删除。
 
