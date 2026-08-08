@@ -5001,6 +5001,87 @@ mod tests {
     }
 
     #[test]
+    fn disabled_maintenance_keeps_existing_hidden_and_recycled_out_of_default_summaries() {
+        let (_temp, roots, config) = make_scan_fixture();
+        fs::write(
+            roots.claude_projects.join("project-valid/recycled.jsonl"),
+            r#"{"type":"user","sessionId":"cc-recycled","cwd":"/tmp/demo","timestamp":"2026-08-02T00:00:00Z","message":{"role":"user","content":"hello"}}"#,
+        )
+        .unwrap();
+        fs::create_dir_all(&config).unwrap();
+        fs::write(
+            config.join("config.toml"),
+            "[session_maintenance]\nenabled = false\n",
+        )
+        .unwrap();
+
+        let initial = scan_all_session_summaries_with_roots(
+            None,
+            SessionSourceFilter::Claude,
+            &roots,
+            &config,
+        )
+        .unwrap();
+        let store = crate::session_maintenance::state::StateStore::from_config_dir(&config);
+        store
+            .update(|saved| {
+                for (session_id, lifecycle) in [
+                    ("cc-1", LifecycleState::Hidden),
+                    ("cc-recycled", LifecycleState::Recycled),
+                ] {
+                    let summary = initial
+                        .summaries
+                        .iter()
+                        .find(|summary| summary.session_id == session_id)
+                        .unwrap();
+                    let identity = summary.identity().unwrap();
+                    saved.entries.insert(
+                        crate::session_maintenance::state::identity_key(&identity),
+                        crate::session_maintenance::state::MaintenanceEntry {
+                            identity,
+                            original_relative_path: summary
+                                .file_path
+                                .strip_prefix(&roots.claude_projects)
+                                .unwrap()
+                                .to_path_buf(),
+                            project_name: summary.project_name.clone(),
+                            fingerprint: crate::session_cache::fingerprint_file(&summary.file_path)
+                                .unwrap()
+                                .digest,
+                            lifecycle,
+                            classifier_version:
+                                crate::session_maintenance::classifier::CLASSIFIER_VERSION,
+                            score: 100,
+                            reason_codes: vec![
+                                crate::session_maintenance::classifier::ReasonCode::ExplicitTestMarker,
+                            ],
+                            hidden_since: Some(chrono::Utc::now()),
+                            recycled_at: (lifecycle == LifecycleState::Recycled)
+                                .then_some(chrono::Utc::now()),
+                            purged_at: None,
+                            keep: false,
+                            explicit_test: true,
+                        },
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        let result = scan_all_session_summaries_with_roots_mode(
+            None,
+            SessionSourceFilter::Claude,
+            &roots,
+            &config,
+            MaintenanceScanMode::ApplyFileActions,
+        )
+        .unwrap();
+        let visible = visible_summaries(result.summaries, &result.visibility, false);
+
+        assert!(visible.is_empty());
+    }
+
+    #[test]
     fn observe_only_search_scan_does_not_recycle_source_file() {
         let (_temp, roots, config) = make_scan_fixture();
         fs::create_dir_all(&config).unwrap();
@@ -7076,17 +7157,13 @@ mod tests {
 
     #[test]
     fn scan_report_surfaces_cache_save_failure_without_losing_sessions() {
-        let (temp, roots, _config) = make_scan_fixture();
-        let config_file = temp.path().join("config-file");
-        fs::write(&config_file, b"not a directory").unwrap();
+        let (_temp, roots, config) = make_scan_fixture();
+        fs::create_dir_all(&config).unwrap();
+        fs::create_dir(config.join("session_index.json")).unwrap();
 
-        let report = scan_all_session_summaries_with_roots(
-            None,
-            SessionSourceFilter::All,
-            &roots,
-            &config_file,
-        )
-        .unwrap();
+        let report =
+            scan_all_session_summaries_with_roots(None, SessionSourceFilter::All, &roots, &config)
+                .unwrap();
         assert_eq!(report.summaries.len(), 3);
         assert!(report.diagnostics.cache_errors >= 1);
         assert!(report

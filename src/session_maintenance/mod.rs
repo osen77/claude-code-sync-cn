@@ -152,10 +152,11 @@ pub(crate) fn run_maintenance(
 ) -> Result<MaintenanceReport> {
     let store = StateStore::from_config_dir(input.config_dir);
     let mut report = MaintenanceReport::default();
+    let mut state = store.load().context("load session maintenance state")?;
     if mode == MaintenanceMode::Disabled {
+        report.visibility = visibility_from_state(&state);
         return Ok(report);
     }
-    let mut state = store.load().context("load session maintenance state")?;
     report.visibility = visibility_from_state(&state);
     let Some(policy) = maintenance_policy(input.settings) else {
         report.warnings = 1;
@@ -885,6 +886,111 @@ mod tests {
         );
         assert_eq!(report.hidden, 1);
         assert_eq!(fs::read(&state_path).ok(), before);
+        assert!(fixture.source_file.exists());
+    }
+
+    #[test]
+    fn disabled_mode_loads_existing_visibility_without_side_effects() {
+        let fixture = MaintenanceFixture::new(SessionSource::Claude, 120);
+        let store = state::StateStore::from_config_dir(&fixture.config_dir);
+        let entries = [
+            ("hidden", LifecycleState::Hidden),
+            ("recycled", LifecycleState::Recycled),
+            ("purged", LifecycleState::PurgedLocal),
+        ];
+        store
+            .update(|saved| {
+                for (session_id, lifecycle) in entries {
+                    let identity = SessionIdentity {
+                        source: SessionSource::Claude,
+                        session_id: format!("cc-{session_id}"),
+                    };
+                    saved.entries.insert(
+                        state::identity_key(&identity),
+                        state::MaintenanceEntry {
+                            identity,
+                            original_relative_path: PathBuf::from("project/session.jsonl"),
+                            project_name: "project".to_string(),
+                            fingerprint: "fixture-fingerprint".to_string(),
+                            lifecycle,
+                            classifier_version: classifier::CLASSIFIER_VERSION,
+                            score: 100,
+                            reason_codes: vec![classifier::ReasonCode::ExplicitTestMarker],
+                            hidden_since: Some(fixture.now - Duration::days(8)),
+                            recycled_at: (lifecycle == LifecycleState::Recycled)
+                                .then_some(fixture.now - Duration::days(1)),
+                            purged_at: (lifecycle == LifecycleState::PurgedLocal)
+                                .then_some(fixture.now - Duration::days(1)),
+                            keep: false,
+                            explicit_test: true,
+                        },
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
+        let state_path = fixture.config_dir.join("session-maintenance.json");
+        let before = fs::read(&state_path).unwrap();
+
+        let report = fixture.run_with(
+            Vec::new(),
+            HashSet::new(),
+            SessionMaintenanceSettings::default(),
+            MaintenanceMode::Disabled,
+        );
+
+        assert_eq!(report.candidates, 0);
+        assert_eq!(report.hidden, 0);
+        assert_eq!(report.recycled, 0);
+        assert_eq!(report.purged, 0);
+        assert_eq!(report.file_actions, 0);
+        assert_eq!(report.visibility.states.len(), 3);
+        assert_eq!(
+            report.visibility.states[&SessionIdentity {
+                source: SessionSource::Claude,
+                session_id: "cc-hidden".to_string(),
+            }],
+            LifecycleState::Hidden
+        );
+        assert_eq!(
+            report.visibility.states[&SessionIdentity {
+                source: SessionSource::Claude,
+                session_id: "cc-recycled".to_string(),
+            }],
+            LifecycleState::Recycled
+        );
+        assert_eq!(
+            report.visibility.states[&SessionIdentity {
+                source: SessionSource::Claude,
+                session_id: "cc-purged".to_string(),
+            }],
+            LifecycleState::PurgedLocal
+        );
+        assert_eq!(fs::read(&state_path).unwrap(), before);
+        assert!(fixture.source_file.exists());
+    }
+
+    #[test]
+    fn disabled_mode_rejects_invalid_state() {
+        let fixture = MaintenanceFixture::old_test_candidate(SessionSource::Claude, 120);
+        fs::write(
+            fixture.config_dir.join("session-maintenance.json"),
+            b"not valid maintenance state",
+        )
+        .unwrap();
+        let error = run_maintenance(
+            MaintenanceInput {
+                summaries: &[],
+                completed_sources: &HashSet::new(),
+                roots: &fixture.roots,
+                config_dir: &fixture.config_dir,
+                settings: &SessionMaintenanceSettings::default(),
+                clock: &FixedClock(fixture.now),
+            },
+            MaintenanceMode::Disabled,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("load session maintenance state"));
         assert!(fixture.source_file.exists());
     }
 
