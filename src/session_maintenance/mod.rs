@@ -219,7 +219,14 @@ pub(crate) fn run_maintenance(
                 report.visibility = visibility_from_state(&state);
             }
         }
-        prune_purged_audits(&store, input.clock.now(), input.completed_sources)?;
+        if prune_purged_audits(&store, input.clock.now(), input.completed_sources).is_err() {
+            report.warnings += 1;
+            state = store
+                .load()
+                .context("reload maintenance state after audit pruning failure")?;
+            report.visibility = visibility_from_state(&state);
+            return Ok(report);
+        }
         state = store
             .load()
             .context("reload maintenance state after audit pruning")?;
