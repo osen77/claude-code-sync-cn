@@ -49,7 +49,6 @@ fn default_temporary_roots() -> Vec<PathBuf> {
     ]
 }
 
-#[cfg(not(test))]
 #[allow(dead_code)]
 fn _classifier_api_anchor() {
     let _ = ClassifierPolicy::conservative;
@@ -270,7 +269,6 @@ mod tests {
     use crate::session_cache::FileFingerprint;
     use crate::session_model::{SessionIdentity, SessionSource};
     use chrono::{DateTime, Duration, Utc};
-    use serial_test::serial;
     use std::path::PathBuf;
 
     fn now() -> DateTime<Utc> {
@@ -432,22 +430,15 @@ mod tests {
     }
 
     #[test]
-    #[serial]
-    fn changing_tmpdir_does_not_change_same_policy_classification() {
+    fn temporary_detection_uses_only_explicit_policy_roots() {
         let mut candidate = candidate("ordinary", 5, 3, 60, "ordinary-session");
         candidate.project_dir = PathBuf::from("/tmp/project");
-        let policy = ClassifierPolicy::conservative(24);
-        let original = std::env::var_os("TMPDIR");
+        let policy =
+            ClassifierPolicy::with_temporary_roots(24, vec![PathBuf::from("/var/explicit")]);
 
-        std::env::set_var("TMPDIR", "/tmp/first");
-        let first = classify(&candidate, &policy, now());
-        std::env::set_var("TMPDIR", "/tmp/second");
-        let second = classify(&candidate, &policy, now());
+        let decision = classify(&candidate, &policy, now());
 
-        match original {
-            Some(value) => std::env::set_var("TMPDIR", value),
-            None => std::env::remove_var("TMPDIR"),
-        }
-        assert_eq!(first, second);
+        assert!(!decision.reasons.contains(&ReasonCode::TemporaryCwd));
+        assert!(!decision.reasons.contains(&ReasonCode::FixtureTemporaryCwd));
     }
 }
