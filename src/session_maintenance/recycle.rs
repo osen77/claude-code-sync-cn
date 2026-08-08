@@ -2,6 +2,7 @@ use super::state::{
     identity_key, LifecycleState, MaintenanceEntry, PendingOperation, PendingOperationKind,
     StateStore,
 };
+use crate::atomic_file::sync_parent_directory;
 use crate::path_security::{
     prepare_regular_file_destination, safe_join_within_root, validate_directory_root,
     validate_regular_candidate,
@@ -77,6 +78,12 @@ pub(crate) fn recycle_session(
         }
         if entry.lifecycle == LifecycleState::Recycled {
             verify_recycle_file(roots, &entry)?;
+            let final_relative = recycle_relative_path(&entry);
+            let staging_path =
+                safe_join_within_root(&roots.recycle, &staging_relative_path(&final_relative))?;
+            if inspect_file(&roots.recycle, &staging_path, &entry.fingerprint)?.is_some() {
+                remove_verified(&roots.recycle, &staging_path, &entry.fingerprint)?;
+            }
             return Ok(());
         }
         if entry.lifecycle != LifecycleState::Hidden {
@@ -116,6 +123,9 @@ pub(crate) fn recycle_session(
 
         if path_is_regular(&final_path)? {
             verify_fingerprint(&final_path, &entry.fingerprint)?;
+            if path_is_regular(&staging_path)? {
+                remove_verified(&roots.recycle, &staging_path, &entry.fingerprint)?;
+            }
             remove_verified(source_root, &source, &entry.fingerprint)?;
         } else {
             move_source_to_recycle(
@@ -163,6 +173,29 @@ pub(crate) fn restore_session(
         {
             anyhow::bail!("stale maintenance entry for {key}");
         }
+        if entry.lifecycle == LifecycleState::Visible {
+            let source_root = roots.source_root(entry.identity.source);
+            validate_directory_root(source_root)?;
+            let destination = safe_join_within_root(source_root, &entry.original_relative_path)?;
+            validate_regular_candidate(source_root, &destination)?;
+            verify_fingerprint(&destination, &entry.fingerprint)?;
+            ensure_recycle_root(&roots.recycle)?;
+            let final_relative = recycle_relative_path(&entry);
+            let final_path = safe_join_within_root(&roots.recycle, &final_relative)?;
+            let staging_path =
+                safe_join_within_root(&roots.recycle, &staging_relative_path(&final_relative))?;
+            let final_present =
+                inspect_file(&roots.recycle, &final_path, &entry.fingerprint)?.is_some();
+            let staging_present =
+                inspect_file(&roots.recycle, &staging_path, &entry.fingerprint)?.is_some();
+            if final_present {
+                remove_verified(&roots.recycle, &final_path, &entry.fingerprint)?;
+            }
+            if staging_present {
+                remove_verified(&roots.recycle, &staging_path, &entry.fingerprint)?;
+            }
+            return Ok(());
+        }
         if entry.lifecycle != LifecycleState::Recycled {
             anyhow::bail!("session {key} is not recycled")
         }
@@ -183,7 +216,7 @@ pub(crate) fn restore_session(
             prepare_regular_file_destination(source_root, &entry.original_relative_path)?;
         }
 
-        let staging_relative = restore_staging_relative_path(&final_relative);
+        let staging_relative = staging_relative_path(&final_relative);
         locked.state.pending = Some(PendingOperation {
             identity: entry.identity.clone(),
             operation: PendingOperationKind::Restore,
@@ -203,6 +236,14 @@ pub(crate) fn restore_session(
                 &entry.fingerprint,
             )?;
         }
+        validate_regular_candidate(source_root, &destination)?;
+        verify_fingerprint(&destination, &entry.fingerprint)?;
+        maybe_replace_restore_destination_for_test(&destination)?;
+        // The recycle copy is the only remaining durable source. Revalidate the
+        // destination immediately before deleting it, including the preexisting
+        // destination path and the freshly copied path.
+        validate_regular_candidate(source_root, &destination)?;
+        verify_fingerprint(&destination, &entry.fingerprint)?;
         remove_verified(&roots.recycle, &final_path, &entry.fingerprint)?;
 
         let current = locked
@@ -236,11 +277,29 @@ pub(crate) fn purge_session(
             .get(&key)
             .cloned()
             .with_context(|| format!("maintenance entry not found: {key}"))?;
-        if entry.lifecycle != LifecycleState::Recycled {
-            anyhow::bail!("session {key} is not recycled")
-        }
         if entry.fingerprint != requested.fingerprint {
             anyhow::bail!("stale maintenance entry for {key}")
+        }
+        if entry.lifecycle == LifecycleState::PurgedLocal {
+            ensure_recycle_root(&roots.recycle)?;
+            let final_relative = recycle_relative_path(&entry);
+            let final_path = safe_join_within_root(&roots.recycle, &final_relative)?;
+            let staging_path =
+                safe_join_within_root(&roots.recycle, &staging_relative_path(&final_relative))?;
+            let final_present =
+                inspect_file(&roots.recycle, &final_path, &entry.fingerprint)?.is_some();
+            let staging_present =
+                inspect_file(&roots.recycle, &staging_path, &entry.fingerprint)?.is_some();
+            if final_present {
+                remove_verified(&roots.recycle, &final_path, &entry.fingerprint)?;
+            }
+            if staging_present {
+                remove_verified(&roots.recycle, &staging_path, &entry.fingerprint)?;
+            }
+            return Ok(());
+        }
+        if entry.lifecycle != LifecycleState::Recycled {
+            anyhow::bail!("session {key} is not recycled")
         }
 
         ensure_recycle_root(&roots.recycle)?;
@@ -252,7 +311,7 @@ pub(crate) fn purge_session(
             identity: entry.identity.clone(),
             operation: PendingOperationKind::Purge,
             source_relative_path: entry.original_relative_path.clone(),
-            staging_relative_path: purge_staging_relative_path(&final_relative),
+            staging_relative_path: staging_relative_path(&final_relative),
             recycle_relative_path: final_relative,
             expected_fingerprint: entry.fingerprint.clone(),
         });
@@ -266,6 +325,16 @@ pub(crate) fn purge_session(
             .context("maintenance entry disappeared during purge")?;
         current.lifecycle = LifecycleState::PurgedLocal;
         current.purged_at = Some(now);
+        if current.identity.source == SessionSource::Claude {
+            current.project_name.clear();
+            current.classifier_version = 0;
+            current.score = 0;
+            current.reason_codes.clear();
+            current.hidden_since = None;
+            current.recycled_at = None;
+            current.keep = false;
+            current.explicit_test = false;
+        }
         locked.state.pending = None;
         locked.persist()
     })
@@ -288,6 +357,7 @@ pub(crate) fn reconcile_pending(
             .get(&key)
             .cloned()
             .with_context(|| format!("pending entry not found: {key}"))?;
+        validate_pending_binding(&entry, &pending)?;
         match pending.operation {
             PendingOperationKind::Recycle => {
                 reconcile_recycle(locked, roots, &entry, &pending, now)
@@ -329,6 +399,8 @@ fn reconcile_recycle(
     if staging_state.is_some() && final_state.is_none() {
         prepare_regular_file_destination(&roots.recycle, &pending.recycle_relative_path)?;
         fs::rename(&staging, &final_path).context("failed to promote recycle staging file")?;
+        sync_parent_directory(staging.parent().context("staging has no parent")?)?;
+        sync_parent_directory(final_path.parent().context("final has no parent")?)?;
         staging_state = None;
         final_state = Some(pending.expected_fingerprint.clone());
     } else if staging_state.is_some() && final_state.is_some() {
@@ -408,6 +480,8 @@ fn reconcile_restore(
         if staging_state.is_some() && final_state.is_none() {
             prepare_regular_file_destination(&roots.recycle, &pending.recycle_relative_path)?;
             fs::rename(&staging, &final_path).context("failed to promote restore staging file")?;
+            sync_parent_directory(staging.parent().context("staging has no parent")?)?;
+            sync_parent_directory(final_path.parent().context("final has no parent")?)?;
         }
         copy_verified_file(
             &final_path,
@@ -466,6 +540,16 @@ fn reconcile_purge(
         .context("maintenance entry disappeared during purge reconcile")?;
     current.lifecycle = LifecycleState::PurgedLocal;
     current.purged_at = Some(now);
+    if current.identity.source == SessionSource::Claude {
+        current.project_name.clear();
+        current.classifier_version = 0;
+        current.score = 0;
+        current.reason_codes.clear();
+        current.hidden_since = None;
+        current.recycled_at = None;
+        current.keep = false;
+        current.explicit_test = false;
+    }
     locked.state.pending = None;
     locked.persist()
 }
@@ -523,6 +607,7 @@ fn remove_verified(root: &Path, path: &Path, expected: &str) -> Result<()> {
     validate_regular_candidate(root, path)?;
     verify_fingerprint(path, expected)?;
     fs::remove_file(path).with_context(|| format!("failed to remove {}", path.display()))?;
+    sync_parent_directory(path.parent().context("removed file has no parent")?)?;
     Ok(())
 }
 
@@ -556,6 +641,8 @@ fn move_source_to_recycle(
         }
         return Err(error).context("failed to stage session for recycle");
     }
+    sync_parent_directory(source.parent().context("source has no parent")?)?;
+    sync_parent_directory(staging.parent().context("staging has no parent")?)?;
     if path_is_regular(final_path)? {
         verify_fingerprint(final_path, expected)?;
         remove_verified(recycle_root, staging, expected)?;
@@ -564,6 +651,8 @@ fn move_source_to_recycle(
     if let Err(error) = fs::rename(staging, final_path) {
         return Err(error).context("failed to promote recycled session");
     }
+    sync_parent_directory(staging.parent().context("staging has no parent")?)?;
+    sync_parent_directory(final_path.parent().context("final has no parent")?)?;
     validate_regular_candidate(recycle_root, final_path)?;
     verify_fingerprint(final_path, expected)
 }
@@ -592,17 +681,14 @@ fn copy_source_to_final(
     verify_fingerprint(temp.path(), expected)?;
     if path_is_regular(&final_path)? {
         verify_fingerprint(&final_path, expected)?;
-        validate_regular_candidate(source_root, source)?;
-        verify_fingerprint(source, expected)?;
-        fs::remove_file(source)?;
+        remove_verified(source_root, source, expected)?;
         return Ok(());
     }
     temp.persist(&final_path).map_err(|error| error.error)?;
+    sync_parent_directory(parent)?;
     validate_regular_candidate(recycle_root, &final_path)?;
     verify_fingerprint(&final_path, expected)?;
-    validate_regular_candidate(source_root, source)?;
-    verify_fingerprint(source, expected)?;
-    fs::remove_file(source)?;
+    remove_verified(source_root, source, expected)?;
     Ok(())
 }
 
@@ -630,6 +716,7 @@ fn copy_verified_file(
     temp.as_file().sync_all()?;
     verify_fingerprint(temp.path(), expected)?;
     temp.persist(&destination).map_err(|error| error.error)?;
+    sync_parent_directory(parent)?;
     validate_regular_candidate(destination_root, &destination)?;
     verify_fingerprint(&destination, expected)
 }
@@ -652,12 +739,15 @@ fn staging_relative_path(final_relative: &Path) -> PathBuf {
     PathBuf::from("staging").join(final_relative)
 }
 
-fn restore_staging_relative_path(final_relative: &Path) -> PathBuf {
-    PathBuf::from("restore-staging").join(final_relative)
-}
-
-fn purge_staging_relative_path(final_relative: &Path) -> PathBuf {
-    PathBuf::from("purge-staging").join(final_relative)
+fn validate_pending_binding(entry: &MaintenanceEntry, pending: &PendingOperation) -> Result<()> {
+    if pending.identity != entry.identity
+        || pending.source_relative_path != entry.original_relative_path
+        || pending.recycle_relative_path != recycle_relative_path(entry)
+        || pending.staging_relative_path != staging_relative_path(&recycle_relative_path(entry))
+    {
+        anyhow::bail!("pending journal does not match deterministic session binding")
+    }
+    Ok(())
 }
 
 fn safe_component(value: &str) -> String {
@@ -706,6 +796,16 @@ fn is_cross_device_error(error: &std::io::Error) -> bool {
 #[cfg(test)]
 thread_local! {
     static FORCE_COPY_FALLBACK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FORCE_RESTORE_DESTINATION_REPLACEMENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn maybe_replace_restore_destination_for_test(path: &Path) -> Result<()> {
+    #[cfg(test)]
+    if FORCE_RESTORE_DESTINATION_REPLACEMENT.with(std::cell::Cell::get) {
+        fs::write(path, b"changed during restore")?;
+    }
+    let _ = path;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -899,6 +999,78 @@ mod tests {
     }
 
     #[test]
+    fn reconcile_source_and_staging_promotes_and_removes_both_duplicates() {
+        let fixture = RecycleFixture::new(SessionSource::Claude);
+        fs::create_dir_all(fixture.staging_file().parent().unwrap()).unwrap();
+        fs::copy(&fixture.source_file, fixture.staging_file()).unwrap();
+        fixture.set_pending_recycle();
+        reconcile_pending(&fixture.store, &fixture.roots, fixture.now).unwrap();
+        reconcile_pending(&fixture.store, &fixture.roots, fixture.now).unwrap();
+        assert!(!fixture.source_file.exists());
+        assert!(!fixture.staging_file().exists());
+        assert!(fixture.recycle_file().exists());
+        assert_eq!(fixture.load_entry().lifecycle, LifecycleState::Recycled);
+    }
+
+    #[test]
+    fn recycle_cleans_matching_existing_staging_after_final() {
+        let fixture = RecycleFixture::new(SessionSource::Codex);
+        fs::create_dir_all(fixture.recycle_file().parent().unwrap()).unwrap();
+        fs::create_dir_all(fixture.staging_file().parent().unwrap()).unwrap();
+        fs::copy(&fixture.source_file, fixture.recycle_file()).unwrap();
+        fs::copy(&fixture.source_file, fixture.staging_file()).unwrap();
+        recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now).unwrap();
+        assert!(!fixture.source_file.exists());
+        assert!(!fixture.staging_file().exists());
+        assert!(fixture.recycle_file().exists());
+    }
+
+    #[test]
+    fn reconcile_staging_and_final_same_keeps_final_and_removes_staging() {
+        let fixture = RecycleFixture::new(SessionSource::Codex);
+        fs::create_dir_all(fixture.recycle_file().parent().unwrap()).unwrap();
+        fs::create_dir_all(fixture.staging_file().parent().unwrap()).unwrap();
+        fs::copy(&fixture.source_file, fixture.recycle_file()).unwrap();
+        fs::copy(&fixture.source_file, fixture.staging_file()).unwrap();
+        fs::remove_file(&fixture.source_file).unwrap();
+        fixture.set_pending_recycle();
+        reconcile_pending(&fixture.store, &fixture.roots, fixture.now).unwrap();
+        assert!(!fixture.staging_file().exists());
+        assert!(fixture.recycle_file().exists());
+        assert_eq!(fixture.load_entry().lifecycle, LifecycleState::Recycled);
+    }
+
+    #[test]
+    fn reconcile_staging_and_final_different_keeps_both_and_pending() {
+        let fixture = RecycleFixture::new(SessionSource::Omp);
+        fs::create_dir_all(fixture.recycle_file().parent().unwrap()).unwrap();
+        fs::create_dir_all(fixture.staging_file().parent().unwrap()).unwrap();
+        fs::copy(&fixture.source_file, fixture.staging_file()).unwrap();
+        fs::write(fixture.recycle_file(), b"different").unwrap();
+        fs::remove_file(&fixture.source_file).unwrap();
+        fixture.set_pending_recycle();
+        assert!(reconcile_pending(&fixture.store, &fixture.roots, fixture.now).is_err());
+        assert!(fixture.staging_file().exists());
+        assert!(fixture.recycle_file().exists());
+        assert!(fixture.store.load().unwrap().pending.is_some());
+    }
+
+    #[test]
+    fn reconcile_three_files_with_different_final_keeps_all_and_pending() {
+        let fixture = RecycleFixture::new(SessionSource::Claude);
+        fs::create_dir_all(fixture.recycle_file().parent().unwrap()).unwrap();
+        fs::create_dir_all(fixture.staging_file().parent().unwrap()).unwrap();
+        fs::copy(&fixture.source_file, fixture.staging_file()).unwrap();
+        fs::write(fixture.recycle_file(), b"different").unwrap();
+        fixture.set_pending_recycle();
+        assert!(reconcile_pending(&fixture.store, &fixture.roots, fixture.now).is_err());
+        assert!(fixture.source_file.exists());
+        assert!(fixture.staging_file().exists());
+        assert!(fixture.recycle_file().exists());
+        assert!(fixture.store.load().unwrap().pending.is_some());
+    }
+
+    #[test]
     fn reconcile_source_and_final_same_removes_duplicate_source() {
         let fixture = RecycleFixture::new(SessionSource::Omp);
         fs::create_dir_all(fixture.recycle_file().parent().unwrap()).unwrap();
@@ -1002,7 +1174,7 @@ mod tests {
                     identity: recycled.identity.clone(),
                     operation: PendingOperationKind::Restore,
                     source_relative_path: recycled.original_relative_path.clone(),
-                    staging_relative_path: restore_staging_relative_path(&final_relative),
+                    staging_relative_path: staging_relative_path(&final_relative),
                     recycle_relative_path: final_relative,
                     expected_fingerprint: recycled.fingerprint.clone(),
                 });
@@ -1029,7 +1201,7 @@ mod tests {
                     identity: recycled.identity.clone(),
                     operation: PendingOperationKind::Purge,
                     source_relative_path: recycled.original_relative_path.clone(),
-                    staging_relative_path: purge_staging_relative_path(&final_relative),
+                    staging_relative_path: staging_relative_path(&final_relative),
                     recycle_relative_path: final_relative,
                     expected_fingerprint: recycled.fingerprint.clone(),
                 });
@@ -1050,5 +1222,184 @@ mod tests {
         assert!(!fixture.recycle_file().exists());
         assert_eq!(fixture.load_entry().lifecycle, LifecycleState::PurgedLocal);
         assert!(fixture.load_entry().purged_at.is_some());
+    }
+
+    #[test]
+    fn restore_rechecks_destination_before_removing_recycle_file() {
+        let fixture = RecycleFixture::new(SessionSource::Claude);
+        recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now).unwrap();
+        FORCE_RESTORE_DESTINATION_REPLACEMENT.with(|flag| flag.set(true));
+        let result = restore_session(
+            &fixture.store,
+            &fixture.roots,
+            &fixture.load_entry(),
+            fixture.now,
+        );
+        FORCE_RESTORE_DESTINATION_REPLACEMENT.with(|flag| flag.set(false));
+        assert!(result.is_err());
+        assert!(fixture.source_file.exists());
+        assert!(fixture.recycle_file().exists());
+    }
+
+    #[test]
+    fn reconcile_rejects_wrong_journal_binding_without_modifying_files() {
+        let fixture = RecycleFixture::new(SessionSource::Codex);
+        let final_path = fixture.recycle_file();
+        fs::create_dir_all(final_path.parent().unwrap()).unwrap();
+        fs::copy(&fixture.source_file, &final_path).unwrap();
+        let final_relative = recycle_relative_path(&fixture.entry);
+        fixture
+            .store
+            .update(|state| {
+                state.pending = Some(PendingOperation {
+                    identity: fixture.entry.identity.clone(),
+                    operation: PendingOperationKind::Recycle,
+                    source_relative_path: PathBuf::from("other/session.jsonl"),
+                    staging_relative_path: staging_relative_path(&final_relative),
+                    recycle_relative_path: final_relative,
+                    expected_fingerprint: fixture.entry.fingerprint.clone(),
+                });
+                Ok(())
+            })
+            .unwrap();
+        assert!(reconcile_pending(&fixture.store, &fixture.roots, fixture.now).is_err());
+        assert!(fixture.source_file.exists());
+        assert!(fixture.recycle_file().exists());
+        assert_eq!(fixture.load_entry().lifecycle, LifecycleState::Hidden);
+    }
+
+    #[test]
+    fn codex_purge_retains_audit_fields() {
+        let fixture = RecycleFixture::new(SessionSource::Codex);
+        recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now).unwrap();
+        let entry = fixture.load_entry();
+        purge_session(&fixture.store, &fixture.roots, &entry, fixture.now).unwrap();
+        let purged = fixture.load_entry();
+        assert_eq!(purged.lifecycle, LifecycleState::PurgedLocal);
+        assert_eq!(purged.project_name, "project");
+        assert_eq!(purged.classifier_version, 1);
+        assert_eq!(purged.score, 100);
+        assert!(purged.hidden_since.is_some());
+        assert!(purged.explicit_test);
+    }
+
+    #[test]
+    fn claude_purge_keeps_only_minimal_suppression_fields() {
+        let fixture = RecycleFixture::new(SessionSource::Claude);
+        recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now).unwrap();
+        let entry = fixture.load_entry();
+        purge_session(&fixture.store, &fixture.roots, &entry, fixture.now).unwrap();
+        let purged = fixture.load_entry();
+        assert_eq!(purged.lifecycle, LifecycleState::PurgedLocal);
+        assert_eq!(purged.identity, fixture.entry.identity);
+        assert_eq!(
+            purged.original_relative_path,
+            fixture.entry.original_relative_path
+        );
+        assert_eq!(purged.fingerprint, fixture.entry.fingerprint);
+        assert!(purged.purged_at.is_some());
+        assert!(purged.project_name.is_empty());
+        assert!(purged.reason_codes.is_empty());
+        assert_eq!(purged.score, 0);
+        assert!(purged.hidden_since.is_none());
+        assert!(purged.recycled_at.is_none());
+    }
+
+    #[test]
+    fn repeated_recycle_restore_and_purge_are_idempotent() {
+        let recycle_fixture = RecycleFixture::new(SessionSource::Codex);
+        recycle_session(
+            &recycle_fixture.store,
+            &recycle_fixture.roots,
+            &recycle_fixture.entry,
+            recycle_fixture.now,
+        )
+        .unwrap();
+        recycle_session(
+            &recycle_fixture.store,
+            &recycle_fixture.roots,
+            &recycle_fixture.load_entry(),
+            recycle_fixture.now,
+        )
+        .unwrap();
+
+        let restore_entry = recycle_fixture.load_entry();
+        restore_session(
+            &recycle_fixture.store,
+            &recycle_fixture.roots,
+            &restore_entry,
+            recycle_fixture.now,
+        )
+        .unwrap();
+        restore_session(
+            &recycle_fixture.store,
+            &recycle_fixture.roots,
+            &recycle_fixture.load_entry(),
+            recycle_fixture.now,
+        )
+        .unwrap();
+
+        let purge_fixture = RecycleFixture::new(SessionSource::Omp);
+        recycle_session(
+            &purge_fixture.store,
+            &purge_fixture.roots,
+            &purge_fixture.entry,
+            purge_fixture.now,
+        )
+        .unwrap();
+        let purge_entry = purge_fixture.load_entry();
+        purge_session(
+            &purge_fixture.store,
+            &purge_fixture.roots,
+            &purge_entry,
+            purge_fixture.now,
+        )
+        .unwrap();
+        purge_session(
+            &purge_fixture.store,
+            &purge_fixture.roots,
+            &purge_fixture.load_entry(),
+            purge_fixture.now,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn pending_persist_failure_does_not_touch_source() {
+        let fixture = RecycleFixture::new(SessionSource::Claude);
+        crate::atomic_file::test_fail_persist_on_call(1);
+        let result = recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now);
+        crate::atomic_file::test_clear_persist_failures();
+        assert!(result.is_err());
+        assert!(fixture.source_file.exists());
+        assert!(!fixture.recycle_file().exists());
+    }
+
+    #[test]
+    fn pending_parent_sync_failure_leaves_source_and_reconcilable_journal() {
+        let fixture = RecycleFixture::new(SessionSource::Claude);
+        crate::atomic_file::test_force_parent_sync_failure(true);
+        let result = recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now);
+        crate::atomic_file::test_force_parent_sync_failure(false);
+        assert!(result.is_err());
+        assert!(fixture.source_file.exists());
+        assert!(fixture.store.load().unwrap().pending.is_some());
+        reconcile_pending(&fixture.store, &fixture.roots, fixture.now).unwrap();
+        assert!(!fixture.source_file.exists());
+        assert!(fixture.recycle_file().exists());
+    }
+
+    #[test]
+    fn final_state_persist_failure_leaves_reconcilable_pending_operation() {
+        let fixture = RecycleFixture::new(SessionSource::Codex);
+        crate::atomic_file::test_fail_persist_on_call(2);
+        let result = recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now);
+        crate::atomic_file::test_clear_persist_failures();
+        assert!(result.is_err());
+        assert!(!fixture.source_file.exists());
+        assert!(fixture.recycle_file().exists());
+        assert!(fixture.store.load().unwrap().pending.is_some());
+        reconcile_pending(&fixture.store, &fixture.roots, fixture.now).unwrap();
+        assert_eq!(fixture.load_entry().lifecycle, LifecycleState::Recycled);
     }
 }
