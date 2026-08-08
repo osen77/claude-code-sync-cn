@@ -40,6 +40,11 @@ use crate::session_diagnostics::{
     error_kind_from_error, legacy_io_warning, legacy_io_warning_from_error, ScanDiagnostics,
     ScanWarningCategory, ScanWarningErrorKind,
 };
+use crate::session_maintenance::recycle::MaintenanceRoots;
+use crate::session_maintenance::state::LifecycleState;
+use crate::session_maintenance::{
+    run_maintenance, MaintenanceInput, MaintenanceMode, SystemMaintenanceClock, VisibilityIndex,
+};
 pub(crate) use crate::session_model::format_relative_time;
 #[allow(unused_imports)]
 pub use crate::session_model::{
@@ -321,6 +326,27 @@ fn is_valid_session_summary(summary: &SessionSummary) -> bool {
     summary.message_count > 0 && summary.title != "(No title)"
 }
 
+fn visible_summaries(
+    summaries: Vec<SessionSummary>,
+    visibility: &VisibilityIndex,
+    include_hidden: bool,
+) -> Vec<SessionSummary> {
+    if include_hidden {
+        return summaries;
+    }
+    summaries
+        .into_iter()
+        .filter(|summary| {
+            summary
+                .identity()
+                .ok()
+                .and_then(|identity| visibility.states.get(&identity).copied())
+                .map(|state| state == LifecycleState::Visible)
+                .unwrap_or(true)
+        })
+        .collect()
+}
+
 /// Scan sessions for a specific project, returns (valid_sessions, filtered_count).
 ///
 /// This legacy public helper is retained for downstream callers. The active multi-source
@@ -372,6 +398,49 @@ pub struct SessionScanResult {
     /// Sources that were selected and scanned without an incomplete-source marker.
     #[allow(dead_code)]
     pub completed_sources: HashSet<SessionSource>,
+    pub(crate) visibility: VisibilityIndex,
+}
+
+fn maintenance_settings_from_config_dir(config_dir: &Path) -> FilterConfig {
+    let path = config_dir.join("config.toml");
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|content| toml::from_str(&content).ok())
+        .unwrap_or_default()
+}
+
+fn maintenance_visibility_for_scan(
+    summaries: &[SessionSummary],
+    completed_sources: &HashSet<SessionSource>,
+    roots: &SessionRoots,
+    config_dir: &Path,
+) -> VisibilityIndex {
+    let config = maintenance_settings_from_config_dir(config_dir);
+    let maintenance_roots = MaintenanceRoots {
+        claude: roots.claude_projects.clone(),
+        codex: roots.codex_sessions.clone(),
+        omp: roots.omp_sessions.clone(),
+        recycle: config_dir.join("session-recycle"),
+    };
+    let clock = SystemMaintenanceClock;
+    let mode = if config.session_maintenance.enabled {
+        MaintenanceMode::Apply
+    } else {
+        MaintenanceMode::Disabled
+    };
+    run_maintenance(
+        MaintenanceInput {
+            summaries,
+            completed_sources,
+            roots: &maintenance_roots,
+            config_dir,
+            settings: &config.session_maintenance,
+            clock: &clock,
+        },
+        mode,
+    )
+    .map(|report| report.visibility)
+    .unwrap_or_default()
 }
 
 #[derive(Debug, Default)]
@@ -443,7 +512,7 @@ fn emit_scan_warning(diagnostics: &ScanDiagnostics) {
 
 fn scan_summaries_for_interactive(result: SessionScanResult) -> Vec<SessionSummary> {
     emit_scan_warning(&result.diagnostics);
-    result.summaries
+    visible_summaries(result.summaries, &result.visibility, false)
 }
 
 fn scan_summaries_for_mutation(result: SessionScanResult) -> Result<Vec<SessionSummary>> {
@@ -665,12 +734,15 @@ pub(crate) fn scan_all_session_summaries_with_roots(
     }
 
     summaries.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+    let visibility =
+        maintenance_visibility_for_scan(&summaries, &completed_sources, roots, config_dir);
     diagnostics.elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
     Ok(SessionScanResult {
         summaries,
         diagnostics,
         completed_sources,
+        visibility,
     })
 }
 
@@ -2902,11 +2974,13 @@ pub fn handle_session_list(
     source: SessionSourceFilter,
 ) -> Result<()> {
     let SessionScanResult {
-        summaries: sessions,
+        summaries,
         diagnostics,
+        visibility,
         ..
     } = scan_all_session_summaries_with_report(project_filter, source)?;
     emit_scan_warning(&diagnostics);
+    let sessions = visible_summaries(summaries, &visibility, false);
 
     if sessions.is_empty() {
         if project_filter.is_some() {
@@ -2969,11 +3043,13 @@ pub fn handle_session_list(
 /// List all projects (non-interactive)
 pub fn handle_session_projects(source: SessionSourceFilter) -> Result<()> {
     let SessionScanResult {
-        summaries: sessions,
+        summaries,
         diagnostics,
+        visibility,
         ..
     } = scan_all_session_summaries_with_report(None, source)?;
     emit_scan_warning(&diagnostics);
+    let sessions = visible_summaries(summaries, &visibility, false);
 
     if sessions.is_empty() {
         println!("{}", "No projects found.".yellow());
@@ -3237,10 +3313,12 @@ pub fn handle_session_overview(
     let since_cutoff = since.map(parse_duration_filter).transpose()?;
 
     let SessionScanResult {
-        summaries: mut sessions,
+        summaries,
         diagnostics,
+        visibility,
         ..
     } = scan_all_session_summaries_with_report(None, source)?;
+    let mut sessions = visible_summaries(summaries, &visibility, false);
 
     if let Some(ref cutoff) = since_cutoff {
         sessions.retain(|s| is_after_cutoff(s.last_activity.as_deref(), cutoff));
@@ -4823,6 +4901,51 @@ mod tests {
     }
 
     #[test]
+    fn visible_summaries_hides_maintenance_states_by_default() {
+        let visible = make_test_summary("visible", "project", SessionSource::Claude);
+        let hidden = make_test_summary("hidden", "project", SessionSource::Claude);
+        let unknown = make_test_summary("unknown", "project", SessionSource::Claude);
+        let mut states = HashMap::new();
+        states.insert(visible.identity().unwrap(), LifecycleState::Visible);
+        states.insert(hidden.identity().unwrap(), LifecycleState::Hidden);
+        states.insert(
+            make_test_summary("recycled", "project", SessionSource::Claude)
+                .identity()
+                .unwrap(),
+            LifecycleState::Recycled,
+        );
+        let visibility = VisibilityIndex { states };
+        let filtered = visible_summaries(
+            vec![visible.clone(), hidden.clone(), unknown.clone()],
+            &visibility,
+            false,
+        );
+        assert_eq!(
+            filtered
+                .iter()
+                .map(|summary| summary.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["visible", "unknown"]
+        );
+        assert_eq!(visible_summaries(vec![hidden], &visibility, true).len(), 1);
+    }
+
+    #[test]
+    fn maintenance_settings_are_loaded_from_config_toml() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("config.toml"),
+            "[session_maintenance]\nenabled = true\n",
+        )
+        .unwrap();
+        assert!(
+            maintenance_settings_from_config_dir(temp.path())
+                .session_maintenance
+                .enabled
+        );
+    }
+
+    #[test]
     #[serial]
     fn legacy_project_scans_treat_regular_file_root_as_empty() {
         let temp = tempfile::tempdir().unwrap();
@@ -6090,6 +6213,7 @@ mod tests {
             summaries: Vec::new(),
             diagnostics: ScanDiagnostics::with_id("I-CLEAN001"),
             completed_sources: HashSet::new(),
+            visibility: VisibilityIndex::default(),
         };
         assert!(scan_summaries_for_mutation(clean).is_ok());
 
@@ -6105,6 +6229,7 @@ mod tests {
             summaries: Vec::new(),
             diagnostics,
             completed_sources: HashSet::new(),
+            visibility: VisibilityIndex::default(),
         };
         let error = scan_summaries_for_mutation(degraded).unwrap_err();
         let message = error.to_string();
