@@ -7,7 +7,7 @@ pub(crate) mod recycle;
 pub(crate) mod state;
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -136,73 +136,50 @@ fn maintenance_policy(settings: &SessionMaintenanceSettings) -> Option<Classifie
                 std::env::temp_dir(),
                 PathBuf::from("/tmp"),
                 PathBuf::from("/private/tmp"),
+                PathBuf::from(r"C:\Temp"),
+                PathBuf::from(r"C:\Windows\Temp"),
             ],
         )
     })
 }
 
 /// Reconcile pending filesystem work, classify completed source summaries, and optionally apply
-/// lifecycle transitions. Any invalid input or state fails safe with a warning-only report.
+/// lifecycle transitions. Invalid completed-batch input fails safe with a warning-only report; an
+/// unreadable state store is returned to the caller so visibility cannot silently widen.
 pub(crate) fn run_maintenance(
     input: MaintenanceInput<'_>,
     mode: MaintenanceMode,
 ) -> Result<MaintenanceReport> {
     let store = StateStore::from_config_dir(input.config_dir);
     let mut report = MaintenanceReport::default();
-    let mut state = match store.load() {
-        Ok(state) => state,
-        Err(_) => {
-            report.warnings = 1;
-            return Ok(report);
-        }
-    };
-    report.visibility = visibility_from_state(&state);
-
     if mode == MaintenanceMode::Disabled {
         return Ok(report);
     }
+    let mut state = store.load().context("load session maintenance state")?;
+    report.visibility = visibility_from_state(&state);
     let Some(policy) = maintenance_policy(input.settings) else {
         report.warnings = 1;
         return Ok(report);
     };
 
-    // A pending transaction is recoverable only when its source scan completed. DryRun must
-    // remain entirely read-only, so it intentionally skips reconciliation.
-    if mode == MaintenanceMode::Apply {
-        if let Some(pending) = state.pending.as_ref() {
-            if input.completed_sources.contains(&pending.identity.source)
-                && reconcile_pending(&store, input.roots, input.clock.now()).is_err()
-            {
-                report.warnings += 1;
-                return Ok(report);
-            }
-            state = match store.load() {
-                Ok(state) => state,
-                Err(_) => {
-                    report.warnings += 1;
-                    return Ok(report);
-                }
-            };
-            report.visibility = visibility_from_state(&state);
-        }
-    }
-
+    // Validate the entire completed batch before any pending journal or file mutation. A single
+    // malformed identity, duplicate, unsafe path, timestamp, or fingerprint aborts the batch.
     let mut grouped: HashMap<SessionIdentity, Vec<&SessionSummary>> = HashMap::new();
+    let mut validation_failed = false;
     for summary in input.summaries {
         let Ok(identity) = summary.identity() else {
-            report.warnings += 1;
+            validation_failed = true;
             continue;
         };
-        if !input.completed_sources.contains(&identity.source) {
-            continue;
+        if input.completed_sources.contains(&identity.source) {
+            grouped.entry(identity).or_default().push(summary);
         }
-        grouped.entry(identity).or_default().push(summary);
     }
 
     let mut candidates = Vec::new();
     for (identity, summaries) in grouped {
         if summaries.len() != 1 {
-            report.warnings += 1;
+            validation_failed = true;
             continue;
         }
         let summary = summaries[0];
@@ -210,126 +187,204 @@ pub(crate) fn run_maintenance(
         let existing = state.entries.get(&key);
         match candidate_from_summary(summary, input.roots, existing) {
             Ok(candidate) => candidates.push((candidate, existing.cloned())),
-            Err(_) => report.warnings += 1,
+            Err(_) => validation_failed = true,
         }
     }
+    if validation_failed {
+        report.warnings += 1;
+        return Ok(report);
+    }
+    candidates.sort_by(|left, right| {
+        identity_key(&left.0.identity).cmp(&identity_key(&right.0.identity))
+    });
     report.candidates = candidates.len();
 
-    let mut planned_file_actions = 0usize;
-    for (candidate, existing) in candidates {
-        let key = identity_key(&candidate.identity);
-        let decision = classify(&candidate, &policy, input.clock.now());
-        let entry = existing;
-
-        if let Some(current) = entry.as_ref() {
-            if reconcile_fingerprint(current, &candidate.fingerprint.digest)
-                == state::LifecycleTransition::RestoreVisible
-            {
-                report.restored_visible += 1;
-                if mode == MaintenanceMode::Apply {
-                    let fingerprint = candidate.fingerprint.digest.clone();
-                    store.update(|saved| {
-                        if let Some(current) = saved.entries.get_mut(&key) {
-                            current.lifecycle = LifecycleState::Visible;
-                            current.fingerprint = fingerprint;
-                            current.hidden_since = None;
-                            current.recycled_at = None;
-                            current.purged_at = None;
-                        }
-                        Ok(())
-                    })?;
+    // A pending transaction is recoverable only when its source scan completed. DryRun must
+    // remain entirely read-only, so it intentionally skips reconciliation.
+    if mode == MaintenanceMode::Apply {
+        if let Some(pending) = state.pending.as_ref() {
+            if input.completed_sources.contains(&pending.identity.source) {
+                if let Err(error) = reconcile_pending(&store, input.roots, input.clock.now()) {
+                    report.warnings += 1;
+                    state = store
+                        .load()
+                        .context("reload maintenance state after reconciliation failure")?;
+                    report.visibility = visibility_from_state(&state);
+                    let _ = error;
+                    return Ok(report);
                 }
-                continue;
+                state = store
+                    .load()
+                    .context("reload maintenance state after reconciliation")?;
+                report.visibility = visibility_from_state(&state);
+            }
+        }
+        prune_purged_audits(&store, input.clock.now(), input.completed_sources)?;
+        state = store
+            .load()
+            .context("reload maintenance state after audit pruning")?;
+        report.visibility = visibility_from_state(&state);
+    }
+
+    let mutation_result: Result<()> = (|| {
+        let mut planned_file_actions = 0usize;
+        for (candidate, existing) in candidates {
+            let key = identity_key(&candidate.identity);
+            let decision = classify(&candidate, &policy, input.clock.now());
+            let entry = existing;
+
+            if let Some(current) = entry.as_ref() {
+                if reconcile_fingerprint(current, &candidate.fingerprint.digest)
+                    == state::LifecycleTransition::RestoreVisible
+                {
+                    report.restored_visible += 1;
+                    if mode == MaintenanceMode::Apply {
+                        let fingerprint = candidate.fingerprint.digest.clone();
+                        store.update(|saved| {
+                            if let Some(current) = saved.entries.get_mut(&key) {
+                                current.lifecycle = LifecycleState::Visible;
+                                current.fingerprint = fingerprint;
+                                current.hidden_since = None;
+                                current.recycled_at = None;
+                                current.purged_at = None;
+                            }
+                            Ok(())
+                        })?;
+                    }
+                    continue;
+                }
+            }
+
+            if mode == MaintenanceMode::Apply {
+                if let Some(current) = entry.as_ref() {
+                    if current.classifier_version != classifier::CLASSIFIER_VERSION {
+                        update_entry_metadata(
+                            &store,
+                            &key,
+                            current,
+                            &candidate,
+                            &decision,
+                            input.clock.now(),
+                        )?;
+                    }
+                }
+            }
+            let transition =
+                state::next_lifecycle(entry.as_ref(), &decision, input.clock.now(), input.settings);
+            match (entry.as_ref(), transition) {
+                (None, state::LifecycleTransition::Hide) => {
+                    report.hidden += 1;
+                    if mode == MaintenanceMode::Apply {
+                        let new_entry = MaintenanceEntry {
+                            identity: candidate.identity.clone(),
+                            original_relative_path: candidate.original_relative_path.clone(),
+                            project_name: candidate.project_name.clone(),
+                            fingerprint: candidate.fingerprint.digest.clone(),
+                            lifecycle: LifecycleState::Hidden,
+                            classifier_version: classifier::CLASSIFIER_VERSION,
+                            score: decision.score,
+                            reason_codes: decision.reasons.clone(),
+                            hidden_since: Some(input.clock.now()),
+                            recycled_at: None,
+                            purged_at: None,
+                            keep: candidate.keep,
+                            explicit_test: candidate.explicit_test,
+                        };
+                        store.update(|saved| {
+                            saved.entries.insert(key.clone(), new_entry);
+                            Ok(())
+                        })?;
+                    }
+                }
+                (Some(current), state::LifecycleTransition::Hide) => {
+                    report.hidden += 1;
+                    if mode == MaintenanceMode::Apply {
+                        update_entry_metadata(
+                            &store,
+                            &key,
+                            current,
+                            &candidate,
+                            &decision,
+                            input.clock.now(),
+                        )?;
+                    }
+                }
+                (Some(current), state::LifecycleTransition::Recycle) => {
+                    if planned_file_actions >= input.settings.max_actions_per_run {
+                        report.remaining_actions += 1;
+                        continue;
+                    }
+                    if mode == MaintenanceMode::Apply {
+                        recycle_session(&store, input.roots, current, input.clock.now())?;
+                    }
+                    planned_file_actions += 1;
+                    report.file_actions += 1;
+                    report.recycled += 1;
+                }
+                (Some(current), state::LifecycleTransition::PurgeLocal) => {
+                    if planned_file_actions >= input.settings.max_actions_per_run {
+                        report.remaining_actions += 1;
+                        continue;
+                    }
+                    if mode == MaintenanceMode::Apply {
+                        purge_session(&store, input.roots, current, input.clock.now())?;
+                    }
+                    planned_file_actions += 1;
+                    report.file_actions += 1;
+                    report.purged += 1;
+                }
+                _ => {}
             }
         }
 
         if mode == MaintenanceMode::Apply {
-            if let Some(current) = entry.as_ref() {
-                if current.classifier_version != classifier::CLASSIFIER_VERSION {
-                    update_entry_metadata(
-                        &store,
-                        &key,
-                        current,
-                        &candidate,
-                        &decision,
-                        input.clock.now(),
-                    )?;
-                }
-            }
+            state = store.load()?;
+            report.visibility = visibility_from_state(&state);
         }
-        let transition =
-            state::next_lifecycle(entry.as_ref(), &decision, input.clock.now(), input.settings);
-        match (entry.as_ref(), transition) {
-            (None, state::LifecycleTransition::Hide) => {
-                report.hidden += 1;
-                if mode == MaintenanceMode::Apply {
-                    let new_entry = MaintenanceEntry {
-                        identity: candidate.identity.clone(),
-                        original_relative_path: candidate.original_relative_path.clone(),
-                        project_name: candidate.project_name.clone(),
-                        fingerprint: candidate.fingerprint.digest.clone(),
-                        lifecycle: LifecycleState::Hidden,
-                        classifier_version: classifier::CLASSIFIER_VERSION,
-                        score: decision.score,
-                        reason_codes: decision.reasons.clone(),
-                        hidden_since: Some(input.clock.now()),
-                        recycled_at: None,
-                        purged_at: None,
-                        keep: candidate.keep,
-                        explicit_test: candidate.explicit_test,
-                    };
-                    store.update(|saved| {
-                        saved.entries.insert(key.clone(), new_entry);
-                        Ok(())
-                    })?;
-                }
-            }
-            (Some(current), state::LifecycleTransition::Hide) => {
-                report.hidden += 1;
-                if mode == MaintenanceMode::Apply {
-                    update_entry_metadata(
-                        &store,
-                        &key,
-                        current,
-                        &candidate,
-                        &decision,
-                        input.clock.now(),
-                    )?;
-                }
-            }
-            (Some(current), state::LifecycleTransition::Recycle) => {
-                if planned_file_actions >= input.settings.max_actions_per_run {
-                    report.remaining_actions += 1;
-                    continue;
-                }
-                if mode == MaintenanceMode::Apply {
-                    recycle_session(&store, input.roots, current, input.clock.now())?;
-                }
-                planned_file_actions += 1;
-                report.file_actions += 1;
-                report.recycled += 1;
-            }
-            (Some(current), state::LifecycleTransition::PurgeLocal) => {
-                if planned_file_actions >= input.settings.max_actions_per_run {
-                    report.remaining_actions += 1;
-                    continue;
-                }
-                if mode == MaintenanceMode::Apply {
-                    purge_session(&store, input.roots, current, input.clock.now())?;
-                }
-                planned_file_actions += 1;
-                report.file_actions += 1;
-                report.purged += 1;
-            }
-            _ => {}
-        }
-    }
+        Ok(())
+    })();
 
-    if mode == MaintenanceMode::Apply {
-        state = store.load()?;
+    if let Err(_error) = mutation_result {
+        report.warnings += 1;
+        state = store
+            .load()
+            .context("reload maintenance state after maintenance failure")?;
         report.visibility = visibility_from_state(&state);
     }
     Ok(report)
+}
+
+fn prune_purged_audits(
+    store: &StateStore,
+    now: DateTime<Utc>,
+    completed_sources: &HashSet<SessionSource>,
+) -> Result<()> {
+    let cutoff = now - Duration::days(30);
+    let state = store.load()?;
+    let should_prune = state.entries.values().any(|entry| {
+        completed_sources.contains(&entry.identity.source)
+            && matches!(
+                entry.identity.source,
+                SessionSource::Codex | SessionSource::Omp
+            )
+            && entry.lifecycle == LifecycleState::PurgedLocal
+            && entry.purged_at.is_some_and(|purged_at| purged_at <= cutoff)
+    });
+    if should_prune {
+        store.update(|saved| {
+            saved.entries.retain(|_, entry| {
+                !(completed_sources.contains(&entry.identity.source)
+                    && matches!(
+                        entry.identity.source,
+                        SessionSource::Codex | SessionSource::Omp
+                    )
+                    && entry.lifecycle == LifecycleState::PurgedLocal
+                    && entry.purged_at.is_some_and(|purged_at| purged_at <= cutoff))
+            });
+            Ok(())
+        })?;
+    }
+    Ok(())
 }
 
 fn update_entry_metadata(
@@ -624,6 +679,165 @@ mod tests {
     }
 
     #[test]
+    fn apply_prunes_only_old_codex_and_omp_purged_audits() {
+        let fixture = MaintenanceFixture::new(SessionSource::Codex, 120);
+        let store = state::StateStore::from_config_dir(&fixture.config_dir);
+        let sources = [
+            (
+                SessionSource::Codex,
+                "exact",
+                Some(fixture.now - Duration::days(30)),
+            ),
+            (
+                SessionSource::Omp,
+                "just-before",
+                Some(fixture.now - Duration::days(30) + Duration::seconds(1)),
+            ),
+            (
+                SessionSource::Codex,
+                "future",
+                Some(fixture.now + Duration::days(1)),
+            ),
+            (SessionSource::Omp, "missing", None),
+            (
+                SessionSource::Claude,
+                "claude",
+                Some(fixture.now - Duration::days(365)),
+            ),
+        ];
+        store
+            .update(|saved| {
+                for (source, session_id, purged_at) in sources {
+                    let identity = SessionIdentity {
+                        source,
+                        session_id: session_id.to_string(),
+                    };
+                    saved.entries.insert(
+                        state::identity_key(&identity),
+                        state::MaintenanceEntry {
+                            identity,
+                            original_relative_path: PathBuf::from("project/session.jsonl"),
+                            project_name: "project".to_string(),
+                            fingerprint: "audit-only".to_string(),
+                            lifecycle: state::LifecycleState::PurgedLocal,
+                            classifier_version: classifier::CLASSIFIER_VERSION,
+                            score: 100,
+                            reason_codes: vec![classifier::ReasonCode::ExplicitTestMarker],
+                            hidden_since: None,
+                            recycled_at: None,
+                            purged_at,
+                            keep: false,
+                            explicit_test: true,
+                        },
+                    );
+                }
+                Ok(())
+            })
+            .unwrap();
+
+        fixture.run_with(
+            Vec::new(),
+            all_complete(),
+            SessionMaintenanceSettings::default(),
+            MaintenanceMode::Apply,
+        );
+
+        let state = store.load().unwrap();
+        assert!(!state.entries.contains_key("codex:exact"));
+        assert!(state.entries.contains_key("omp:just-before"));
+        assert!(state.entries.contains_key("codex:future"));
+        assert!(state.entries.contains_key("omp:missing"));
+        assert!(state.entries.contains_key("claude:claude"));
+    }
+
+    #[test]
+    fn pending_reconcile_waits_for_duplicate_batch_validation() {
+        let fixture = MaintenanceFixture::hidden_for_days(SessionSource::Codex, 8);
+        let identity = SessionIdentity {
+            source: SessionSource::Codex,
+            session_id: "cx-task6".to_string(),
+        };
+        let fingerprint = crate::session_cache::fingerprint_file(&fixture.source_file)
+            .unwrap()
+            .digest;
+        state::StateStore::from_config_dir(&fixture.config_dir)
+            .update(|saved| {
+                let entry = saved.entries.get("codex:cx-task6").unwrap();
+                saved.pending = Some(state::PendingOperation {
+                    identity,
+                    operation: state::PendingOperationKind::Recycle,
+                    source_relative_path: PathBuf::from("project/session.jsonl"),
+                    staging_relative_path: PathBuf::from(".staging/cx-task6"),
+                    recycle_relative_path: recycle::recycle_relative_path(entry),
+                    expected_fingerprint: fingerprint,
+                });
+                Ok(())
+            })
+            .unwrap();
+        let summary = fixture.summary(SessionSource::Codex, "cx-task6", &fixture.source_file);
+        let report = fixture.run_with(
+            vec![summary.clone(), summary],
+            HashSet::from([SessionSource::Codex]),
+            SessionMaintenanceSettings::default(),
+            MaintenanceMode::Apply,
+        );
+        assert!(report.warnings > 0);
+        assert!(fixture.source_file.exists());
+        assert!(state::StateStore::from_config_dir(&fixture.config_dir)
+            .load()
+            .unwrap()
+            .pending
+            .is_some());
+    }
+
+    #[test]
+    fn maintenance_error_preserves_visibility_after_prior_file_action() {
+        let fixture = MaintenanceFixture::with_recyclable_sessions(2);
+        let store = state::StateStore::from_config_dir(&fixture.config_dir);
+        let second = store
+            .load()
+            .unwrap()
+            .entries
+            .get("claude:cc-task6-1")
+            .cloned()
+            .unwrap();
+        let conflict = fixture
+            .roots
+            .recycle
+            .join(recycle::recycle_relative_path(&second));
+        fs::create_dir_all(conflict.parent().unwrap()).unwrap();
+        fs::write(&conflict, b"conflicting destination").unwrap();
+        let summaries = (0..2)
+            .map(|index| {
+                fixture.summary(
+                    SessionSource::Claude,
+                    &format!("cc-task6-{index}"),
+                    &fixture
+                        .roots
+                        .claude
+                        .join(format!("project/session-{index}.jsonl")),
+                )
+            })
+            .collect();
+        let report = fixture.run_with(
+            summaries,
+            all_complete(),
+            SessionMaintenanceSettings::default(),
+            MaintenanceMode::Apply,
+        );
+        assert!(report.warnings > 0);
+        let state = store.load().unwrap();
+        assert_eq!(
+            state.entries["claude:cc-task6-0"].lifecycle,
+            LifecycleState::Recycled
+        );
+        assert_eq!(
+            state.entries["claude:cc-task6-1"].lifecycle,
+            LifecycleState::Hidden
+        );
+    }
+
+    #[test]
     fn duplicate_source_identity_and_unknown_profile_are_fail_safe() {
         let duplicate = MaintenanceFixture::old_test_candidate(SessionSource::Claude, 120);
         let summary = duplicate.summary(SessionSource::Claude, "cc-task6", &duplicate.source_file);
@@ -675,14 +889,22 @@ mod tests {
             b"{\"version\":999,\"entries\":{},\"pending\":null}",
         )
         .unwrap();
-        let report = fixture.run_with(
-            vec![fixture.summary(SessionSource::Claude, "cc-task6", &fixture.source_file)],
-            all_complete(),
-            SessionMaintenanceSettings::default(),
+        let error = run_maintenance(
+            MaintenanceInput {
+                summaries: Box::leak(
+                    vec![fixture.summary(SessionSource::Claude, "cc-task6", &fixture.source_file)]
+                        .into_boxed_slice(),
+                ),
+                completed_sources: Box::leak(Box::new(all_complete())),
+                roots: &fixture.roots,
+                config_dir: &fixture.config_dir,
+                settings: Box::leak(Box::new(SessionMaintenanceSettings::default())),
+                clock: Box::leak(Box::new(FixedClock(fixture.now))),
+            },
             MaintenanceMode::Apply,
-        );
-        assert_eq!(report.file_actions, 0);
-        assert!(report.warnings > 0);
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("load session maintenance state"));
         assert!(fixture.source_file.exists());
     }
 }

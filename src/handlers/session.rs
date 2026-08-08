@@ -409,12 +409,19 @@ fn maintenance_settings_from_config_dir(config_dir: &Path) -> FilterConfig {
         .unwrap_or_default()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MaintenanceScanMode {
+    ApplyFileActions,
+    ObserveOnly,
+}
+
 fn maintenance_visibility_for_scan(
     summaries: &[SessionSummary],
     completed_sources: &HashSet<SessionSource>,
     roots: &SessionRoots,
     config_dir: &Path,
-) -> VisibilityIndex {
+    scan_mode: MaintenanceScanMode,
+) -> Result<VisibilityIndex> {
     let config = maintenance_settings_from_config_dir(config_dir);
     let maintenance_roots = MaintenanceRoots {
         claude: roots.claude_projects.clone(),
@@ -423,10 +430,12 @@ fn maintenance_visibility_for_scan(
         recycle: config_dir.join("session-recycle"),
     };
     let clock = SystemMaintenanceClock;
-    let mode = if config.session_maintenance.enabled {
-        MaintenanceMode::Apply
-    } else {
-        MaintenanceMode::Disabled
+    let mode = match scan_mode {
+        MaintenanceScanMode::ObserveOnly => MaintenanceMode::Disabled,
+        MaintenanceScanMode::ApplyFileActions if config.session_maintenance.enabled => {
+            MaintenanceMode::Apply
+        }
+        MaintenanceScanMode::ApplyFileActions => MaintenanceMode::Disabled,
     };
     run_maintenance(
         MaintenanceInput {
@@ -440,7 +449,6 @@ fn maintenance_visibility_for_scan(
         mode,
     )
     .map(|report| report.visibility)
-    .unwrap_or_default()
 }
 
 #[derive(Debug, Default)]
@@ -603,12 +611,29 @@ fn scan_all_session_summaries_with_report(
     project_filter: Option<&str>,
     source: SessionSourceFilter,
 ) -> Result<SessionScanResult> {
+    scan_all_session_summaries_with_report_mode(
+        project_filter,
+        source,
+        MaintenanceScanMode::ApplyFileActions,
+    )
+}
+
+fn scan_all_session_summaries_with_report_mode(
+    project_filter: Option<&str>,
+    source: SessionSourceFilter,
+    maintenance_mode: MaintenanceScanMode,
+) -> Result<SessionScanResult> {
     let discovery_started = Instant::now();
     let roots = SessionRoots::discover()?;
     let discovery_ms = elapsed_millis(discovery_started);
     let config_dir = ConfigManager::config_dir()?;
-    let mut result =
-        scan_all_session_summaries_with_roots(project_filter, source, &roots, &config_dir)?;
+    let mut result = scan_all_session_summaries_with_roots_mode(
+        project_filter,
+        source,
+        &roots,
+        &config_dir,
+        maintenance_mode,
+    )?;
     result.diagnostics.source_discovery_ms = discovery_ms;
     Ok(result)
 }
@@ -617,11 +642,28 @@ fn scan_all_session_summaries_with_report(
 ///
 /// This is crate-visible so tests can exercise cold, warm, corrupt-cache, and
 /// filesystem-error paths without touching a user's real session directories.
+#[allow(dead_code)]
 pub(crate) fn scan_all_session_summaries_with_roots(
     project_filter: Option<&str>,
     source: SessionSourceFilter,
     roots: &SessionRoots,
     config_dir: &Path,
+) -> Result<SessionScanResult> {
+    scan_all_session_summaries_with_roots_mode(
+        project_filter,
+        source,
+        roots,
+        config_dir,
+        MaintenanceScanMode::ApplyFileActions,
+    )
+}
+
+fn scan_all_session_summaries_with_roots_mode(
+    project_filter: Option<&str>,
+    source: SessionSourceFilter,
+    roots: &SessionRoots,
+    config_dir: &Path,
+    maintenance_mode: MaintenanceScanMode,
 ) -> Result<SessionScanResult> {
     let started = Instant::now();
     let mut diagnostics = ScanDiagnostics::new();
@@ -734,8 +776,13 @@ pub(crate) fn scan_all_session_summaries_with_roots(
     }
 
     summaries.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
-    let visibility =
-        maintenance_visibility_for_scan(&summaries, &completed_sources, roots, config_dir);
+    let visibility = maintenance_visibility_for_scan(
+        &summaries,
+        &completed_sources,
+        roots,
+        config_dir,
+        maintenance_mode,
+    )?;
     diagnostics.elapsed_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
     Ok(SessionScanResult {
@@ -3552,7 +3599,11 @@ pub fn handle_session_show(
         summaries: sessions,
         diagnostics,
         ..
-    } = scan_all_session_summaries_with_report(None, source)?;
+    } = scan_all_session_summaries_with_report_mode(
+        None,
+        source,
+        MaintenanceScanMode::ObserveOnly,
+    )?;
     if !json {
         emit_scan_warning(&diagnostics);
     }
@@ -4347,7 +4398,11 @@ pub fn handle_session_search(
         summaries: mut all_sessions,
         mut diagnostics,
         ..
-    } = scan_all_session_summaries_with_report(project_filter, source)?;
+    } = scan_all_session_summaries_with_report_mode(
+        project_filter,
+        source,
+        MaintenanceScanMode::ObserveOnly,
+    )?;
     if !json_output {
         emit_scan_warning(&diagnostics);
     }
@@ -4943,6 +4998,84 @@ mod tests {
                 .session_maintenance
                 .enabled
         );
+    }
+
+    #[test]
+    fn observe_only_search_scan_does_not_recycle_source_file() {
+        let (_temp, roots, config) = make_scan_fixture();
+        fs::create_dir_all(&config).unwrap();
+        fs::write(
+            config.join("config.toml"),
+            "[session_maintenance]\nenabled = true\n",
+        )
+        .unwrap();
+        let initial = scan_all_session_summaries_with_roots(
+            None,
+            SessionSourceFilter::Claude,
+            &roots,
+            &config,
+        )
+        .unwrap();
+        let summary = initial
+            .summaries
+            .iter()
+            .find(|summary| summary.session_id == "cc-1")
+            .unwrap();
+        let identity = summary.identity().unwrap();
+        let fingerprint = crate::session_cache::fingerprint_file(&summary.file_path)
+            .unwrap()
+            .digest;
+        crate::session_maintenance::state::StateStore::from_config_dir(&config)
+            .update(|saved| {
+                saved.entries.insert(
+                    crate::session_maintenance::state::identity_key(&identity),
+                    crate::session_maintenance::state::MaintenanceEntry {
+                        identity,
+                        original_relative_path: summary
+                            .file_path
+                            .strip_prefix(&roots.claude_projects)
+                            .unwrap()
+                            .to_path_buf(),
+                        project_name: summary.project_name.clone(),
+                        fingerprint,
+                        lifecycle: LifecycleState::Hidden,
+                        classifier_version:
+                            crate::session_maintenance::classifier::CLASSIFIER_VERSION,
+                        score: 100,
+                        reason_codes: vec![
+                            crate::session_maintenance::classifier::ReasonCode::ExplicitTestMarker,
+                        ],
+                        hidden_since: Some(chrono::Utc::now() - chrono::Duration::days(8)),
+                        recycled_at: None,
+                        purged_at: None,
+                        keep: false,
+                        explicit_test: true,
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+
+        let observed = scan_all_session_summaries_with_roots_mode(
+            None,
+            SessionSourceFilter::Claude,
+            &roots,
+            &config,
+            MaintenanceScanMode::ObserveOnly,
+        )
+        .unwrap();
+        assert_eq!(observed.summaries.len(), initial.summaries.len());
+        assert!(summary.file_path.exists());
+
+        scan_all_session_summaries_with_roots_mode(
+            None,
+            SessionSourceFilter::Claude,
+            &roots,
+            &config,
+            MaintenanceScanMode::ApplyFileActions,
+        )
+        .unwrap();
+        assert!(!summary.file_path.exists());
     }
 
     #[test]
