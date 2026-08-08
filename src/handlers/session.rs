@@ -46,8 +46,8 @@ use crate::session_maintenance::state::{
     identity_key, LifecycleState, MaintenanceEntry, StateStore,
 };
 use crate::session_maintenance::{
-    candidate_from_summary, run_maintenance, MaintenanceInput, MaintenanceMode,
-    SystemMaintenanceClock, VisibilityIndex,
+    candidate_from_summary, load_recycled_summaries, maintenance_state_for, run_maintenance,
+    MaintenanceInput, MaintenanceMode, SystemMaintenanceClock, VisibilityIndex,
 };
 pub(crate) use crate::session_model::format_relative_time;
 #[allow(unused_imports)]
@@ -330,6 +330,7 @@ fn is_valid_session_summary(summary: &SessionSummary) -> bool {
     summary.message_count > 0 && summary.title != "(No title)"
 }
 
+#[cfg(test)]
 fn visible_summaries(
     summaries: Vec<SessionSummary>,
     visibility: &VisibilityIndex,
@@ -349,6 +350,111 @@ fn visible_summaries(
                 .unwrap_or(true)
         })
         .collect()
+}
+
+fn lifecycle_for_summary(summary: &SessionSummary, visibility: &VisibilityIndex) -> LifecycleState {
+    summary
+        .identity()
+        .ok()
+        .and_then(|identity| visibility.states.get(&identity).copied())
+        .unwrap_or(LifecycleState::Visible)
+}
+
+fn visibility_prefix(summary: &SessionSummary, visibility: &VisibilityIndex) -> &'static str {
+    match lifecycle_for_summary(summary, visibility) {
+        LifecycleState::Hidden => "[hidden]",
+        LifecycleState::Recycled => "[recycled]",
+        LifecycleState::PurgedLocal => "[purged_local]",
+        LifecycleState::Visible => "",
+    }
+}
+
+fn visibility_label(summary: &SessionSummary, visibility: &VisibilityIndex) -> &'static str {
+    maintenance_lifecycle_label(lifecycle_for_summary(summary, visibility))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assemble_query_summaries_with_roots(
+    active: Vec<SessionSummary>,
+    visibility: &VisibilityIndex,
+    roots: &SessionRoots,
+    config_dir: &Path,
+    source: SessionSourceFilter,
+    project_filter: Option<&str>,
+    include_hidden: bool,
+    append_recycled: bool,
+    active_only: bool,
+) -> Result<Vec<SessionSummary>> {
+    let mut summaries = Vec::new();
+    let mut identities = HashSet::new();
+
+    for summary in active {
+        let identity = summary.identity()?;
+        let lifecycle = visibility
+            .states
+            .get(&identity)
+            .copied()
+            .unwrap_or(LifecycleState::Visible);
+        if matches!(
+            lifecycle,
+            LifecycleState::Recycled | LifecycleState::PurgedLocal
+        ) {
+            continue;
+        }
+        if active_only && lifecycle != LifecycleState::Visible {
+            continue;
+        }
+        if !active_only && !include_hidden && lifecycle == LifecycleState::Hidden {
+            continue;
+        }
+        if project_filter.is_some_and(|name| summary.project_name != name) {
+            continue;
+        }
+        identities.insert(identity);
+        summaries.push(summary);
+    }
+
+    if append_recycled && !active_only {
+        let state = StateStore::from_config_dir(config_dir)
+            .load()
+            .context("load session maintenance state for recycled query")?;
+        let maintenance_roots = maintenance_roots_for_handler(config_dir, roots);
+        for summary in load_recycled_summaries(&maintenance_roots, &state, source)? {
+            if project_filter.is_some_and(|name| summary.project_name != name) {
+                continue;
+            }
+            let identity = summary.identity()?;
+            if identities.insert(identity) {
+                summaries.push(summary);
+            }
+        }
+    }
+
+    Ok(summaries)
+}
+
+fn assemble_query_summaries(
+    active: Vec<SessionSummary>,
+    visibility: &VisibilityIndex,
+    source: SessionSourceFilter,
+    project_filter: Option<&str>,
+    include_hidden: bool,
+    append_recycled: bool,
+    active_only: bool,
+) -> Result<Vec<SessionSummary>> {
+    let roots = SessionRoots::discover()?;
+    let config_dir = ConfigManager::config_dir()?;
+    assemble_query_summaries_with_roots(
+        active,
+        visibility,
+        &roots,
+        &config_dir,
+        source,
+        project_filter,
+        include_hidden,
+        append_recycled,
+        active_only,
+    )
 }
 
 /// Scan sessions for a specific project, returns (valid_sessions, filtered_count).
@@ -528,10 +634,19 @@ fn emit_scan_warning(diagnostics: &ScanDiagnostics) {
 
 fn scan_summaries_for_interactive(
     result: SessionScanResult,
+    source: SessionSourceFilter,
     include_hidden: bool,
-) -> Vec<SessionSummary> {
+) -> Result<Vec<SessionSummary>> {
     emit_scan_warning(&result.diagnostics);
-    visible_summaries(result.summaries, &result.visibility, include_hidden)
+    assemble_query_summaries(
+        result.summaries,
+        &result.visibility,
+        source,
+        None,
+        include_hidden,
+        include_hidden,
+        false,
+    )
 }
 
 fn scan_summaries_for_mutation(result: SessionScanResult) -> Result<Vec<SessionSummary>> {
@@ -2831,11 +2946,15 @@ pub fn handle_session_interactive(
     // Load all sessions (Claude + Codex) and group into projects
     let initial_scan = scan_all_session_summaries_with_report(None, source)?;
     emit_scan_warning(&initial_scan.diagnostics);
-    let mut all_sessions = visible_summaries(
+    let mut all_sessions = assemble_query_summaries(
         initial_scan.summaries,
         &initial_scan.visibility,
+        source,
+        None,
         include_hidden,
-    );
+        include_hidden,
+        false,
+    )?;
     let mut projects = build_projects_from_sessions(&all_sessions);
 
     if projects.is_empty() {
@@ -2930,8 +3049,9 @@ pub fn handle_session_interactive(
                     if list_needs_refresh {
                         all_sessions = scan_summaries_for_interactive(
                             scan_all_session_summaries_with_report(None, source)?,
+                            source,
                             include_hidden,
-                        );
+                        )?;
                     }
                 }
                 SessionMenuChoice::Search => {
@@ -2976,8 +3096,9 @@ pub fn handle_session_interactive(
                                 if list_needs_refresh {
                                     all_sessions = scan_summaries_for_interactive(
                                         scan_all_session_summaries_with_report(None, source)?,
+                                        source,
                                         include_hidden,
-                                    );
+                                    )?;
                                 }
                             }
                         }
@@ -2999,8 +3120,9 @@ pub fn handle_session_interactive(
                     }
                     all_sessions = scan_summaries_for_interactive(
                         scan_all_session_summaries_with_report(None, source)?,
+                        source,
                         include_hidden,
-                    );
+                    )?;
                 }
                 SessionMenuChoice::SwitchProject => {
                     current_project = None;
@@ -3013,8 +3135,9 @@ pub fn handle_session_interactive(
             // Refresh sessions and projects
             all_sessions = scan_summaries_for_interactive(
                 scan_all_session_summaries_with_report(None, source)?,
+                source,
                 include_hidden,
-            );
+            )?;
             projects = build_projects_from_sessions(&all_sessions);
 
             match show_project_menu(&projects)? {
@@ -3051,7 +3174,15 @@ pub fn handle_session_list(
         ..
     } = scan_all_session_summaries_with_report(project_filter, source)?;
     emit_scan_warning(&diagnostics);
-    let sessions = visible_summaries(summaries, &visibility, include_hidden);
+    let sessions = assemble_query_summaries(
+        summaries,
+        &visibility,
+        source,
+        project_filter,
+        include_hidden,
+        include_hidden,
+        false,
+    )?;
 
     if sessions.is_empty() {
         if project_filter.is_some() {
@@ -3085,9 +3216,11 @@ pub fn handle_session_list(
         println!("{}", "-".repeat(60));
 
         for (i, session) in sessions.iter().enumerate() {
+            let marker = visibility_prefix(session, &visibility);
             if show_ids {
                 println!(
-                    "[{:>2}] [{}] {} | {} | {} msgs | {}",
+                    "{} [{:>2}] [{}] {} | {} | {} msgs | {}",
+                    marker,
                     i + 1,
                     source_label(&session.source),
                     session.session_id.dimmed(),
@@ -3097,7 +3230,8 @@ pub fn handle_session_list(
                 );
             } else {
                 println!(
-                    "[{:>2}] [{}] {} | {} msgs | {}",
+                    "{} [{:>2}] [{}] {} | {} msgs | {}",
+                    marker,
                     i + 1,
                     source_label(&session.source),
                     session.display_title(50),
@@ -3120,7 +3254,15 @@ pub fn handle_session_projects(source: SessionSourceFilter, include_hidden: bool
         ..
     } = scan_all_session_summaries_with_report(None, source)?;
     emit_scan_warning(&diagnostics);
-    let sessions = visible_summaries(summaries, &visibility, include_hidden);
+    let sessions = assemble_query_summaries(
+        summaries,
+        &visibility,
+        source,
+        None,
+        include_hidden,
+        include_hidden,
+        false,
+    )?;
 
     if sessions.is_empty() {
         println!("{}", "No projects found.".yellow());
@@ -3189,6 +3331,7 @@ struct SessionOverview {
     source: String,
     session_id: String,
     title: String,
+    visibility: String,
     message_count: usize,
     last_activity: Option<String>,
     recent_messages: Vec<String>,
@@ -3390,7 +3533,15 @@ pub fn handle_session_overview(
         visibility,
         ..
     } = scan_all_session_summaries_with_report(None, source)?;
-    let mut sessions = visible_summaries(summaries, &visibility, include_hidden);
+    let mut sessions = assemble_query_summaries(
+        summaries,
+        &visibility,
+        source,
+        None,
+        include_hidden,
+        include_hidden,
+        false,
+    )?;
 
     if let Some(ref cutoff) = since_cutoff {
         sessions.retain(|s| is_after_cutoff(s.last_activity.as_deref(), cutoff));
@@ -3465,6 +3616,7 @@ pub fn handle_session_overview(
                     source: s.source.clone(),
                     session_id: s.session_id.clone(),
                     title,
+                    visibility: visibility_label(s, &visibility).to_string(),
                     message_count: s.message_count,
                     last_activity: s.last_activity.clone(),
                     recent_messages,
@@ -3544,9 +3696,15 @@ pub fn handle_session_overview(
                     .map(|t| format_relative_time(t))
                     .unwrap_or_else(|| "?".to_string());
 
+                let marker = match sess.visibility.as_str() {
+                    "hidden" => "[hidden] ",
+                    "recycled" => "[recycled] ",
+                    _ => "",
+                };
                 println!(
-                    "  {} [{}] {} ({} msgs, {})",
+                    "  {} {}[{}] {} ({} msgs, {})",
                     branch,
+                    marker,
                     source_label(&sess.source),
                     sess.title,
                     sess.message_count,
@@ -3621,8 +3779,9 @@ pub fn handle_session_show(
     source: SessionSourceFilter,
 ) -> Result<()> {
     let SessionScanResult {
-        summaries: sessions,
+        summaries,
         diagnostics,
+        visibility,
         ..
     } = scan_all_session_summaries_with_report_mode(
         None,
@@ -3632,6 +3791,8 @@ pub fn handle_session_show(
     if !json {
         emit_scan_warning(&diagnostics);
     }
+    let sessions =
+        assemble_query_summaries(summaries, &visibility, source, None, true, true, false)?;
     let session = resolve_session_by_id(&sessions, session_id, source)?;
 
     // If no drill-down flags and not json, use interactive view
@@ -3660,6 +3821,7 @@ pub fn handle_session_show(
                     "session_id": session.session_id,
                     "project": session.project_name,
                     "title": session.title,
+                    "visibility": visibility_label(session, &visibility),
                     "message_count": 0,
                     "messages": []
                 }),
@@ -3688,6 +3850,7 @@ pub fn handle_session_show(
                             "session_id": session.session_id,
                             "project": session.project_name,
                             "title": session.title,
+                            "visibility": visibility_label(session, &visibility),
                             "message_count": session.message_count,
                             "showing": format!("around:\"{}\":{}:not-found", keyword, num),
                             "messages": [],
@@ -3737,6 +3900,7 @@ pub fn handle_session_show(
                 "session_id": session.session_id,
                 "project": session.project_name,
                 "title": session.title,
+                "visibility": visibility_label(session, &visibility),
                 "message_count": session.message_count,
                 "showing": showing,
                 "messages": json_msgs,
@@ -3746,8 +3910,15 @@ pub fn handle_session_show(
         println!("{}", serde_json::to_string(&payload)?);
     } else {
         let is_tty = atty::is(atty::Stream::Stdout);
+        let marker = visibility_prefix(session, &visibility);
+        let marker_prefix = if marker.is_empty() {
+            String::new()
+        } else {
+            format!("{} ", marker)
+        };
         println!(
-            "--- [{}] {} | {} | {} | {} msgs | showing {} ---",
+            "--- {}[{}] {} | {} | {} | {} msgs | showing {} ---",
+            marker_prefix,
             source_label(&session.source),
             session.session_id,
             session.project_name,
@@ -4433,9 +4604,15 @@ pub fn handle_session_search(
     if !json_output {
         emit_scan_warning(&diagnostics);
     }
-    if active_only {
-        all_sessions = visible_summaries(all_sessions, &visibility, false);
-    }
+    all_sessions = assemble_query_summaries(
+        all_sessions,
+        &visibility,
+        source,
+        project_filter,
+        true,
+        !active_only,
+        active_only,
+    )?;
     let search_started = Instant::now();
     let memory_roots = memory_search_roots_from_sessions(&all_sessions);
     if all_sessions.is_empty() && memory_roots.is_empty() {
@@ -4491,6 +4668,7 @@ pub fn handle_session_search(
                     "source": r.summary.source,
                     "project": r.summary.project_name,
                     "title": r.summary.title,
+                    "visibility": visibility_label(&r.summary, &visibility),
                     "last_activity": r.summary.last_activity,
                     "message_count": r.summary.message_count,
                     "match_mode": if r.match_mode == MatchMode::And { "and" } else { "or" },
@@ -4623,8 +4801,15 @@ pub fn handle_session_search(
                 .map(|t| format_compact_relative_time(t))
                 .unwrap_or_else(|| "?".to_string());
 
+            let marker = visibility_prefix(&result.summary, &visibility);
+            let marker_prefix = if marker.is_empty() {
+                String::new()
+            } else {
+                format!("{} ", marker)
+            };
             let header = format!(
-                "--- [{}] {} | {} | {} | {} | {} msgs ---",
+                "--- {}[{}] {} | {} | {} | {} | {} msgs ---",
+                marker_prefix,
                 source_label(&result.summary.source),
                 result.summary.session_id,
                 result.summary.project_name,
@@ -4691,7 +4876,7 @@ fn resolve_maintenance_session(
             .or_insert_with(|| ResolvedMaintenanceSession {
                 identity: identity.clone(),
                 summary: Some(summary.clone()),
-                entry: state.entries.get(&key).cloned(),
+                entry: maintenance_state_for(state, &identity).cloned(),
             });
     }
 
@@ -5164,6 +5349,119 @@ pub fn handle_session_restore_with_source(
     session_id: Option<&str>,
     source: SessionSourceFilter,
 ) -> Result<()> {
+    if let Some(target_id) = session_id {
+        let roots = SessionRoots::discover()?;
+        let config_dir = ConfigManager::config_dir()?;
+        let maintenance_roots = maintenance_roots_for_handler(&config_dir, &roots);
+        let store = StateStore::from_config_dir(&config_dir);
+        let maintenance_state = store.load().context("load session maintenance state")?;
+        let scan = scan_all_session_summaries_with_report_mode(
+            None,
+            source,
+            MaintenanceScanMode::ObserveOnly,
+        )?;
+        emit_scan_warning(&scan.diagnostics);
+        let resolved =
+            resolve_maintenance_session(&scan.summaries, &maintenance_state, target_id, source);
+
+        match resolved {
+            Ok(resolved) => {
+                if scan.diagnostics.degraded() {
+                    anyhow::bail!(
+                        "session mutation aborted because the source scan was incomplete: {}",
+                        scan.diagnostics.summary_line()
+                    );
+                }
+                if let Some(entry) = resolved.entry {
+                    match entry.lifecycle {
+                        LifecycleState::Hidden => {
+                            store.update(|state| {
+                                let key = identity_key(&entry.identity);
+                                let current = state
+                                    .entries
+                                    .get_mut(&key)
+                                    .context("maintenance entry disappeared while restoring")?;
+                                current.lifecycle = LifecycleState::Visible;
+                                current.keep = true;
+                                current.hidden_since = None;
+                                Ok(())
+                            })?;
+                            println!(
+                                "{} Restored session visibility: {}",
+                                "SUCCESS:".green().bold(),
+                                target_id
+                            );
+                            return Ok(());
+                        }
+                        LifecycleState::Recycled => {
+                            restore_session(
+                                &store,
+                                &maintenance_roots,
+                                &entry,
+                                chrono::Utc::now(),
+                            )?;
+                            store.update(|state| {
+                                let key = identity_key(&entry.identity);
+                                if let Some(current) = state.entries.get_mut(&key) {
+                                    current.keep = true;
+                                }
+                                Ok(())
+                            })?;
+                            println!(
+                                "{} Restored session: {}",
+                                "SUCCESS:".green().bold(),
+                                target_id
+                            );
+                            return Ok(());
+                        }
+                        LifecycleState::Visible => {
+                            if resolved.summary.is_some() {
+                                store.update(|state| {
+                                    let key = identity_key(&entry.identity);
+                                    if let Some(current) = state.entries.get_mut(&key) {
+                                        current.keep = true;
+                                    }
+                                    Ok(())
+                                })?;
+                                println!(
+                                    "{} Session already local: {}",
+                                    "SUCCESS:".green().bold(),
+                                    target_id
+                                );
+                                return Ok(());
+                            }
+                        }
+                        LifecycleState::PurgedLocal => {}
+                    }
+                }
+            }
+            Err(_) if !source.includes_claude() => {
+                anyhow::bail!(
+                    "No local recycled copy is available for {} session {}",
+                    source_label(match source {
+                        SessionSourceFilter::Codex => "codex",
+                        SessionSourceFilter::Omp => "omp",
+                        _ => "claude",
+                    }),
+                    target_id
+                );
+            }
+            Err(_) => {}
+        }
+
+        if !source.includes_claude() {
+            anyhow::bail!(
+                "No local recycled copy is available for {} session {}",
+                source_label(match source {
+                    SessionSourceFilter::Codex => "codex",
+                    SessionSourceFilter::Omp => "omp",
+                    _ => "claude",
+                }),
+                target_id
+            );
+        }
+    }
+
     ensure_restore_source_supported(source)?;
     let state = SyncState::load().context("Failed to load sync state (is sync configured?)")?;
     let filter = FilterConfig::load()?;
@@ -6560,12 +6858,17 @@ mod tests {
     }
 
     #[test]
-    fn test_restore_source_guard_rejects_non_claude_before_io() {
-        for source in [SessionSourceFilter::Codex, SessionSourceFilter::Omp] {
+    fn test_restore_source_without_local_copy_reports_source_specific_error() {
+        for (source, label) in [
+            (SessionSourceFilter::Codex, "CX"),
+            (SessionSourceFilter::Omp, "OM"),
+        ] {
             let error = handle_session_restore_with_source(Some("does-not-matter"), source)
                 .unwrap_err()
                 .to_string();
-            assert!(error.contains("Restore is only supported for Claude sessions"));
+            assert!(error.contains(&format!(
+                "No local recycled copy is available for {label} session does-not-matter"
+            )));
         }
 
         assert!(ensure_restore_source_supported(SessionSourceFilter::All).is_ok());

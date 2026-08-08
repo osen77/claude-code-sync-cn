@@ -9,15 +9,21 @@ pub(crate) mod state;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::filter::SessionMaintenanceSettings;
-use crate::path_security::safe_relative_path_within_root;
+use crate::path_security::{
+    safe_join_within_root, safe_relative_path_within_root, validate_directory_root,
+    validate_regular_candidate,
+};
 use crate::session_cache::fingerprint_file;
-use crate::session_model::{SessionIdentity, SessionSource, SessionSummary};
+use crate::session_model::{SessionIdentity, SessionSource, SessionSourceFilter, SessionSummary};
 
 use self::classifier::{classify, ClassifierPolicy, MaintenanceCandidate};
-use self::recycle::{purge_session, reconcile_pending, recycle_session, MaintenanceRoots};
+use self::recycle::{
+    purge_session, reconcile_pending, recycle_relative_path, recycle_session, MaintenanceRoots,
+};
 use self::state::{
     identity_key, reconcile_fingerprint, LifecycleState, MaintenanceEntry, StateStore,
 };
@@ -124,6 +130,110 @@ fn visibility_from_state(state: &state::MaintenanceState) -> VisibilityIndex {
             .map(|entry| (entry.identity.clone(), entry.lifecycle))
             .collect(),
     }
+}
+
+/// Return the persisted maintenance entry for a source-qualified identity.
+pub(crate) fn maintenance_state_for<'a>(
+    state: &'a state::MaintenanceState,
+    identity: &SessionIdentity,
+) -> Option<&'a MaintenanceEntry> {
+    state.entries.get(&identity_key(identity))
+}
+
+const MAX_RECYCLED_QUERY_WARNINGS: usize = 16;
+
+fn recycled_query_warning(count: &mut usize) {
+    if *count < MAX_RECYCLED_QUERY_WARNINGS {
+        log::warn!(
+            target: crate::logger::SCAN_DIAGNOSTICS_TARGET,
+            "recycled session entry skipped during query"
+        );
+    } else if *count == MAX_RECYCLED_QUERY_WARNINGS {
+        log::warn!(
+            target: crate::logger::SCAN_DIAGNOSTICS_TARGET,
+            "additional recycled session entries skipped during query"
+        );
+    }
+    *count = count.saturating_add(1);
+}
+
+/// Load parseable recycled sessions from trusted recycle final files.
+///
+/// Only `Recycled` state entries are considered. Every final path is rebuilt below the
+/// trusted recycle root and must be a regular non-symlink file with the recorded fingerprint.
+/// A bad entry is isolated to a bounded warning and does not hide other valid recycled sessions.
+pub(crate) fn load_recycled_summaries(
+    roots: &MaintenanceRoots,
+    state: &state::MaintenanceState,
+    source_filter: SessionSourceFilter,
+) -> Result<Vec<SessionSummary>> {
+    match fs::symlink_metadata(&roots.recycle) {
+        Ok(_) => validate_directory_root(&roots.recycle)
+            .context("validate session recycle root for query")?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error).context("inspect session recycle root for query"),
+    };
+
+    let mut entries: Vec<&MaintenanceEntry> = state
+        .entries
+        .values()
+        .filter(|entry| {
+            entry.lifecycle == LifecycleState::Recycled
+                && source_filter.includes(entry.identity.source)
+        })
+        .collect();
+    entries.sort_by(|left, right| identity_key(&left.identity).cmp(&identity_key(&right.identity)));
+
+    let mut warnings = 0usize;
+    let mut summaries = Vec::new();
+    for entry in entries {
+        let result = (|| -> Result<SessionSummary> {
+            let final_relative = recycle_relative_path(entry);
+            let final_path = safe_join_within_root(&roots.recycle, &final_relative)?;
+            validate_regular_candidate(&roots.recycle, &final_path)?;
+            let fingerprint = fingerprint_file(&final_path)?;
+            if fingerprint.digest != entry.fingerprint {
+                anyhow::bail!("recycled file fingerprint mismatch")
+            }
+
+            let mut summary = match entry.identity.source {
+                SessionSource::Claude => {
+                    let session = crate::parser::ConversationSession::from_file(&final_path)?;
+                    let project_dir = match entry.original_relative_path.parent() {
+                        Some(parent) if !parent.as_os_str().is_empty() => {
+                            safe_join_within_root(&roots.claude, parent)?
+                        }
+                        _ => {
+                            validate_directory_root(&roots.claude)?;
+                            roots.claude.clone()
+                        }
+                    };
+                    SessionSummary::from_session(&session, &entry.project_name, &project_dir)
+                }
+                SessionSource::Codex => {
+                    let session = crate::codex::CodexSession::from_file(&final_path)?;
+                    let title = session.title(None);
+                    SessionSummary::from_codex_session(&session, &entry.project_name, title)
+                }
+                SessionSource::Omp => {
+                    let session = crate::omp::OmpSession::from_file(&final_path)?;
+                    SessionSummary::from_omp_session(&session, &entry.project_name)
+                }
+            };
+            summary.source = entry.identity.source.as_str().to_string();
+            summary.session_id = entry.identity.session_id.clone();
+            summary.project_name = entry.project_name.clone();
+            summary.file_path = final_path;
+            Ok(summary)
+        })();
+
+        match result {
+            Ok(summary) => summaries.push(summary),
+            Err(_) => recycled_query_warning(&mut warnings),
+        }
+    }
+
+    Ok(summaries)
 }
 
 fn maintenance_policy(settings: &SessionMaintenanceSettings) -> Option<ClassifierPolicy> {
@@ -429,7 +539,9 @@ fn update_entry_metadata(
 mod tests {
     use super::*;
     use crate::filter::SessionMaintenanceSettings;
-    use crate::session_model::{SessionIdentity, SessionSource, SessionSummary};
+    use crate::session_model::{
+        SessionIdentity, SessionSource, SessionSourceFilter, SessionSummary,
+    };
     use chrono::{DateTime, Duration, Utc};
     use std::collections::HashSet;
     use std::fs;
@@ -1019,5 +1131,101 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("load session maintenance state"));
         assert!(fixture.source_file.exists());
+    }
+
+    #[test]
+    fn load_recycled_summaries_parses_all_sources_from_trusted_final_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let roots = recycle::MaintenanceRoots {
+            claude: root.join("claude"),
+            codex: root.join("codex"),
+            omp: root.join("omp"),
+            recycle: root.join("recycle"),
+        };
+        for path in [&roots.claude, &roots.codex, &roots.omp, &roots.recycle] {
+            fs::create_dir_all(path).unwrap();
+        }
+
+        let fixtures = [
+            (
+                SessionSource::Claude,
+                "cc-recycled",
+                PathBuf::from("claude-project/cc-recycled.jsonl"),
+                r#"{"type":"user","sessionId":"cc-recycled","cwd":"/workspace/claude-project","timestamp":"2026-08-08T12:00:00Z","message":{"role":"user","content":"claude recycled keyword"}}
+"#,
+            ),
+            (
+                SessionSource::Codex,
+                "cx-recycled",
+                PathBuf::from("codex-project/cx-recycled.jsonl"),
+                r#"{"type":"session_meta","payload":{"id":"cx-recycled","cwd":"/workspace/codex-project"},"timestamp":"2026-08-08T12:00:00Z"}
+{"type":"response_item","payload":{"role":"user","content":[{"text":"codex recycled keyword"}]},"timestamp":"2026-08-08T12:00:01Z"}
+"#,
+            ),
+            (
+                SessionSource::Omp,
+                "om-recycled",
+                PathBuf::from("omp-project/om-recycled.jsonl"),
+                r#"{"type":"session","id":"om-recycled","cwd":"/workspace/omp-project","timestamp":"2026-08-08T12:00:00Z"}
+{"type":"message","timestamp":"2026-08-08T12:00:01Z","message":{"role":"user","content":[{"type":"text","text":"omp recycled keyword"}]}}
+"#,
+            ),
+        ];
+        let store = state::StateStore::from_config_dir(&root.join("config"));
+        fs::create_dir_all(root.join("config")).unwrap();
+        for (source, session_id, relative, content) in fixtures {
+            let staging_source = roots.source_root(source).join(&relative);
+            fs::create_dir_all(staging_source.parent().unwrap()).unwrap();
+            fs::write(&staging_source, content).unwrap();
+            let fingerprint = crate::session_cache::fingerprint_file(&staging_source)
+                .unwrap()
+                .digest;
+            let identity = SessionIdentity {
+                source,
+                session_id: session_id.to_string(),
+            };
+            let entry = state::MaintenanceEntry {
+                identity,
+                original_relative_path: relative,
+                project_name: format!("{}-project", source.as_str()),
+                fingerprint,
+                lifecycle: LifecycleState::Recycled,
+                classifier_version: classifier::CLASSIFIER_VERSION,
+                score: 100,
+                reason_codes: vec![],
+                hidden_since: None,
+                recycled_at: Some(Utc::now()),
+                purged_at: None,
+                keep: false,
+                explicit_test: true,
+            };
+            let final_path = roots.recycle.join(recycle::recycle_relative_path(&entry));
+            fs::create_dir_all(final_path.parent().unwrap()).unwrap();
+            fs::rename(staging_source, final_path).unwrap();
+            store
+                .update(|state| {
+                    state.entries.insert(identity_key(&entry.identity), entry);
+                    Ok(())
+                })
+                .unwrap();
+        }
+
+        let state = store.load().unwrap();
+        let summaries = load_recycled_summaries(&roots, &state, SessionSourceFilter::All).unwrap();
+        assert_eq!(summaries.len(), 3);
+        assert_eq!(
+            summaries
+                .iter()
+                .map(|s| s.source.as_str())
+                .collect::<Vec<_>>(),
+            vec!["claude", "codex", "omp"]
+        );
+        assert!(summaries
+            .iter()
+            .all(|summary| summary.file_path.starts_with(&roots.recycle)));
+        assert!(summaries
+            .iter()
+            .any(|summary| summary.title.contains("recycled keyword")));
     }
 }
