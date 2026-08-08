@@ -18,11 +18,23 @@ use claude_code_sync::undo::{undo_pull, undo_push, Snapshot};
 // Use relative path from the workspace root
 const TEST_DATA_DIR: &str = "data";
 
-struct ConfigEnvGuard;
+struct ConfigEnvGuard(Option<std::ffi::OsString>);
+
+impl ConfigEnvGuard {
+    fn set(path: &Path) -> Self {
+        let previous = std::env::var_os(CONFIG_DIR_ENV);
+        std::env::set_var(CONFIG_DIR_ENV, path);
+        Self(previous)
+    }
+}
 
 impl Drop for ConfigEnvGuard {
     fn drop(&mut self) {
-        std::env::remove_var(CONFIG_DIR_ENV);
+        if let Some(previous) = self.0.take() {
+            std::env::set_var(CONFIG_DIR_ENV, previous);
+        } else {
+            std::env::remove_var(CONFIG_DIR_ENV);
+        }
     }
 }
 
@@ -35,6 +47,29 @@ impl Drop for HomeEnvGuard {
         } else {
             std::env::remove_var("HOME");
         }
+    }
+}
+
+#[test]
+#[serial]
+fn config_env_guard_restores_previous_value() {
+    let previous = std::env::var_os(CONFIG_DIR_ENV);
+    std::env::set_var(CONFIG_DIR_ENV, "pre-existing-config");
+    {
+        let _guard = ConfigEnvGuard::set(Path::new("temporary-config"));
+        assert_eq!(
+            std::env::var_os(CONFIG_DIR_ENV).as_deref(),
+            Some(std::ffi::OsStr::new("temporary-config"))
+        );
+    }
+    assert_eq!(
+        std::env::var_os(CONFIG_DIR_ENV).as_deref(),
+        Some(std::ffi::OsStr::new("pre-existing-config"))
+    );
+    if let Some(previous) = previous {
+        std::env::set_var(CONFIG_DIR_ENV, previous);
+    } else {
+        std::env::remove_var(CONFIG_DIR_ENV);
     }
 }
 
@@ -172,8 +207,7 @@ fn test_full_push_pull_cycle() {
     create_test_filter_config(config_dir.path()).unwrap();
 
     // Isolate config directory for tests (works on all platforms including macOS)
-    std::env::set_var(CONFIG_DIR_ENV, config_dir.path());
-    let _config_env = ConfigEnvGuard;
+    let _config_env = ConfigEnvGuard::set(config_dir.path());
 
     // Discover sessions from test data
     let original_sessions = discover_test_sessions(&claude_projects_dir).unwrap();
@@ -335,11 +369,11 @@ fn test_recycled_claude_revision_is_suppressed_until_remote_changes() {
     let previous_home = std::env::var_os("HOME");
     let _home_guard = HomeEnvGuard(previous_home);
     std::env::set_var("HOME", home_dir.path());
-    std::env::set_var(CONFIG_DIR_ENV, config_dir.path());
+    let _config_env = ConfigEnvGuard::set(config_dir.path());
 
     let local_projects = home_dir.path().join(".claude/projects");
     let remote_projects = repo_dir.path().join("projects/project");
-    fs::create_dir_all(local_projects.join("project")).unwrap();
+    fs::create_dir_all(&local_projects).unwrap();
     fs::create_dir_all(&remote_projects).unwrap();
 
     let session_id = "session-suppressed";
@@ -394,7 +428,15 @@ fn test_recycled_claude_revision_is_suppressed_until_remote_changes() {
     assert!(!local_projects
         .join("project/session-suppressed.jsonl")
         .exists());
+    let state_after_skip: serde_json::Value = serde_json::from_slice(
+        &fs::read(config_dir.path().join("session-maintenance.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(state_after_skip["entries"]
+        .get(format!("claude:{session_id}"))
+        .is_some());
 
+    fs::create_dir_all(local_projects.join("project")).unwrap();
     let changed = format!(
         "{original}{{\"type\":\"user\",\"sessionId\":\"{session_id}\",\"cwd\":\"/workspace/project\",\"timestamp\":\"2026-08-08T12:01:00Z\",\"message\":{{\"role\":\"user\",\"content\":\"new remote revision\"}}}}\n"
     );
@@ -419,6 +461,83 @@ fn test_recycled_claude_revision_is_suppressed_until_remote_changes() {
     assert!(saved_state["entries"]
         .get(format!("claude:{session_id}"))
         .is_none());
+}
+
+#[test]
+#[serial]
+fn test_protected_suppressed_missing_session_survives_push_policies_without_tombstone() {
+    let home_dir = TempDir::new().unwrap();
+    let config_dir = TempDir::new().unwrap();
+    let repo_dir = TempDir::new().unwrap();
+    let _home_guard = HomeEnvGuard(std::env::var_os("HOME"));
+    std::env::set_var("HOME", home_dir.path());
+    let _config_env = ConfigEnvGuard::set(config_dir.path());
+
+    let local_projects = home_dir.path().join(".claude/projects");
+    let remote_projects = repo_dir.path().join("projects/project");
+    fs::create_dir_all(&local_projects).unwrap();
+    fs::create_dir_all(&remote_projects).unwrap();
+
+    let session_id = "session-protected";
+    let content = format!(
+        "{{\"type\":\"user\",\"uuid\":\"u1\",\"sessionId\":\"{session_id}\",\"cwd\":\"/workspace/project\",\"timestamp\":\"2026-08-08T12:00:00Z\",\"message\":{{\"role\":\"user\",\"content\":\"protected\"}}}}\n{{\"type\":\"assistant\",\"uuid\":\"a1\",\"sessionId\":\"{session_id}\",\"timestamp\":\"2026-08-08T12:00:01Z\",\"message\":{{\"role\":\"assistant\",\"content\":\"reply\"}}}}\n"
+    );
+    let remote_file = remote_projects.join(format!("{session_id}.jsonl"));
+    fs::write(&remote_file, &content).unwrap();
+
+    let repo = scm::init(repo_dir.path()).unwrap();
+    repo.stage_all().unwrap();
+    repo.commit("remote protected session").unwrap();
+    create_test_sync_state(repo_dir.path(), config_dir.path()).unwrap();
+
+    let fingerprint = claude_code_sync::session_cache::fingerprint_file(&remote_file)
+        .unwrap()
+        .digest;
+    let state = serde_json::json!({
+        "version": 1,
+        "entries": {
+            format!("claude:{session_id}"): {
+                "identity": {"source": "claude", "session_id": session_id},
+                "original_relative_path": "project/session-protected.jsonl",
+                "project_name": "project",
+                "fingerprint": fingerprint,
+                "lifecycle": "recycled",
+                "classifier_version": 1,
+                "score": 100,
+                "reason_codes": [],
+                "hidden_since": null,
+                "recycled_at": null,
+                "purged_at": null,
+                "keep": false,
+                "explicit_test": false
+            }
+        },
+        "pending": null
+    });
+    fs::write(
+        config_dir.path().join("session-maintenance.json"),
+        serde_json::to_vec_pretty(&state).unwrap(),
+    )
+    .unwrap();
+
+    for unlock in [false, true] {
+        if unlock {
+            claude_code_sync::sync::delete_unlock::unlock(15).unwrap();
+        }
+        claude_code_sync::sync::push_history(
+            None,
+            false,
+            None,
+            false,
+            false,
+            false,
+            false,
+            claude_code_sync::VerbosityLevel::Quiet,
+        )
+        .unwrap();
+        assert!(remote_file.is_file());
+        assert!(!repo_dir.path().join(".ccs/deletions.json").exists());
+    }
 }
 
 #[test]

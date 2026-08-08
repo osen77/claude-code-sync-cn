@@ -104,11 +104,31 @@ impl MaintenanceState {
             })
     }
 
-    /// Remove a Claude suppression entry after a new remote revision is accepted.
-    pub(crate) fn clear_suppression(&mut self, identity: &SessionIdentity) {
-        if identity.source == SessionSource::Claude {
-            self.entries.remove(&identity_key(identity));
+    /// Remove a suppression only when the exact observed entry is still current.
+    pub(crate) fn clear_suppression_if_matches(
+        &mut self,
+        identity: &SessionIdentity,
+        expected_fingerprint: &str,
+        expected_lifecycle: LifecycleState,
+    ) -> bool {
+        if identity.source != SessionSource::Claude {
+            return false;
         }
+        let key = identity_key(identity);
+        let matches = self.entries.get(&key).is_some_and(|entry| {
+            entry.identity == *identity
+                && entry.identity.source == SessionSource::Claude
+                && entry.fingerprint == expected_fingerprint
+                && entry.lifecycle == expected_lifecycle
+                && matches!(
+                    entry.lifecycle,
+                    LifecycleState::Recycled | LifecycleState::PurgedLocal
+                )
+        });
+        if matches {
+            self.entries.remove(&key);
+        }
+        matches
     }
 }
 
@@ -482,6 +502,49 @@ mod tests {
             reconcile_fingerprint(&entry, "new"),
             LifecycleTransition::RestoreVisible
         );
+    }
+
+    #[test]
+    fn suppression_clear_is_compare_and_swap() {
+        let entry = recycled_entry(now());
+        let mut state = MaintenanceState::default();
+        state
+            .entries
+            .insert(identity_key(&entry.identity), entry.clone());
+
+        let mut changed_fingerprint = entry.clone();
+        changed_fingerprint.fingerprint = "newer".to_string();
+        state
+            .entries
+            .insert(identity_key(&entry.identity), changed_fingerprint);
+        assert!(!state.clear_suppression_if_matches(
+            &entry.identity,
+            "fingerprint",
+            LifecycleState::Recycled,
+        ));
+        assert!(state.entries.contains_key(&identity_key(&entry.identity)));
+
+        let mut changed_lifecycle = entry.clone();
+        changed_lifecycle.lifecycle = LifecycleState::Visible;
+        state
+            .entries
+            .insert(identity_key(&entry.identity), changed_lifecycle);
+        assert!(!state.clear_suppression_if_matches(
+            &entry.identity,
+            "fingerprint",
+            LifecycleState::Recycled,
+        ));
+        assert!(state.entries.contains_key(&identity_key(&entry.identity)));
+
+        state
+            .entries
+            .insert(identity_key(&entry.identity), entry.clone());
+        assert!(state.clear_suppression_if_matches(
+            &entry.identity,
+            "fingerprint",
+            LifecycleState::Recycled,
+        ));
+        assert!(!state.entries.contains_key(&identity_key(&entry.identity)));
     }
 
     #[test]

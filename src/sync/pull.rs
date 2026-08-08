@@ -21,11 +21,102 @@ use crate::path_security::{
 use crate::report::{save_conflict_report, ConflictReport};
 use crate::scm;
 use crate::session_cache::fingerprint_file;
+use crate::session_maintenance::state::{LifecycleState, StateStore};
 use crate::session_maintenance::{suppression_for_remote, SuppressionDecision};
 use crate::session_model::{SessionIdentity, SessionSource};
 use crate::sync::tombstone::TombstoneRegistry;
 use crate::undo::Snapshot;
 use crate::BINARY_NAME;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingSuppressionClear {
+    identity: SessionIdentity,
+    expected_fingerprint: String,
+    expected_lifecycle: LifecycleState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SuppressionRevalidation {
+    NotSuppressed,
+    SkipSameRevision,
+    Restore(PendingSuppressionClear),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SuppressionApplyOutcome {
+    Written,
+    Unchanged,
+    SkippedNoLocalProject,
+    Cancelled,
+    WriteFailed,
+}
+
+fn should_clear_suppression(outcome: SuppressionApplyOutcome) -> bool {
+    matches!(
+        outcome,
+        SuppressionApplyOutcome::Written | SuppressionApplyOutcome::Unchanged
+    )
+}
+
+fn revalidate_suppression_for_remote(
+    store: &StateStore,
+    identity: &SessionIdentity,
+    remote_fingerprint: &str,
+) -> anyhow::Result<SuppressionRevalidation> {
+    store.transaction(|locked| {
+        let Some(entry) =
+            crate::session_maintenance::maintenance_state_for(&locked.state, identity)
+        else {
+            return Ok(SuppressionRevalidation::NotSuppressed);
+        };
+        match suppression_for_remote(&locked.state, identity, remote_fingerprint) {
+            SuppressionDecision::NotSuppressed => Ok(SuppressionRevalidation::NotSuppressed),
+            SuppressionDecision::SkipSameRevision => Ok(SuppressionRevalidation::SkipSameRevision),
+            SuppressionDecision::RestoreNewRevision => {
+                Ok(SuppressionRevalidation::Restore(PendingSuppressionClear {
+                    identity: identity.clone(),
+                    expected_fingerprint: entry.fingerprint.clone(),
+                    expected_lifecycle: entry.lifecycle,
+                }))
+            }
+        }
+    })
+}
+
+fn clear_pending_suppression_after_outcome(
+    store: Option<&StateStore>,
+    pending: &HashMap<SessionIdentity, PendingSuppressionClear>,
+    identity: &SessionIdentity,
+    outcome: SuppressionApplyOutcome,
+) {
+    if !should_clear_suppression(outcome) {
+        return;
+    }
+    let (Some(store), Some(token)) = (store, pending.get(identity)) else {
+        return;
+    };
+    match store.transaction(|locked| {
+        let cleared = locked.state.clear_suppression_if_matches(
+            &token.identity,
+            &token.expected_fingerprint,
+            token.expected_lifecycle,
+        );
+        if cleared {
+            locked.persist()?;
+        }
+        Ok(cleared)
+    }) {
+        Ok(true) => {}
+        Ok(false) => log::debug!(
+            "Suppression clear skipped because maintenance state changed for {}",
+            identity.session_id
+        ),
+        Err(error) => log::warn!(
+            "Failed to clear suppression after successful session restore safely: {}",
+            error
+        ),
+    }
+}
 
 use super::discovery::{
     claude_projects_dir, discover_sessions, find_local_project_by_name, warn_large_files,
@@ -340,6 +431,7 @@ pub fn pull_history(
         }
     };
     let mut suppressed_remote_count = 0usize;
+    let mut pending_suppression_clears = HashMap::new();
     let mut remote_sessions = Vec::with_capacity(discovered_remote_sessions.len());
     for remote_session in discovered_remote_sessions {
         let identity = SessionIdentity {
@@ -370,18 +462,28 @@ pub fn pull_history(
                 suppressed_remote_count += 1;
             }
             SuppressionDecision::RestoreNewRevision => {
-                if let Some(store) = maintenance_store.as_ref() {
-                    if let Err(error) = store.update(|state| {
-                        state.clear_suppression(&identity);
-                        Ok(())
-                    }) {
+                let revalidated = maintenance_store
+                    .as_ref()
+                    .map(|store| revalidate_suppression_for_remote(store, &identity, &fingerprint));
+                match revalidated {
+                    Some(Ok(SuppressionRevalidation::SkipSameRevision)) => {
+                        suppressed_remote_count += 1;
+                    }
+                    Some(Ok(SuppressionRevalidation::Restore(token))) => {
+                        pending_suppression_clears.insert(identity, token);
+                        remote_sessions.push(remote_session);
+                    }
+                    Some(Ok(SuppressionRevalidation::NotSuppressed)) | None => {
+                        remote_sessions.push(remote_session);
+                    }
+                    Some(Err(error)) => {
                         log::warn!(
-                            "Failed to clear remote revision suppression safely: {}",
+                            "Failed to revalidate remote suppression safely; restoring it without clearing state: {}",
                             error
                         );
+                        remote_sessions.push(remote_session);
                     }
                 }
-                remote_sessions.push(remote_session);
             }
             SuppressionDecision::NotSuppressed => remote_sessions.push(remote_session),
         }
@@ -511,6 +613,14 @@ pub fn pull_history(
 
         if !confirm {
             println!("\n{}", "Pull cancelled.".yellow());
+            for token in pending_suppression_clears.values() {
+                clear_pending_suppression_after_outcome(
+                    maintenance_store.as_ref(),
+                    &pending_suppression_clears,
+                    &token.identity,
+                    SuppressionApplyOutcome::Cancelled,
+                );
+            }
             return Ok(());
         }
     }
@@ -584,6 +694,16 @@ pub fn pull_history(
                                     conflict.session_id,
                                     e
                                 );
+                                let identity = SessionIdentity {
+                                    source: SessionSource::Claude,
+                                    session_id: conflict.session_id.clone(),
+                                };
+                                clear_pending_suppression_after_outcome(
+                                    maintenance_store.as_ref(),
+                                    &pending_suppression_clears,
+                                    &identity,
+                                    SuppressionApplyOutcome::WriteFailed,
+                                );
                                 smart_merge_failed_conflicts.push(conflict.clone());
                             } else {
                                 println!(
@@ -595,12 +715,32 @@ pub fn pull_history(
                                     stats.merged_messages,
                                     stats.branches_detected
                                 );
+                                let identity = SessionIdentity {
+                                    source: SessionSource::Claude,
+                                    session_id: conflict.session_id.clone(),
+                                };
+                                clear_pending_suppression_after_outcome(
+                                    maintenance_store.as_ref(),
+                                    &pending_suppression_clears,
+                                    &identity,
+                                    SuppressionApplyOutcome::Written,
+                                );
                             }
                         }
                     }
                     Err(e) => {
                         log::warn!("Smart merge failed for {}: {}", conflict.session_id, e);
                         log::info!("Falling back to manual resolution...");
+                        let identity = SessionIdentity {
+                            source: SessionSource::Claude,
+                            session_id: conflict.session_id.clone(),
+                        };
+                        clear_pending_suppression_after_outcome(
+                            maintenance_store.as_ref(),
+                            &pending_suppression_clears,
+                            &identity,
+                            SuppressionApplyOutcome::WriteFailed,
+                        );
                         smart_merge_failed_conflicts.push(conflict.clone());
                     }
                 }
@@ -644,6 +784,24 @@ pub fn pull_history(
                     &remote_projects_dir,
                 )?;
 
+                for conflict in resolution_result
+                    .smart_merge
+                    .iter()
+                    .chain(resolution_result.keep_remote.iter())
+                    .chain(resolution_result.keep_both.iter())
+                {
+                    let identity = SessionIdentity {
+                        source: SessionSource::Claude,
+                        session_id: conflict.session_id.clone(),
+                    };
+                    clear_pending_suppression_after_outcome(
+                        maintenance_store.as_ref(),
+                        &pending_suppression_clears,
+                        &identity,
+                        SuppressionApplyOutcome::Written,
+                    );
+                }
+
                 // Save conflict report
                 let report = ConflictReport::from_conflicts(detector.conflicts());
                 save_conflict_report(&report)?;
@@ -657,6 +815,7 @@ pub fn pull_history(
                 );
 
                 let mut renames = Vec::new();
+                let mut successful_keep_both_ids = Vec::new();
 
                 println!("\n{}", "Conflict Resolution:".yellow().bold());
                 for conflict in &smart_merge_failed_conflicts {
@@ -686,10 +845,24 @@ pub fn pull_history(
                                 &claude_dir,
                                 renamed_relative,
                             )?;
+                            successful_keep_both_ids.push(conflict.session_id.clone());
                         }
 
                         renames.push((conflict.remote_file.clone(), renamed_path));
                     }
+                }
+
+                for session_id in successful_keep_both_ids {
+                    let identity = SessionIdentity {
+                        source: SessionSource::Claude,
+                        session_id,
+                    };
+                    clear_pending_suppression_after_outcome(
+                        maintenance_store.as_ref(),
+                        &pending_suppression_clears,
+                        &identity,
+                        SuppressionApplyOutcome::Written,
+                    );
                 }
 
                 // Save conflict report
@@ -794,6 +967,16 @@ pub fn pull_history(
                     project_name
                 );
                 skipped_no_local_match += 1;
+                let identity = SessionIdentity {
+                    source: SessionSource::Claude,
+                    session_id: remote_session.session_id.clone(),
+                };
+                clear_pending_suppression_after_outcome(
+                    maintenance_store.as_ref(),
+                    &pending_suppression_clears,
+                    &identity,
+                    SuppressionApplyOutcome::SkippedNoLocalProject,
+                );
                 continue;
             };
             validate_directory_candidate(&claude_dir, &local_project_dir)?;
@@ -804,6 +987,16 @@ pub fn pull_history(
                     remote_relative
                 );
                 skipped_no_local_match += 1;
+                let identity = SessionIdentity {
+                    source: SessionSource::Claude,
+                    session_id: remote_session.session_id.clone(),
+                };
+                clear_pending_suppression_after_outcome(
+                    maintenance_store.as_ref(),
+                    &pending_suppression_clears,
+                    &identity,
+                    SuppressionApplyOutcome::SkippedNoLocalProject,
+                );
                 continue;
             };
             let local_project_relative = local_project_dir
@@ -817,7 +1010,21 @@ pub fn pull_history(
                 .to_path_buf()
         };
 
-        prepare_local_session_destination(&claude_dir, &relative_path_for_tracking)?;
+        if let Err(error) =
+            prepare_local_session_destination(&claude_dir, &relative_path_for_tracking)
+        {
+            let identity = SessionIdentity {
+                source: SessionSource::Claude,
+                session_id: remote_session.session_id.clone(),
+            };
+            clear_pending_suppression_after_outcome(
+                maintenance_store.as_ref(),
+                &pending_suppression_clears,
+                &identity,
+                SuppressionApplyOutcome::WriteFailed,
+            );
+            return Err(error);
+        }
 
         // Determine operation type based on local state
         let operation = if let Some(local) = local_map.get(&remote_session.session_id) {
@@ -835,13 +1042,40 @@ pub fn pull_history(
 
         // Copy file if it's not unchanged
         if operation != SyncOperation::Unchanged {
-            write_session_within_local_root(
+            if let Err(error) = write_session_within_local_root(
                 remote_session,
                 &claude_dir,
                 &relative_path_for_tracking,
-            )?;
+            ) {
+                let identity = SessionIdentity {
+                    source: SessionSource::Claude,
+                    session_id: remote_session.session_id.clone(),
+                };
+                clear_pending_suppression_after_outcome(
+                    maintenance_store.as_ref(),
+                    &pending_suppression_clears,
+                    &identity,
+                    SuppressionApplyOutcome::WriteFailed,
+                );
+                return Err(error);
+            }
             merged_count += 1;
         }
+
+        let identity = SessionIdentity {
+            source: SessionSource::Claude,
+            session_id: remote_session.session_id.clone(),
+        };
+        clear_pending_suppression_after_outcome(
+            maintenance_store.as_ref(),
+            &pending_suppression_clears,
+            &identity,
+            if operation == SyncOperation::Unchanged {
+                SuppressionApplyOutcome::Unchanged
+            } else {
+                SuppressionApplyOutcome::Written
+            },
+        );
 
         // Track all sessions (including unchanged) in affected conversations
         let relative_path_str = relative_path_for_tracking.to_string_lossy().to_string();
@@ -1074,6 +1308,165 @@ mod tests {
                 crate::session_maintenance::SuppressionDecision::NotSuppressed
             );
         }
+    }
+
+    #[test]
+    fn changed_revision_rechecks_latest_state_before_restore() {
+        use crate::session_maintenance::state::{
+            identity_key, LifecycleState, MaintenanceEntry, StateStore,
+        };
+        use crate::session_model::{SessionIdentity, SessionSource};
+        use std::path::PathBuf;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = StateStore::from_config_dir(temp.path());
+        let identity = SessionIdentity {
+            source: SessionSource::Claude,
+            session_id: "session-recheck".to_string(),
+        };
+        store
+            .update(|state| {
+                state.entries.insert(
+                    identity_key(&identity),
+                    MaintenanceEntry {
+                        identity: identity.clone(),
+                        original_relative_path: PathBuf::from("project/session-recheck.jsonl"),
+                        project_name: "project".to_string(),
+                        fingerprint: "old".to_string(),
+                        lifecycle: LifecycleState::Recycled,
+                        classifier_version: 1,
+                        score: 0,
+                        reason_codes: vec![],
+                        hidden_since: None,
+                        recycled_at: None,
+                        purged_at: None,
+                        keep: false,
+                        explicit_test: false,
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+
+        assert_eq!(
+            revalidate_suppression_for_remote(&store, &identity, "new").unwrap(),
+            SuppressionRevalidation::Restore(PendingSuppressionClear {
+                identity: identity.clone(),
+                expected_fingerprint: "old".to_string(),
+                expected_lifecycle: LifecycleState::Recycled,
+            })
+        );
+
+        store
+            .update(|state| {
+                state
+                    .entries
+                    .get_mut(&identity_key(&identity))
+                    .unwrap()
+                    .fingerprint = "new".to_string();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            revalidate_suppression_for_remote(&store, &identity, "new").unwrap(),
+            SuppressionRevalidation::SkipSameRevision
+        );
+    }
+
+    #[test]
+    fn cancelled_pull_keeps_suppression_pending() {
+        assert!(!should_clear_suppression(
+            SuppressionApplyOutcome::Cancelled
+        ));
+    }
+
+    #[test]
+    fn missing_project_keeps_suppression_pending() {
+        assert!(!should_clear_suppression(
+            SuppressionApplyOutcome::SkippedNoLocalProject
+        ));
+    }
+
+    #[test]
+    fn merge_write_failure_keeps_suppression_pending() {
+        assert!(!should_clear_suppression(
+            SuppressionApplyOutcome::WriteFailed
+        ));
+    }
+
+    #[test]
+    fn successful_active_write_clears_suppression_pending() {
+        assert!(should_clear_suppression(SuppressionApplyOutcome::Written));
+        assert!(should_clear_suppression(SuppressionApplyOutcome::Unchanged));
+    }
+
+    #[test]
+    fn suppression_clear_happens_only_after_successful_active_outcome() {
+        use crate::session_maintenance::state::{
+            identity_key, LifecycleState, MaintenanceEntry, StateStore,
+        };
+        use std::path::PathBuf;
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = StateStore::from_config_dir(temp.path());
+        let identity = SessionIdentity {
+            source: SessionSource::Claude,
+            session_id: "session-boundary".to_string(),
+        };
+        store
+            .update(|state| {
+                state.entries.insert(
+                    identity_key(&identity),
+                    MaintenanceEntry {
+                        identity: identity.clone(),
+                        original_relative_path: PathBuf::from("project/session-boundary.jsonl"),
+                        project_name: "project".to_string(),
+                        fingerprint: "old".to_string(),
+                        lifecycle: LifecycleState::Recycled,
+                        classifier_version: 1,
+                        score: 0,
+                        reason_codes: vec![],
+                        hidden_since: None,
+                        recycled_at: None,
+                        purged_at: None,
+                        keep: false,
+                        explicit_test: false,
+                    },
+                );
+                Ok(())
+            })
+            .unwrap();
+        let token = PendingSuppressionClear {
+            identity: identity.clone(),
+            expected_fingerprint: "old".to_string(),
+            expected_lifecycle: LifecycleState::Recycled,
+        };
+        let mut pending = HashMap::new();
+        pending.insert(identity.clone(), token);
+
+        for outcome in [
+            SuppressionApplyOutcome::Cancelled,
+            SuppressionApplyOutcome::SkippedNoLocalProject,
+            SuppressionApplyOutcome::WriteFailed,
+        ] {
+            clear_pending_suppression_after_outcome(Some(&store), &pending, &identity, outcome);
+            assert!(store
+                .load()
+                .unwrap()
+                .entries
+                .contains_key(&identity_key(&identity)));
+        }
+        clear_pending_suppression_after_outcome(
+            Some(&store),
+            &pending,
+            &identity,
+            SuppressionApplyOutcome::Written,
+        );
+        assert!(!store
+            .load()
+            .unwrap()
+            .entries
+            .contains_key(&identity_key(&identity)));
     }
 
     #[test]
