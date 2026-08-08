@@ -470,7 +470,7 @@ fn reconcile_restore(
     let staging = safe_join_within_root(&roots.recycle, &pending.staging_relative_path)?;
     let final_path = safe_join_within_root(&roots.recycle, &pending.recycle_relative_path)?;
     let source_state = inspect_file(source_root, &destination, &pending.expected_fingerprint)?;
-    let staging_state = inspect_file(&roots.recycle, &staging, &pending.expected_fingerprint)?;
+    let mut staging_state = inspect_file(&roots.recycle, &staging, &pending.expected_fingerprint)?;
     let final_state = inspect_file(&roots.recycle, &final_path, &pending.expected_fingerprint)?;
 
     if let (Some(source_fp), Some(final_fp)) = (&source_state, &final_state) {
@@ -485,6 +485,16 @@ fn reconcile_restore(
     }
     if source_state.is_none() && final_state.is_none() && staging_state.is_none() {
         anyhow::bail!("pending restore has no recoverable source or target")
+    }
+    if source_state.is_some() && staging_state.is_some() && final_state.is_none() {
+        maybe_replace_restore_staging_for_test(&staging)?;
+        verify_regular_fingerprint_within_root(
+            &roots.recycle,
+            &staging,
+            &pending.expected_fingerprint,
+        )?;
+        remove_verified(&roots.recycle, &staging, &pending.expected_fingerprint)?;
+        staging_state = None;
     }
     if source_state.is_none() {
         if staging_state.is_some() && final_state.is_none() {
@@ -943,6 +953,8 @@ thread_local! {
     static FORCE_SOURCE_TO_STAGING_SYMLINK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FORCE_COPY_FINAL_SYMLINK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FORCE_RESTORE_DESTINATION_SYMLINK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FORCE_RESTORE_STAGING_REGULAR_REPLACEMENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FORCE_RESTORE_STAGING_SYMLINK_REPLACEMENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn noop_no_clobber_hook(_source: &Path, _destination: &Path) -> Result<()> {
@@ -1049,6 +1061,24 @@ fn maybe_replace_restore_destination_for_test(path: &Path) -> Result<()> {
     #[cfg(test)]
     if FORCE_RESTORE_DESTINATION_REPLACEMENT.with(std::cell::Cell::get) {
         fs::write(path, b"changed during restore")?;
+    }
+    let _ = path;
+    Ok(())
+}
+
+fn maybe_replace_restore_staging_for_test(path: &Path) -> Result<()> {
+    #[cfg(test)]
+    {
+        if FORCE_RESTORE_STAGING_REGULAR_REPLACEMENT.with(std::cell::Cell::get) {
+            fs::write(path, b"changed staging")?;
+        }
+        #[cfg(unix)]
+        if FORCE_RESTORE_STAGING_SYMLINK_REPLACEMENT.with(std::cell::Cell::get) {
+            let target = path.with_file_name("restore-staging-race-outside.jsonl");
+            fs::write(&target, b"outside staging")?;
+            fs::remove_file(path)?;
+            std::os::unix::fs::symlink(target, path)?;
+        }
     }
     let _ = path;
     Ok(())
@@ -1693,6 +1723,65 @@ mod tests {
         assert!(fixture.source_file.exists());
         assert!(!fixture.recycle_file().exists());
         assert_eq!(fixture.load_entry().lifecycle, LifecycleState::Visible);
+    }
+
+    #[test]
+    fn reconcile_restore_source_and_staging_without_final_cleans_staging_and_is_idempotent() {
+        let fixture = RecycleFixture::new(SessionSource::Claude);
+        recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now).unwrap();
+        fs::copy(fixture.recycle_file(), &fixture.source_file).unwrap();
+        fs::remove_file(fixture.recycle_file()).unwrap();
+        fixture.set_pending_restore();
+        fs::create_dir_all(fixture.staging_file().parent().unwrap()).unwrap();
+        fs::copy(&fixture.source_file, fixture.staging_file()).unwrap();
+        reconcile_pending(&fixture.store, &fixture.roots, fixture.now).unwrap();
+        assert!(fixture.source_file.exists());
+        assert!(!fixture.staging_file().exists());
+        assert_eq!(fixture.load_entry().lifecycle, LifecycleState::Visible);
+        assert!(fixture.store.load().unwrap().pending.is_none());
+        reconcile_pending(&fixture.store, &fixture.roots, fixture.now).unwrap();
+        assert!(fixture.source_file.exists());
+        assert!(!fixture.staging_file().exists());
+    }
+
+    #[test]
+    fn reconcile_restore_source_and_staging_replacement_keeps_pending() {
+        let fixture = RecycleFixture::new(SessionSource::Codex);
+        recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now).unwrap();
+        fs::copy(fixture.recycle_file(), &fixture.source_file).unwrap();
+        fs::remove_file(fixture.recycle_file()).unwrap();
+        fixture.set_pending_restore();
+        fs::create_dir_all(fixture.staging_file().parent().unwrap()).unwrap();
+        fs::copy(&fixture.source_file, fixture.staging_file()).unwrap();
+        FORCE_RESTORE_STAGING_REGULAR_REPLACEMENT.with(|flag| flag.set(true));
+        let result = reconcile_pending(&fixture.store, &fixture.roots, fixture.now);
+        FORCE_RESTORE_STAGING_REGULAR_REPLACEMENT.with(|flag| flag.set(false));
+        assert!(result.is_err());
+        assert!(fixture.source_file.exists());
+        assert_eq!(
+            fs::read(fixture.staging_file()).unwrap(),
+            b"changed staging"
+        );
+        assert!(fixture.store.load().unwrap().pending.is_some());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn reconcile_restore_source_and_staging_symlink_keeps_pending() {
+        let fixture = RecycleFixture::new(SessionSource::Omp);
+        recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now).unwrap();
+        fs::copy(fixture.recycle_file(), &fixture.source_file).unwrap();
+        fs::remove_file(fixture.recycle_file()).unwrap();
+        fixture.set_pending_restore();
+        fs::create_dir_all(fixture.staging_file().parent().unwrap()).unwrap();
+        fs::copy(&fixture.source_file, fixture.staging_file()).unwrap();
+        FORCE_RESTORE_STAGING_SYMLINK_REPLACEMENT.with(|flag| flag.set(true));
+        let result = reconcile_pending(&fixture.store, &fixture.roots, fixture.now);
+        FORCE_RESTORE_STAGING_SYMLINK_REPLACEMENT.with(|flag| flag.set(false));
+        assert!(result.is_err());
+        assert!(fixture.source_file.exists());
+        assert!(fixture.staging_file().is_symlink());
+        assert!(fixture.store.load().unwrap().pending.is_some());
     }
 
     #[test]

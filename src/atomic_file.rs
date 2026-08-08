@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use fs4::FileExt;
 use serde::Serialize;
 #[cfg(test)]
@@ -14,6 +14,7 @@ pub(crate) struct FileLock {
 
 impl FileLock {
     pub(crate) fn acquire(lock_path: &Path) -> Result<Self> {
+        reject_lock_symlink_if_present(lock_path)?;
         let parent = lock_path.parent().context("lock path has no parent")?;
         std::fs::create_dir_all(parent)?;
         let mut options = OpenOptions::new();
@@ -21,9 +22,11 @@ impl FileLock {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NOFOLLOW);
             options.mode(0o600);
         }
         let file = options.open(lock_path)?;
+        validate_open_lock_path(lock_path)?;
         set_private_permissions(lock_path)?;
         FileExt::lock(&file)?;
         Ok(Self { file })
@@ -34,6 +37,34 @@ impl Drop for FileLock {
     fn drop(&mut self) {
         let _ = FileExt::unlock(&self.file);
     }
+}
+
+fn reject_lock_symlink_if_present(lock_path: &Path) -> Result<()> {
+    match std::fs::symlink_metadata(lock_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            bail!("lock path must not be a symlink: {}", lock_path.display())
+        }
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error)
+            .with_context(|| format!("failed to inspect lock path: {}", lock_path.display())),
+    }
+}
+
+fn validate_open_lock_path(lock_path: &Path) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(lock_path).with_context(|| {
+        format!(
+            "failed to inspect opened lock path: {}",
+            lock_path.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() {
+        bail!(
+            "lock path became a symlink while opening: {}",
+            lock_path.display()
+        )
+    }
+    Ok(())
 }
 
 pub(crate) fn persist_json_atomic<T: Serialize>(target: &Path, value: &T) -> Result<()> {
@@ -172,5 +203,19 @@ mod tests {
         assert!(!waiter.is_finished());
         drop(first);
         drop(waiter.join().unwrap());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn file_lock_rejects_symlink_without_touching_state() {
+        let dir = tempdir().unwrap();
+        let state_path = dir.path().join("session-maintenance.json");
+        let lock_path = dir.path().join("session-maintenance.lock");
+        let original = br#"{\"version\":1}"#;
+        std::fs::write(&state_path, original).unwrap();
+        std::os::unix::fs::symlink(&state_path, &lock_path).unwrap();
+
+        assert!(FileLock::acquire(&lock_path).is_err());
+        assert_eq!(std::fs::read(&state_path).unwrap(), original);
     }
 }
