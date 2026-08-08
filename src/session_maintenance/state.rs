@@ -5,9 +5,9 @@ use crate::session_model::SessionIdentity;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 const STATE_VERSION: u32 = 1;
 
@@ -118,7 +118,8 @@ pub(crate) fn next_lifecycle(
     }
 
     match entry.lifecycle {
-        LifecycleState::Visible | LifecycleState::PurgedLocal => LifecycleTransition::NoChange,
+        LifecycleState::Visible => LifecycleTransition::Hide,
+        LifecycleState::PurgedLocal => LifecycleTransition::NoChange,
         LifecycleState::Hidden => {
             if elapsed_at_least(entry.hidden_since, now, settings.recycle_after_days) {
                 LifecycleTransition::Recycle
@@ -127,7 +128,7 @@ pub(crate) fn next_lifecycle(
             }
         }
         LifecycleState::Recycled => {
-            if elapsed_at_least(entry.recycled_at, now, settings.purge_after_days) {
+            if elapsed_at_least(entry.hidden_since, now, settings.purge_after_days) {
                 LifecycleTransition::PurgeLocal
             } else {
                 LifecycleTransition::NoChange
@@ -145,6 +146,82 @@ fn elapsed_at_least(start: Option<DateTime<Utc>>, now: DateTime<Utc>, days: u64)
     now.signed_duration_since(start) >= threshold
 }
 
+fn validate_state(state: &MaintenanceState) -> Result<()> {
+    if state.version != STATE_VERSION {
+        anyhow::bail!(
+            "unsupported maintenance state version {} (expected {})",
+            state.version,
+            STATE_VERSION
+        );
+    }
+
+    let mut identities = HashSet::with_capacity(state.entries.len());
+    for (key, entry) in &state.entries {
+        let expected_key = identity_key(&entry.identity);
+        if key != &expected_key {
+            anyhow::bail!(
+                "maintenance entry key {key:?} does not match identity key {expected_key:?}"
+            );
+        }
+        if !identities.insert(entry.identity.clone()) {
+            anyhow::bail!("duplicate maintenance entry identity {expected_key:?}");
+        }
+    }
+
+    if let Some(pending) = &state.pending {
+        let key = identity_key(&pending.identity);
+        let Some(entry) = state.entries.get(&key) else {
+            anyhow::bail!("pending operation has no matching entry {key:?}");
+        };
+        let lifecycle_matches = match pending.operation {
+            PendingOperationKind::Recycle => entry.lifecycle == LifecycleState::Hidden,
+            PendingOperationKind::Restore | PendingOperationKind::Purge => {
+                entry.lifecycle == LifecycleState::Recycled
+            }
+        };
+        if !lifecycle_matches {
+            anyhow::bail!(
+                "pending operation {:?} is incompatible with lifecycle {:?}",
+                pending.operation,
+                entry.lifecycle
+            );
+        }
+        validate_pending_path("source_relative_path", &pending.source_relative_path)?;
+        validate_pending_path("staging_relative_path", &pending.staging_relative_path)?;
+        validate_pending_path("recycle_relative_path", &pending.recycle_relative_path)?;
+    }
+    Ok(())
+}
+
+fn validate_pending_path(name: &str, path: &Path) -> Result<()> {
+    if path.as_os_str().is_empty() || path.is_absolute() {
+        anyhow::bail!("pending {name} must be a non-empty relative path");
+    }
+
+    let raw = path.to_string_lossy();
+    if raw.starts_with('\\') || raw.as_bytes().get(1).is_some_and(|byte| *byte == b':') {
+        anyhow::bail!("pending {name} must be a relative path");
+    }
+    for segment in raw.split(['/', '\\']) {
+        if segment == "." || segment == ".." {
+            anyhow::bail!("pending {name} cannot contain '.' or '..' components");
+        }
+    }
+    for component in path.components() {
+        if matches!(
+            component,
+            Component::CurDir | Component::ParentDir | Component::RootDir
+        ) {
+            anyhow::bail!("pending {name} contains an unsafe path component");
+        }
+        #[cfg(windows)]
+        if matches!(component, Component::Prefix(_)) {
+            anyhow::bail!("pending {name} contains a path prefix");
+        }
+    }
+    Ok(())
+}
+
 pub(crate) struct StateStore {
     state_path: PathBuf,
     lock_path: PathBuf,
@@ -157,6 +234,7 @@ pub(crate) struct LockedState<'a> {
 
 impl LockedState<'_> {
     pub(crate) fn persist(&self) -> Result<()> {
+        validate_state(&self.state)?;
         persist_json_atomic(&self.store.state_path, &self.state)
     }
 }
@@ -209,13 +287,8 @@ impl StateStore {
 
         let state: MaintenanceState = serde_json::from_slice(&bytes)
             .with_context(|| format!("invalid maintenance state {}", self.state_path.display()))?;
-        if state.version != STATE_VERSION {
-            anyhow::bail!(
-                "unsupported maintenance state version {} (expected {})",
-                state.version,
-                STATE_VERSION
-            );
-        }
+        validate_state(&state)
+            .with_context(|| format!("invalid maintenance state {}", self.state_path.display()))?;
         Ok(state)
     }
 }
@@ -282,6 +355,34 @@ mod tests {
         entry
     }
 
+    fn pending(identity: SessionIdentity, operation: PendingOperationKind) -> PendingOperation {
+        PendingOperation {
+            identity,
+            operation,
+            source_relative_path: PathBuf::from("project/session.jsonl"),
+            staging_relative_path: PathBuf::from("staging/session.jsonl"),
+            recycle_relative_path: PathBuf::from("recycle/session.jsonl"),
+            expected_fingerprint: "fingerprint".to_string(),
+        }
+    }
+
+    fn write_state(dir: &std::path::Path, state: &MaintenanceState) -> Vec<u8> {
+        let path = dir.join("session-maintenance.json");
+        persist_json_atomic(&path, state).unwrap();
+        std::fs::read(path).unwrap()
+    }
+
+    fn assert_invalid_state_is_rejected(state: MaintenanceState) {
+        let dir = tempdir().unwrap();
+        let original = write_state(dir.path(), &state);
+        let store = StateStore::from_config_dir(dir.path());
+        assert!(store.load().is_err());
+        assert_eq!(
+            std::fs::read(dir.path().join("session-maintenance.json")).unwrap(),
+            original
+        );
+    }
+
     #[test]
     fn first_match_only_enters_hidden_even_for_old_session() {
         let transition = next_lifecycle(None, &test_decision(), now(), &settings());
@@ -289,21 +390,59 @@ mod tests {
     }
 
     #[test]
-    fn hidden_entry_recycles_after_seven_days() {
-        let entry = hidden_entry(now() - Duration::days(7));
+    fn visible_candidate_restarts_lifecycle_with_hide() {
+        let mut entry = hidden_entry(now());
+        entry.lifecycle = LifecycleState::Visible;
         assert_eq!(
             next_lifecycle(Some(&entry), &test_decision(), now(), &settings()),
-            LifecycleTransition::Recycle
+            LifecycleTransition::Hide
         );
     }
 
     #[test]
-    fn hidden_entry_purges_only_after_thirty_days() {
-        let entry = recycled_entry(now() - Duration::days(30));
+    fn hidden_entry_recycles_at_seven_days_but_not_before() {
+        let exact = hidden_entry(now() - Duration::days(7));
         assert_eq!(
-            next_lifecycle(Some(&entry), &test_decision(), now(), &settings()),
+            next_lifecycle(Some(&exact), &test_decision(), now(), &settings()),
+            LifecycleTransition::Recycle
+        );
+
+        let just_before = hidden_entry(now() - Duration::days(7) + Duration::seconds(1));
+        assert_eq!(
+            next_lifecycle(Some(&just_before), &test_decision(), now(), &settings()),
+            LifecycleTransition::NoChange
+        );
+    }
+
+    #[test]
+    fn purge_uses_first_hidden_time_at_thirty_days_not_recycle_time() {
+        let mut exact = recycled_entry(now() - Duration::seconds(1));
+        exact.hidden_since = Some(now() - Duration::days(30));
+        assert_eq!(
+            next_lifecycle(Some(&exact), &test_decision(), now(), &settings()),
             LifecycleTransition::PurgeLocal
         );
+
+        let mut just_before = recycled_entry(now() - Duration::seconds(1));
+        just_before.hidden_since = Some(now() - Duration::days(30) + Duration::seconds(1));
+        assert_eq!(
+            next_lifecycle(Some(&just_before), &test_decision(), now(), &settings()),
+            LifecycleTransition::NoChange
+        );
+    }
+
+    #[test]
+    fn identity_key_keeps_sources_and_special_ids_distinct() {
+        let claude = SessionIdentity {
+            source: SessionSource::Claude,
+            session_id: "same:id/中文".to_string(),
+        };
+        let codex = SessionIdentity {
+            source: SessionSource::Codex,
+            session_id: claude.session_id.clone(),
+        };
+        assert_eq!(identity_key(&claude), "claude:same:id/中文");
+        assert_ne!(identity_key(&claude), identity_key(&codex));
     }
 
     #[test]
@@ -344,6 +483,117 @@ mod tests {
             next_lifecycle(None, &decision, now(), &settings()),
             LifecycleTransition::NoChange
         );
+    }
+
+    #[test]
+    fn state_rejects_map_key_that_does_not_match_identity() {
+        let entry = hidden_entry(now());
+        let mut state = MaintenanceState::default();
+        state.entries.insert("wrong-key".to_string(), entry);
+        assert_invalid_state_is_rejected(state);
+    }
+
+    #[test]
+    fn state_rejects_duplicate_identities() {
+        let first = hidden_entry(now());
+        let mut duplicate = first.clone();
+        duplicate.original_relative_path = PathBuf::from("project/other.jsonl");
+        let mut state = MaintenanceState::default();
+        state.entries.insert(identity_key(&first.identity), first);
+        state.entries.insert("duplicate-key".to_string(), duplicate);
+        assert_invalid_state_is_rejected(state);
+    }
+
+    #[test]
+    fn state_rejects_pending_identity_without_entry() {
+        let entry = hidden_entry(now());
+        let mut state = MaintenanceState::default();
+        state.entries.insert(identity_key(&entry.identity), entry);
+        state.pending = Some(pending(
+            SessionIdentity {
+                source: SessionSource::Claude,
+                session_id: "missing".to_string(),
+            },
+            PendingOperationKind::Recycle,
+        ));
+        assert_invalid_state_is_rejected(state);
+    }
+
+    #[test]
+    fn state_rejects_pending_operation_that_does_not_match_lifecycle() {
+        let entry = hidden_entry(now());
+        let mut state = MaintenanceState::default();
+        state
+            .entries
+            .insert(identity_key(&entry.identity), entry.clone());
+        for operation in [PendingOperationKind::Restore, PendingOperationKind::Purge] {
+            let mut invalid = state.clone();
+            invalid.pending = Some(pending(entry.identity.clone(), operation));
+            assert_invalid_state_is_rejected(invalid);
+        }
+
+        let mut recycled = entry;
+        recycled.lifecycle = LifecycleState::Recycled;
+        let mut invalid = MaintenanceState::default();
+        invalid
+            .entries
+            .insert(identity_key(&recycled.identity), recycled.clone());
+        invalid.pending = Some(pending(recycled.identity, PendingOperationKind::Recycle));
+        assert_invalid_state_is_rejected(invalid);
+    }
+
+    #[test]
+    fn state_rejects_absolute_dot_and_dotdot_pending_paths() {
+        let entry = hidden_entry(now());
+        let mut base = MaintenanceState::default();
+        base.entries
+            .insert(identity_key(&entry.identity), entry.clone());
+        for (field, path) in [
+            ("source", PathBuf::from("/absolute/session.jsonl")),
+            ("staging", PathBuf::from("./staging/session.jsonl")),
+            ("recycle", PathBuf::from("recycle/../session.jsonl")),
+            ("source", PathBuf::from(r"C:drive/session.jsonl")),
+        ] {
+            let mut invalid = base.clone();
+            let mut operation = pending(entry.identity.clone(), PendingOperationKind::Recycle);
+            match field {
+                "source" => operation.source_relative_path = path,
+                "staging" => operation.staging_relative_path = path,
+                "recycle" => operation.recycle_relative_path = path,
+                _ => unreachable!(),
+            }
+            invalid.pending = Some(operation);
+            assert_invalid_state_is_rejected(invalid);
+        }
+    }
+
+    #[test]
+    fn invalid_version_cannot_be_persisted_by_update() {
+        let dir = tempdir().unwrap();
+        let store = StateStore::from_config_dir(dir.path());
+        assert!(store
+            .update(|state| {
+                state.version = STATE_VERSION + 1;
+                Ok(())
+            })
+            .is_err());
+        assert!(!dir.path().join("session-maintenance.json").exists());
+    }
+
+    #[test]
+    fn locked_persist_rejects_invalid_state_without_writing() {
+        let dir = tempdir().unwrap();
+        let store = StateStore::from_config_dir(dir.path());
+        let entry = hidden_entry(now());
+        let result = store.transaction(|locked| {
+            locked
+                .state
+                .entries
+                .insert("wrong-key".to_string(), entry.clone());
+            locked.persist()
+        });
+        assert!(result.is_err());
+        assert!(!dir.path().join("session-maintenance.json").exists());
     }
 
     #[test]
@@ -411,22 +661,29 @@ mod tests {
         let mut second = first.clone();
         second.identity.session_id = "session-2".to_string();
 
-        store
+        let state_path = dir.path().join("session-maintenance.json");
+        let first_phase = store
             .transaction(|locked| {
                 locked
                     .state
                     .entries
                     .insert(identity_key(&first.identity), first.clone());
                 locked.persist()?;
+                let persisted = std::fs::read(&state_path)?;
                 locked
                     .state
                     .entries
                     .insert(identity_key(&second.identity), second.clone());
                 locked.persist()?;
-                Ok(())
+                Ok(persisted)
             })
             .unwrap();
 
+        let first_state: MaintenanceState = serde_json::from_slice(&first_phase).unwrap();
+        assert_eq!(first_state.entries.len(), 1);
+        assert!(first_state
+            .entries
+            .contains_key(&identity_key(&first.identity)));
         assert_eq!(store.load().unwrap().entries.len(), 2);
     }
 
