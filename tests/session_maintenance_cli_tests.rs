@@ -712,10 +712,10 @@ fn missing_claude_recycled_final_allows_remote_restore_fallback() {
     let recycled = fixture.write_recycled(
         "claude",
         "claude-fallback",
-        "-tmp-project/claude-fallback.jsonl",
-        "project",
+        "remote-project/claude-fallback.jsonl",
+        "remote-project",
         concat!(
-            r#"{"type":"user","sessionId":"claude-fallback","cwd":"/tmp/project","timestamp":"2026-08-02T00:00:00Z","message":{"role":"user","content":"recycled"}}"#,
+            r#"{"type":"user","sessionId":"claude-fallback","cwd":"/tmp/remote-project","timestamp":"2026-08-02T00:00:00Z","message":{"role":"user","content":"recycled"}}"#,
             "\n",
         ),
     );
@@ -730,11 +730,206 @@ fn missing_claude_recycled_final_allows_remote_restore_fallback() {
         "claude",
     ]);
     assert!(output.status.success(), "{}", stderr(&output));
-    assert!(fixture
+    let local_path = fixture
         .home
         .path()
-        .join(".claude/projects/remote-project/claude-fallback.jsonl")
-        .is_file());
+        .join(".claude/projects/remote-project/claude-fallback.jsonl");
+    assert!(local_path.is_file());
+    let local_bytes = fs::read(&local_path).expect("read restored local file");
+    let state: Value = serde_json::from_slice(
+        &fs::read(fixture.config.path().join("session-maintenance.json")).unwrap(),
+    )
+    .unwrap();
+    let entry = &state["entries"]["claude:claude-fallback"];
+    assert_eq!(entry["lifecycle"], "visible");
+    assert_eq!(entry["keep"], true);
+    assert!(entry["hidden_since"].is_null());
+    assert!(entry["recycled_at"].is_null());
+    assert!(entry["purged_at"].is_null());
+    assert_eq!(
+        entry["fingerprint"],
+        blake3::hash(&local_bytes).to_hex().to_string()
+    );
+}
+
+#[test]
+#[serial]
+fn purged_claude_missing_final_remote_fallback_finalizes_state() {
+    let fixture = Fixture::empty();
+    let remote_content = concat!(
+        r#"{"type":"user","sessionId":"purged-fallback","cwd":"/tmp/remote-project","timestamp":"2026-08-02T00:00:00Z","message":{"role":"user","content":"purged remote fallback"}}"#,
+        "\n",
+    );
+    let recycled = fixture.write_recycled(
+        "claude",
+        "purged-fallback",
+        "remote-project/purged-fallback.jsonl",
+        "remote-project",
+        remote_content,
+    );
+    fs::remove_file(recycled).expect("remove missing recycle copy");
+    let state_path = fixture.config.path().join("session-maintenance.json");
+    let mut state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    let entry = &mut state["entries"]["claude:purged-fallback"];
+    entry["lifecycle"] = Value::String("purged_local".to_string());
+    entry["project_name"] = Value::String(String::new());
+    entry["hidden_since"] = Value::Null;
+    entry["recycled_at"] = Value::Null;
+    entry["purged_at"] = Value::String("2026-08-08T12:00:00Z".to_string());
+    entry["explicit_test"] = Value::Bool(false);
+    fs::write(&state_path, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+    fixture.write_sync_repo("remote-project", "purged-fallback", remote_content);
+
+    let output = fixture.run(&[
+        "session",
+        "restore",
+        "purged-fallback",
+        "--source",
+        "claude",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let local_path = fixture
+        .home
+        .path()
+        .join(".claude/projects/remote-project/purged-fallback.jsonl");
+    let local_bytes = fs::read(local_path).expect("restored purged local file");
+    let state: Value = serde_json::from_slice(&fs::read(&state_path).unwrap()).unwrap();
+    let entry = &state["entries"]["claude:purged-fallback"];
+    assert_eq!(entry["lifecycle"], "visible");
+    assert_eq!(entry["keep"], true);
+    assert!(entry["hidden_since"].is_null());
+    assert!(entry["recycled_at"].is_null());
+    assert!(entry["purged_at"].is_null());
+    assert_eq!(
+        entry["fingerprint"],
+        blake3::hash(&local_bytes).to_hex().to_string()
+    );
+}
+
+#[test]
+#[serial]
+fn partial_claude_restore_retries_by_finalizing_existing_local_copy() {
+    let fixture = Fixture::empty();
+    let content = concat!(
+        r#"{"type":"user","sessionId":"partial-claude","cwd":"/tmp/remote-project","timestamp":"2026-08-02T00:00:00Z","message":{"role":"user","content":"partial local"}}"#,
+        "\n",
+    );
+    let recycled = fixture.write_recycled(
+        "claude",
+        "partial-claude",
+        "remote-project/partial-claude.jsonl",
+        "remote-project",
+        content,
+    );
+    fs::remove_file(recycled).expect("remove missing recycle copy");
+    let local_path = fixture
+        .home
+        .path()
+        .join(".claude/projects/remote-project/partial-claude.jsonl");
+    fs::create_dir_all(local_path.parent().unwrap()).expect("local parent");
+    fs::write(&local_path, content).expect("partial local restore copy");
+
+    let output = fixture.run(&["session", "restore", "partial-claude", "--source", "claude"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let state: Value = serde_json::from_slice(
+        &fs::read(fixture.config.path().join("session-maintenance.json")).unwrap(),
+    )
+    .unwrap();
+    let entry = &state["entries"]["claude:partial-claude"];
+    assert_eq!(entry["lifecycle"], "visible");
+    assert_eq!(entry["keep"], true);
+    assert!(entry["hidden_since"].is_null());
+    assert!(entry["recycled_at"].is_null());
+    assert!(entry["purged_at"].is_null());
+    assert_eq!(
+        entry["fingerprint"],
+        blake3::hash(content.as_bytes()).to_hex().to_string()
+    );
+}
+
+#[test]
+#[serial]
+fn invalid_claude_recovery_copy_does_not_finalize_or_fallback() {
+    let fixture = Fixture::empty();
+    let recycled = fixture.write_recycled(
+        "claude",
+        "invalid-recovery",
+        "remote-project/invalid-recovery.jsonl",
+        "remote-project",
+        concat!(
+            r#"{"type":"user","sessionId":"invalid-recovery","cwd":"/tmp/remote-project","timestamp":"2026-08-02T00:00:00Z","message":{"role":"user","content":"valid"}}"#,
+            "\n",
+        ),
+    );
+    fs::remove_file(recycled).expect("remove missing recycle copy");
+    let local_path = fixture
+        .home
+        .path()
+        .join(".claude/projects/remote-project/invalid-recovery.jsonl");
+    fs::create_dir_all(local_path.parent().unwrap()).expect("local parent");
+    fs::write(&local_path, "not-json\n").expect("malformed recovery copy");
+
+    let output = fixture.run(&[
+        "session",
+        "restore",
+        "invalid-recovery",
+        "--source",
+        "claude",
+    ]);
+    assert!(!output.status.success());
+    let state: Value = serde_json::from_slice(
+        &fs::read(fixture.config.path().join("session-maintenance.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        state["entries"]["claude:invalid-recovery"]["lifecycle"],
+        "recycled"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn symlink_claude_recovery_copy_does_not_finalize_or_fallback() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::empty();
+    let recycled = fixture.write_recycled(
+        "claude",
+        "symlink-recovery",
+        "remote-project/symlink-recovery.jsonl",
+        "remote-project",
+        concat!(
+            r#"{"type":"user","sessionId":"symlink-recovery","cwd":"/tmp/remote-project","timestamp":"2026-08-02T00:00:00Z","message":{"role":"user","content":"valid"}}"#,
+            "\n",
+        ),
+    );
+    fs::remove_file(recycled).expect("remove missing recycle copy");
+    let local_path = fixture
+        .home
+        .path()
+        .join(".claude/projects/remote-project/symlink-recovery.jsonl");
+    let external = fixture.home.path().join("external-recovery.jsonl");
+    fs::create_dir_all(local_path.parent().unwrap()).expect("local parent");
+    fs::write(&external, "not-json\n").expect("external recovery copy");
+    symlink(external, &local_path).expect("symlink recovery copy");
+
+    let output = fixture.run(&[
+        "session",
+        "restore",
+        "symlink-recovery",
+        "--source",
+        "claude",
+    ]);
+    assert!(!output.status.success());
+    let state: Value = serde_json::from_slice(
+        &fs::read(fixture.config.path().join("session-maintenance.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        state["entries"]["claude:symlink-recovery"]["lifecycle"],
+        "recycled"
+    );
 }
 
 #[test]

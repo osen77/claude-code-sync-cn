@@ -5425,11 +5425,94 @@ fn claude_recycled_copy_is_available(
     Ok(true)
 }
 
+fn validate_claude_local_recovery_copy(
+    entry: &MaintenanceEntry,
+    roots: &MaintenanceRoots,
+) -> Result<Option<String>> {
+    let source_root = &roots.claude;
+    validate_directory_root(source_root)?;
+    let expected_path = safe_join_within_root(source_root, &entry.original_relative_path)?;
+    match fs::symlink_metadata(&expected_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            anyhow::bail!(
+                "Claude local recovery copy is a symlink: {}",
+                expected_path.display()
+            )
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            anyhow::bail!(
+                "Claude local recovery copy is not a regular file: {}",
+                expected_path.display()
+            )
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+
+    validate_regular_candidate(source_root, &expected_path)?;
+    let session = ConversationSession::from_file(&expected_path)
+        .context("parse Claude local recovery copy")?;
+    if session.session_id != entry.identity.session_id {
+        anyhow::bail!("Claude local recovery copy session identity does not match state")
+    }
+    let summary = SessionSummary::from_session(&session, &entry.project_name, source_root);
+    if !summary.is_valid() {
+        anyhow::bail!("Claude local recovery copy is not semantically valid")
+    }
+    Ok(Some(fingerprint_file(&expected_path)?.digest))
+}
+
+fn finalize_claude_local_recovery(
+    store: &StateStore,
+    roots: &MaintenanceRoots,
+    requested: &MaintenanceEntry,
+) -> Result<bool> {
+    store.transaction(|locked| {
+        if locked.state.pending.is_some() {
+            anyhow::bail!("cannot finalize Claude restore while maintenance is pending")
+        }
+        let key = identity_key(&requested.identity);
+        let current = locked
+            .state
+            .entries
+            .get(&key)
+            .cloned()
+            .with_context(|| format!("maintenance entry not found: {key}"))?;
+        if current.identity.source != SessionSource::Claude
+            || current.original_relative_path != requested.original_relative_path
+            || !matches!(
+                current.lifecycle,
+                LifecycleState::Recycled | LifecycleState::PurgedLocal
+            )
+        {
+            anyhow::bail!("stale Claude maintenance entry for {key}")
+        }
+        let Some(fingerprint) = validate_claude_local_recovery_copy(&current, roots)? else {
+            return Ok(false);
+        };
+        let entry = locked
+            .state
+            .entries
+            .get_mut(&key)
+            .context("maintenance entry disappeared while finalizing restore")?;
+        entry.lifecycle = LifecycleState::Visible;
+        entry.keep = true;
+        entry.hidden_since = None;
+        entry.recycled_at = None;
+        entry.purged_at = None;
+        entry.fingerprint = fingerprint;
+        locked.persist()?;
+        Ok(true)
+    })
+}
+
 /// Restore a session that exists in the sync repo but is missing locally.
 pub fn handle_session_restore_with_source(
     session_id: Option<&str>,
     source: SessionSourceFilter,
 ) -> Result<()> {
+    let mut stale_claude_entry = None;
     if let Some(target_id) = session_id {
         let roots = SessionRoots::discover()?;
         let config_dir = ConfigManager::config_dir()?;
@@ -5524,6 +5607,9 @@ pub fn handle_session_restore_with_source(
                                 );
                                 return Ok(());
                             }
+                            if identity.source == SessionSource::Claude {
+                                stale_claude_entry = Some(entry.clone());
+                            }
                         }
                         LifecycleState::Visible => {
                             if let Some(summary) = resolved.summary.as_ref() {
@@ -5545,7 +5631,11 @@ pub fn handle_session_restore_with_source(
                                 return Ok(());
                             }
                         }
-                        LifecycleState::PurgedLocal => {}
+                        LifecycleState::PurgedLocal => {
+                            if identity.source == SessionSource::Claude {
+                                stale_claude_entry = Some(entry.clone());
+                            }
+                        }
                     }
                 }
                 if identity.source != SessionSource::Claude {
@@ -5569,6 +5659,17 @@ pub fn handle_session_restore_with_source(
             }
             Ok(None) => {}
             Err(error) => return Err(error),
+        }
+
+        if let Some(entry) = stale_claude_entry.as_ref() {
+            if finalize_claude_local_recovery(&store, &maintenance_roots, entry)? {
+                println!(
+                    "{} Restored session: {}",
+                    "SUCCESS:".green().bold(),
+                    target_id
+                );
+                return Ok(());
+            }
         }
 
         if !source.includes_claude() {
@@ -5620,6 +5721,11 @@ pub fn handle_session_restore_with_source(
         .collect();
 
     if missing_sessions.is_empty() {
+        if stale_claude_entry.is_some() {
+            anyhow::bail!(
+                "Claude maintenance entry has no valid local recovery copy and no sync-repo copy"
+            );
+        }
         println!();
         println!("{}", "No missing sessions found in sync repo.".green());
         println!("{}", "Your local directory is fully up to date.".dimmed());
@@ -5664,6 +5770,19 @@ pub fn handle_session_restore_with_source(
             &filter,
             &state.sync_repo_path,
         )?;
+        if let Some(entry) = stale_claude_entry.as_ref() {
+            let fallback_config_dir = ConfigManager::config_dir()?;
+            let fallback_roots = SessionRoots::discover()?;
+            let fallback_store = StateStore::from_config_dir(&fallback_config_dir);
+            let fallback_maintenance_roots =
+                maintenance_roots_for_handler(&fallback_config_dir, &fallback_roots);
+            if !finalize_claude_local_recovery(&fallback_store, &fallback_maintenance_roots, entry)?
+            {
+                anyhow::bail!(
+                    "sync restore did not create the expected Claude local recovery copy"
+                );
+            }
+        }
         println!(
             "{} Restored session: {}",
             "SUCCESS:".green().bold(),
