@@ -879,6 +879,27 @@ mod tests {
     }
 
     #[test]
+    fn legacy_toml_without_session_maintenance_uses_safe_defaults() {
+        let config: FilterConfig = toml::from_str("exclude_attachments = true\n").unwrap();
+        assert_eq!(
+            config.session_maintenance,
+            SessionMaintenanceSettings::default()
+        );
+    }
+
+    #[test]
+    fn partial_session_maintenance_toml_fills_remaining_defaults() {
+        let config: FilterConfig =
+            toml::from_str("[session_maintenance]\nenabled = true\n").unwrap();
+        assert!(config.session_maintenance.enabled);
+        assert_eq!(config.session_maintenance.classifier, "conservative");
+        assert_eq!(config.session_maintenance.hide_after_hours, 24);
+        assert_eq!(config.session_maintenance.recycle_after_days, 7);
+        assert_eq!(config.session_maintenance.purge_after_days, 30);
+        assert_eq!(config.session_maintenance.max_actions_per_run, 50);
+    }
+
+    #[test]
     fn test_exclude_attachments_filter() {
         use std::path::PathBuf;
 

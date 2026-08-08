@@ -186,17 +186,16 @@ mod tests {
         assert!(unlock.to_string_lossy().contains("delete-unlock.json"));
 
         let maintenance = ConfigManager::session_maintenance_path().unwrap();
-        assert!(maintenance
-            .to_string_lossy()
-            .contains("session-maintenance.json"));
+        assert_eq!(maintenance, config_dir.join("session-maintenance.json"));
 
         let maintenance_lock = ConfigManager::session_maintenance_lock_path().unwrap();
-        assert!(maintenance_lock
-            .to_string_lossy()
-            .contains("session-maintenance.lock"));
+        assert_eq!(
+            maintenance_lock,
+            config_dir.join("session-maintenance.lock")
+        );
 
         let recycle = ConfigManager::session_recycle_dir().unwrap();
-        assert!(recycle.to_string_lossy().contains("session-recycle"));
+        assert_eq!(recycle, config_dir.join("session-recycle"));
     }
 
     #[test]
