@@ -4861,7 +4861,7 @@ fn resolve_maintenance_session(
     state: &crate::session_maintenance::state::MaintenanceState,
     session_id: &str,
     source_filter: SessionSourceFilter,
-) -> Result<ResolvedMaintenanceSession> {
+) -> Result<Option<ResolvedMaintenanceSession>> {
     let mut candidates: HashMap<String, ResolvedMaintenanceSession> = HashMap::new();
 
     for summary in summaries {
@@ -4896,8 +4896,8 @@ fn resolve_maintenance_session(
     }
 
     match candidates.into_values().collect::<Vec<_>>().as_slice() {
-        [] => anyhow::bail!("Session not found: {session_id}"),
-        [candidate] => Ok(candidate.clone()),
+        [] => Ok(None),
+        [candidate] => Ok(Some(candidate.clone())),
         candidates => {
             let details = candidates
                 .iter()
@@ -4913,6 +4913,16 @@ fn resolve_maintenance_session(
             anyhow::bail!("Ambiguous session ID '{session_id}'. Specify --source:\\n{details}")
         }
     }
+}
+
+fn require_resolved_maintenance_session(
+    summaries: &[SessionSummary],
+    state: &crate::session_maintenance::state::MaintenanceState,
+    session_id: &str,
+    source_filter: SessionSourceFilter,
+) -> Result<ResolvedMaintenanceSession> {
+    resolve_maintenance_session(summaries, state, session_id, source_filter)?
+        .ok_or_else(|| anyhow::anyhow!("Session not found: {session_id}"))
 }
 
 fn maintenance_roots_for_handler(config_dir: &Path, roots: &SessionRoots) -> MaintenanceRoots {
@@ -4959,7 +4969,7 @@ fn update_keep_marker(session_id: &str, keep: bool, source: SessionSourceFilter)
     let sessions = scan_summaries_for_mutation(scan)?;
     let store = StateStore::from_config_dir(&config_dir);
     let state = store.load().context("load session maintenance state")?;
-    let resolved = resolve_maintenance_session(&sessions, &state, session_id, source)?;
+    let resolved = require_resolved_maintenance_session(&sessions, &state, session_id, source)?;
 
     if keep
         && resolved
@@ -5147,7 +5157,8 @@ pub fn handle_session_explain(
     }
     let config_dir = ConfigManager::config_dir()?;
     let state = StateStore::from_config_dir(&config_dir).load()?;
-    let resolved = resolve_maintenance_session(&scan.summaries, &state, session_id, source)?;
+    let resolved =
+        require_resolved_maintenance_session(&scan.summaries, &state, session_id, source)?;
     let entry = resolved.entry.clone();
     let lifecycle = entry
         .as_ref()
@@ -5240,7 +5251,7 @@ pub fn handle_session_mark_test(
     let sessions = scan_summaries_for_mutation(scan)?;
     let store = StateStore::from_config_dir(&config_dir);
     let state = store.load().context("load session maintenance state")?;
-    let resolved = resolve_maintenance_session(&sessions, &state, session_id, source)?;
+    let resolved = require_resolved_maintenance_session(&sessions, &state, session_id, source)?;
     let maintenance_roots = maintenance_roots_for_handler(&config_dir, &roots);
     store.update(|saved| {
         let key = identity_key(&resolved.identity);
@@ -5363,6 +5374,57 @@ fn validate_hidden_restore_candidate(
         .context("cannot restore hidden session: local copy is unavailable")
 }
 
+/// Check Claude's deterministic recycled copy before allowing sync-repository fallback.
+///
+/// `Ok(false)` is reserved for a missing recycle root or final file. Every other
+/// failure is a real local-copy error and must be returned to the caller.
+fn claude_recycled_copy_is_available(
+    entry: &MaintenanceEntry,
+    roots: &MaintenanceRoots,
+) -> Result<bool> {
+    match fs::symlink_metadata(&roots.recycle) {
+        Ok(_) => validate_directory_root(&roots.recycle)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+
+    let final_path = safe_join_within_root(
+        &roots.recycle,
+        &crate::session_maintenance::recycle::recycle_relative_path(entry),
+    )?;
+    match fs::symlink_metadata(&final_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            anyhow::bail!(
+                "Claude recycled copy is a symlink: {}",
+                final_path.display()
+            )
+        }
+        Ok(metadata) if !metadata.is_file() => {
+            anyhow::bail!(
+                "Claude recycled copy is not a regular file: {}",
+                final_path.display()
+            )
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    }
+
+    validate_regular_candidate(&roots.recycle, &final_path)?;
+    let actual = fingerprint_file(&final_path)?.digest;
+    if actual != entry.fingerprint {
+        anyhow::bail!("Claude recycled copy fingerprint mismatch")
+    }
+
+    let session = ConversationSession::from_file(&final_path)
+        .context("parse Claude recycled copy before restore")?;
+    let summary = SessionSummary::from_session(&session, &entry.project_name, &roots.claude);
+    if !summary.is_valid() {
+        anyhow::bail!("Claude recycled copy is not semantically valid")
+    }
+    Ok(true)
+}
+
 /// Restore a session that exists in the sync repo but is missing locally.
 pub fn handle_session_restore_with_source(
     session_id: Option<&str>,
@@ -5384,7 +5446,7 @@ pub fn handle_session_restore_with_source(
             resolve_maintenance_session(&scan.summaries, &maintenance_state, target_id, source);
 
         match resolved {
-            Ok(resolved) => {
+            Ok(Some(resolved)) => {
                 if scan.diagnostics.degraded() {
                     anyhow::bail!(
                         "session mutation aborted because the source scan was incomplete: {}",
@@ -5419,7 +5481,9 @@ pub fn handle_session_restore_with_source(
                             return Ok(());
                         }
                         LifecycleState::Recycled => {
-                            if identity.source != SessionSource::Claude {
+                            let available = if identity.source == SessionSource::Claude {
+                                claude_recycled_copy_is_available(&entry, &maintenance_roots)?
+                            } else {
                                 let available = load_recycled_summaries(
                                     &maintenance_roots,
                                     &maintenance_state,
@@ -5437,42 +5501,29 @@ pub fn handle_session_restore_with_source(
                                         target_id
                                     );
                                 }
-                            }
-                            if let Err(error) = restore_session(
-                                &store,
-                                &maintenance_roots,
-                                &entry,
-                                chrono::Utc::now(),
-                            ) {
-                                let final_path = safe_join_within_root(
-                                    &maintenance_roots.recycle,
-                                    &crate::session_maintenance::recycle::recycle_relative_path(
-                                        &entry,
-                                    ),
+                                true
+                            };
+                            if available {
+                                restore_session(
+                                    &store,
+                                    &maintenance_roots,
+                                    &entry,
+                                    chrono::Utc::now(),
                                 )?;
-                                if identity.source != SessionSource::Claude && !final_path.exists()
-                                {
-                                    anyhow::bail!(
-                                        "No local recycled copy is available for {} session {}",
-                                        identity.source.label(),
-                                        target_id
-                                    );
-                                }
-                                return Err(error);
+                                store.update(|state| {
+                                    let key = identity_key(&entry.identity);
+                                    if let Some(current) = state.entries.get_mut(&key) {
+                                        current.keep = true;
+                                    }
+                                    Ok(())
+                                })?;
+                                println!(
+                                    "{} Restored session: {}",
+                                    "SUCCESS:".green().bold(),
+                                    target_id
+                                );
+                                return Ok(());
                             }
-                            store.update(|state| {
-                                let key = identity_key(&entry.identity);
-                                if let Some(current) = state.entries.get_mut(&key) {
-                                    current.keep = true;
-                                }
-                                Ok(())
-                            })?;
-                            println!(
-                                "{} Restored session: {}",
-                                "SUCCESS:".green().bold(),
-                                target_id
-                            );
-                            return Ok(());
                         }
                         LifecycleState::Visible => {
                             if let Some(summary) = resolved.summary.as_ref() {
@@ -5505,7 +5556,7 @@ pub fn handle_session_restore_with_source(
                     );
                 }
             }
-            Err(_) if !source.includes_claude() => {
+            Ok(None) if !source.includes_claude() => {
                 anyhow::bail!(
                     "No local recycled copy is available for {} session {}",
                     match source {
@@ -5516,7 +5567,8 @@ pub fn handle_session_restore_with_source(
                     target_id
                 );
             }
-            Err(_) => {}
+            Ok(None) => {}
+            Err(error) => return Err(error),
         }
 
         if !source.includes_claude() {
@@ -6245,6 +6297,18 @@ mod tests {
     }
 
     #[test]
+    fn maintenance_resolution_returns_none_for_not_found() {
+        let state = crate::session_maintenance::state::MaintenanceState::default();
+        let resolved =
+            resolve_maintenance_session(&[], &state, "missing-id", SessionSourceFilter::All);
+        assert!(
+            resolved.is_ok(),
+            "not found should not be an error: {resolved:?}"
+        );
+        assert!(resolved.unwrap().is_none());
+    }
+
+    #[test]
     fn maintenance_resolution_includes_recycled_registry_entries() {
         let identity = crate::session_model::SessionIdentity {
             source: SessionSource::Codex,
@@ -6270,7 +6334,8 @@ mod tests {
 
         let resolved =
             resolve_maintenance_session(&[], &state, "recycled-id", SessionSourceFilter::Codex)
-                .expect("registry entry should resolve without an active summary");
+                .expect("registry entry should resolve without an active summary")
+                .expect("registry entry should be present");
         assert!(resolved.summary.is_none());
         assert_eq!(
             resolved.entry.as_ref().map(|entry| entry.lifecycle),

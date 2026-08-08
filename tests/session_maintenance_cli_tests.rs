@@ -165,6 +165,27 @@ impl Fixture {
         source_path
     }
 
+    fn write_sync_repo(&self, project: &str, id: &str, content: &str) -> std::path::PathBuf {
+        let repo = self.home.path().join("sync-repo");
+        let remote_path = repo
+            .join("projects")
+            .join(project)
+            .join(format!("{id}.jsonl"));
+        fs::create_dir_all(remote_path.parent().expect("remote parent")).expect("remote parent");
+        fs::write(&remote_path, content).expect("remote session");
+        fs::write(
+            self.config.path().join("state.json"),
+            serde_json::to_vec(&json!({
+                "sync_repo_path": repo,
+                "has_remote": false,
+                "is_cloned_repo": false,
+            }))
+            .expect("serialize sync state"),
+        )
+        .expect("write sync state");
+        remote_path
+    }
+
     fn run(&self, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_ccs"))
             .args(args)
@@ -627,4 +648,187 @@ fn degraded_restore_scan_fails_safe_without_changing_hidden_state() {
         state["entries"]["claude:degraded-hidden"]["lifecycle"],
         "hidden"
     );
+}
+
+#[test]
+#[serial]
+fn source_all_maintenance_ambiguity_blocks_claude_remote_restore() {
+    let fixture = Fixture::empty();
+    let claude_content = concat!(
+        r#"{"type":"user","sessionId":"ambiguous-id","cwd":"/tmp/remote-project","timestamp":"2026-08-02T00:00:00Z","message":{"role":"user","content":"remote-claude"}}"#,
+        "\n",
+    );
+    let codex_content = concat!(
+        r#"{"type":"session_meta","payload":{"id":"ambiguous-id","cwd":"/tmp/project"},"timestamp":"2026-08-02T00:00:00Z"}"#,
+        "\n",
+        r#"{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"codex"}]},"timestamp":"2026-08-02T00:00:01Z"}"#,
+        "\n",
+    );
+    let claude_final = fixture.write_recycled(
+        "claude",
+        "ambiguous-id",
+        "-tmp-project/ambiguous-id.jsonl",
+        "project",
+        claude_content,
+    );
+    let codex_final = fixture.write_recycled(
+        "codex",
+        "ambiguous-id",
+        "2026/ambiguous-id.jsonl",
+        "project",
+        codex_content,
+    );
+    fs::remove_file(claude_final).expect("remove Claude recycle copy");
+    fs::remove_file(codex_final).expect("remove Codex recycle copy");
+    fixture.write_sync_repo("remote-project", "ambiguous-id", claude_content);
+
+    let output = fixture.run(&["session", "restore", "ambiguous-id", "--source", "all"]);
+    assert!(
+        !output.status.success(),
+        "unexpected success: {}",
+        stdout(&output)
+    );
+    assert!(
+        stderr(&output).contains("Ambiguous session ID 'ambiguous-id'")
+            && stderr(&output).contains("Specify --source"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!fixture
+        .home
+        .path()
+        .join(".claude/projects/remote-project/ambiguous-id.jsonl")
+        .exists());
+}
+
+#[test]
+#[serial]
+fn missing_claude_recycled_final_allows_remote_restore_fallback() {
+    let fixture = Fixture::empty();
+    let remote_content = concat!(
+        r#"{"type":"user","sessionId":"claude-fallback","cwd":"/tmp/remote-project","timestamp":"2026-08-02T00:00:00Z","message":{"role":"user","content":"remote fallback"}}"#,
+        "\n",
+    );
+    let recycled = fixture.write_recycled(
+        "claude",
+        "claude-fallback",
+        "-tmp-project/claude-fallback.jsonl",
+        "project",
+        concat!(
+            r#"{"type":"user","sessionId":"claude-fallback","cwd":"/tmp/project","timestamp":"2026-08-02T00:00:00Z","message":{"role":"user","content":"recycled"}}"#,
+            "\n",
+        ),
+    );
+    fs::remove_file(recycled).expect("remove missing Claude recycle copy");
+    fixture.write_sync_repo("remote-project", "claude-fallback", remote_content);
+
+    let output = fixture.run(&[
+        "session",
+        "restore",
+        "claude-fallback",
+        "--source",
+        "claude",
+    ]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(fixture
+        .home
+        .path()
+        .join(".claude/projects/remote-project/claude-fallback.jsonl")
+        .is_file());
+}
+
+#[test]
+#[serial]
+fn invalid_claude_recycled_copy_never_falls_back_to_remote() {
+    let cases = ["mismatch", "malformed"];
+    for case in cases {
+        let fixture = Fixture::empty();
+        let valid_content = concat!(
+            r#"{"type":"user","sessionId":"invalid-claude","cwd":"/tmp/project","timestamp":"2026-08-02T00:00:00Z","message":{"role":"user","content":"valid recycled"}}"#,
+            "\n",
+        );
+        let final_path = fixture.write_recycled(
+            "claude",
+            "invalid-claude",
+            "-tmp-project/invalid-claude.jsonl",
+            "project",
+            valid_content,
+        );
+        match case {
+            "mismatch" => fs::write(
+                &final_path,
+                concat!(
+                    r#"{"type":"user","sessionId":"invalid-claude","cwd":"/tmp/project","timestamp":"2026-08-02T00:00:00Z","message":{"role":"user","content":"changed"}}"#,
+                    "\n",
+                ),
+            )
+            .expect("rewrite mismatched recycle copy"),
+            "malformed" => fs::write(&final_path, "not-json\n").expect("malformed recycle copy"),
+            _ => unreachable!(),
+        }
+        fixture.write_sync_repo(
+            "remote-project",
+            "invalid-claude",
+            concat!(
+                r#"{"type":"user","sessionId":"invalid-claude","cwd":"/tmp/remote-project","timestamp":"2026-08-02T00:00:00Z","message":{"role":"user","content":"remote fallback"}}"#,
+                "\n",
+            ),
+        );
+
+        let output = fixture.run(&["session", "restore", "invalid-claude", "--source", "claude"]);
+        assert!(!output.status.success(), "{case} unexpectedly succeeded");
+        assert!(!fixture
+            .home
+            .path()
+            .join(".claude/projects/remote-project/invalid-claude.jsonl")
+            .exists());
+        let state: Value = serde_json::from_slice(
+            &fs::read(fixture.config.path().join("session-maintenance.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            state["entries"]["claude:invalid-claude"]["lifecycle"],
+            "recycled"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+#[serial]
+fn symlink_claude_recycled_copy_never_falls_back_to_remote() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::empty();
+    let valid_content = concat!(
+        r#"{"type":"user","sessionId":"symlink-claude","cwd":"/tmp/project","timestamp":"2026-08-02T00:00:00Z","message":{"role":"user","content":"valid recycled"}}"#,
+        "\n",
+    );
+    let final_path = fixture.write_recycled(
+        "claude",
+        "symlink-claude",
+        "-tmp-project/symlink-claude.jsonl",
+        "project",
+        valid_content,
+    );
+    let external = fixture.home.path().join("external-claude.jsonl");
+    fs::write(&external, valid_content).expect("external content");
+    fs::remove_file(&final_path).expect("remove recycle copy");
+    symlink(external, &final_path).expect("symlink recycle copy");
+    fixture.write_sync_repo(
+        "remote-project",
+        "symlink-claude",
+        concat!(
+            r#"{"type":"user","sessionId":"symlink-claude","cwd":"/tmp/remote-project","timestamp":"2026-08-02T00:00:00Z","message":{"role":"user","content":"remote fallback"}}"#,
+            "\n",
+        ),
+    );
+
+    let output = fixture.run(&["session", "restore", "symlink-claude", "--source", "claude"]);
+    assert!(!output.status.success());
+    assert!(!fixture
+        .home
+        .path()
+        .join(".claude/projects/remote-project/symlink-claude.jsonl")
+        .exists());
 }
