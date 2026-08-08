@@ -125,7 +125,8 @@ RUST_LOG=error ccs session list
 | `ccs session` | 会话管理（含误删保护与恢复） |
 | `ccs session search <关键词>` | 跨 Claude Code / Codex / OMP 搜索历史会话 |
 | `ccs session overview --since 7d` | 查看最近项目会话概览 |
-| `ccs session restore` | 恢复被意外删除的会话 |
+| `ccs session restore` | 恢复本地回收或同步仓库中的会话 |
+| `ccs session maintain` | 配置、预演或执行测试会话维护 |
 | `ccs config-sync push` | 推送配置到远程 |
 | `ccs config-sync apply <device>` | 应用其他设备配置 |
 | `ccs update` | 更新到最新版本 |
@@ -143,32 +144,45 @@ RUST_LOG=error ccs session list
 
 来源能力矩阵：
 
-| 来源 | 查询 | 打开 | 重命名 | 删除 | 参与同步 |
-|------|------|------|--------|------|----------|
-| Claude Code | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Codex | ✅ | ❌ | ❌ | ❌ | ❌ |
-| OMP | ✅ | ✅ | ❌ | ❌ | ❌ |
+| 来源 | 查询 | 打开 | 重命名 | 显式删除 | 本地维护 | 参与同步 |
+|------|------|------|--------|----------|----------|----------|
+| Claude Code | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Codex | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| OMP | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ |
+
+Codex 和 OMP 的普通 rename/delete 仍是只读能力；“本地维护”只允许保守地隐藏、回收和恢复测试会话，不授予通用删除能力，也不让它们参与同步。
 
 常用示例：
 
 ```bash
-# 跨来源搜索
-ccs session search "关键词" -n 5
+# 开启维护（默认关闭），查看状态或先预演
+ccs session maintain --enable
+ccs session maintain --status
+ccs session maintain --dry-run
 
-# 只查询 Codex
+# 默认列表隐藏已维护会话；需要时显式查看
+ccs session list --include-hidden
+
+# search 默认包含 hidden/recycled；只搜索 active
+ccs session search "关键词" --active-only
+
+# 查看判定原因、保护会话、恢复本地回收副本
+ccs session explain <session-id> --json
+ccs session keep <session-id>
+ccs session restore <session-id>
+
+# 只查询 Codex；查看 OMP 详情
 ccs session --source codex list
-ccs session list --source codex   # 等价
-
-# 查看某个 OMP 会话详情
 ccs session --source omp show <session-id>
-
-# 查看最近 7 天概览
-ccs session overview --since 7d --recent 5
 ```
 
-`--source` 支持 `all`、`claude`、`codex`、`omp`，默认是 `all`。Codex 和 OMP 是只读来源；OMP 会话可以从交互菜单打开原始会话，但不能通过 `ccs` 重命名或删除。重命名和删除只对 Claude Code 会话生效。
+维护默认关闭；启用后由 `ccs session` 查询/管理流程惰性执行，不安装后台 daemon。保守分类器的默认生命周期是：最后活动满 24 小时后才允许隐藏，首次隐藏满 7 天后回收到本机 maintenance store，首次隐藏满 30 天后清除本地回收副本；每次最多执行 50 个文件动作。自定义标题、`keep` 和较长会话会受到硬保护。
 
-当多个来源存在相同的 session ID 时，`show`、`rename` 和 `delete` 不会静默选择其中一个，而是列出候选并要求使用 `--source` 消歧。`--since` 支持 `30m`、`24h`、`7d`、`2w`。
+`list`、`overview` 和交互列表默认隐藏 `hidden`/`recycled`，使用 `--include-hidden` 查看；`search` 默认包含它们，使用 `--active-only` 排除。`purged_local` 只表示本机副本已清除，不代表远端永久删除。
+
+自动维护不会生成 tombstone。Claude Code 对相同远端 revision 使用本地 suppression 防止 pull 复活；远端内容变化时会恢复新 revision。跨设备永久删除仍只能由显式 `ccs session delete` 或手动 `ccs push --prune` 发起。
+
+`--source` 支持 `all`、`claude`、`codex`、`omp`，默认是 `all`。当多个来源存在相同 session ID 时，命令不会静默选择，而会要求使用 `--source` 消歧。`--since` 支持 `30m`、`24h`、`7d`、`2w`。
 
 ### 会话扫描诊断
 
@@ -176,7 +190,7 @@ ccs session overview --since 7d --recent 5
 
 `session overview --json`、`session search --json` 和 `session show --json` 的业务 JSON 顶层会增加 `schema_version: 1` 与 `diagnostics`。其中 `diagnostics.diagnostic_id` 是本次扫描的关联 ID；它与同一次运行文件日志中的 `invocation=I-...` 使用同一个值，可据此在日志中定位详细诊断。`diagnostics.degraded` 始终是由计数器计算出的明确布尔值：clean 为 `false`，存在坏文件、I/O、cache 或被抑制 warning 时为 `true`。`diagnostics` 同时包含扫描计数、cache 命中/未命中、阶段耗时和受限 warning 摘要，字段语义见[用户指南的诊断字段表](docs/user-guide.md#扫描诊断与-json-输出)。
 
-部分损坏的 JSONL 文件会保留其中可解析的 session summary，但记录一次 data warning 且不会写入 session index cache；已有 clean entry 也会在 partial 或 parser error 时 eviction，因此下一次扫描仍会重新解析并继续显示 degraded。当前 cache version 为 3，命中要求 size、mtime 与流式 BLAKE3 内容 fingerprint 同时一致；fingerprint 的耗时和读取字节数会在 JSON diagnostics 的 `fingerprint_ms`、`fingerprinted_bytes` 中单独统计，I/O 失败只跳过该候选。Claude、Codex、OMP 的 source root 若存在但不是目录，也会被安全跳过并保留其他来源结果；legacy discovery 遇到 WalkDir error 会记录受控 I/O warning 并继续扫描。DualLogger 的 console/file 两个 sink 统一脱敏 home 外 Unix/Windows 绝对路径（含盘符正斜杠、反斜杠和 UNC）、任意 host 的 `file://` URI path、支持 escaped quote/控制字符/换行的完整引号凭据；文件 logger 初始化失败时只输出固定安全 warning，不泄露日志路径或底层错误。日志轮转在锁内以 staging/transaction rollback 完成，symlink 的 current、lock 或 generation 会被拒绝；sink 的 write/flush/poison 失败只发一次安全 stderr fallback 并保留运行状态。diagnostics warning 达到 detail cap 后只写一次固定 suppressed 记录，JSON 的 `suppressed_warnings` 继续准确计数。
+部分损坏的 JSONL 文件会保留其中可解析的 session summary，但记录一次 data warning 且不会写入 session index cache；已有 clean entry 也会在 partial 或 parser error 时 eviction，因此下一次扫描仍会重新解析并继续显示 degraded。当前 cache version 为 4；v4 新增自定义标题保护位，避免 warm cache 丢失 maintenance 的 custom-title 硬保护。命中要求 size、mtime 与流式 BLAKE3 内容 fingerprint 同时一致；fingerprint 的耗时和读取字节数会在 JSON diagnostics 的 `fingerprint_ms`、`fingerprinted_bytes` 中单独统计，I/O 失败只跳过该候选。Claude、Codex、OMP 的 source root 若存在但不是目录，也会被安全跳过并保留其他来源结果；legacy discovery 遇到 WalkDir error 会记录受控 I/O warning 并继续扫描。DualLogger 的 console/file 两个 sink 统一脱敏 home 外 Unix/Windows 绝对路径（含盘符正斜杠、反斜杠和 UNC）、任意 host 的 `file://` URI path、支持 escaped quote/控制字符/换行的完整引号凭据；文件 logger 初始化失败时只输出固定安全 warning，不泄露日志路径或底层错误。日志轮转在锁内以 staging/transaction rollback 完成，symlink 的 current、lock 或 generation 会被拒绝；sink 的 write/flush/poison 失败只发一次安全 stderr fallback 并保留运行状态。diagnostics warning 达到 detail cap 后只写一次固定 suppressed 记录，JSON 的 `suppressed_warnings` 继续准确计数。
 
 当前明确不提供 `session list --json`，也不提供 `session doctor`；不要把这两个命令当作诊断接口。
 
@@ -207,7 +221,7 @@ ccs session show <session_id> --around "<关键词>" -n 5 --json  # 钻取匹配
 
 Claude Code 将对话历史存储在 `~/.claude/projects/` 目录下的 JSONL 文件中。
 
-Codex 和 OMP 历史会话分别以只读方式从 `~/.codex/sessions/` 与 `~/.omp/agent/sessions/` 读取，用于 `session list/search/show/overview`。OMP 会话可以从交互菜单打开原始会话，但两个来源都不能通过 `ccs` 重命名或删除；同步和写操作仍只针对 Claude Code 历史。
+Codex 和 OMP 历史会话分别从 `~/.codex/sessions/` 与 `~/.omp/agent/sessions/` 读取，用于 `session list/search/show/overview`。它们的普通 rename/delete 能力仍只读（OMP 可打开原始会话），但可参与本机 test-session maintenance；这类本地回收不写 tombstone，也不参与同步。同步和通用写操作仍只针对 Claude Code 历史。
 
 `ccs` 的工作流程：
 1. 发现本地 Claude Code 历史中的所有对话文件

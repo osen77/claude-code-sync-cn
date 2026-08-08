@@ -8,7 +8,7 @@ claude-code-sync 是一个 Rust CLI 工具，用于同步 Claude Code 对话历�
 
 - **语言**: Rust 2021 Edition
 - **核心功能**: 对话历史同步、配置同步、冲突解决、跨平台路径处理
-- **会话查询**: `ccs session` 非交互命令支持 Claude Code 与 Codex 历史查询
+- **会话查询**: `ccs session` 非交互命令支持 Claude Code、Codex 与 OMP 历史查询，并提供三来源本地测试会话维护
 - **支持平台**: Windows、macOS、Linux
 - **版本控制**: Git (主要) / Mercurial (可选)
 
@@ -31,6 +31,12 @@ claude-code-sync/
 │   │   └── remote.rs        # 远程操作
 │   │
 │   ├── parser.rs            # 🔑 JSONL 文件解析
+│   ├── session_model.rs     # 三来源 session identity 与摘要模型
+│   ├── session_cache.rs     # 可重建的 session index cache（v4）
+│   ├── session_maintenance/ # 测试会话分类、生命周期、状态与回收事务
+│   │   ├── classifier.rs    # 保守纯分类器与硬保护
+│   │   ├── state.rs         # source-qualified registry、锁与 pending journal
+│   │   └── recycle.rs       # 三来源 no-clobber 回收/恢复/purge
 │   ├── scm/                 # 版本控制抽象层
 │   │   ├── git.rs           # Git 实现
 │   │   ├── hg.rs            # Mercurial 实现
@@ -137,10 +143,29 @@ cwd.split(&['/', '\\'])
 `ccs session` 非交互命令支持三类历史来源：
 
 - `CC`: Claude Code，读取 `~/.claude/projects/`
-- `CX`: Codex，只读读取 `~/.codex/sessions/`，标题辅助来自 `~/.codex/history.jsonl`
-- `OM`: OMP (Oh My Pi)，只读读取 `~/.omp/agent/sessions/`
+- `CX`: Codex，读取 `~/.codex/sessions/`，标题辅助来自 `~/.codex/history.jsonl`
+- `OM`: OMP (Oh My Pi)，读取 `~/.omp/agent/sessions/`
 
-使用 `--source all|claude|codex|omp` 过滤来源，默认 `all`。Codex 与 OMP 会话均位于 `~/.claude/projects/` 之外，不参与同步（`repo_relative_path` 对二者返回 `None`）。
+使用 `--source all|claude|codex|omp` 过滤来源，默认 `all`。能力矩阵：
+
+| 来源 | 查询 | 打开 | 重命名 | 显式删除 | 本地维护 | 参与同步 |
+|------|------|------|--------|----------|----------|----------|
+| Claude Code | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Codex | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| OMP | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ |
+
+Codex/OMP 的普通 rename/delete 仍为只读；本地维护只移动和恢复其本机 JSONL，不授予通用删除能力。二者位于 `~/.claude/projects/` 之外，不参与同步（`repo_relative_path` 返回 `None`）。
+
+### 5.2 测试会话维护 (`session_maintenance/`, `handlers/session.rs`)
+
+- 默认关闭；`ccs session maintain --enable` 开启后由 session 命令惰性触发，无 daemon。
+- 默认生命周期：活动满 24h 后允许 Hidden；首次隐藏满 7d 后 Recycled；首次隐藏满 30d 后 PurgedLocal；每次最多 50 个文件动作。
+- `list/projects/overview/interactive` 默认隐藏 Hidden/Recycled，`--include-hidden` 显示；`search` 默认包含它们，`--active-only` 排除。
+- `SessionIdentity` 必须始终使用 `(source, session_id)`；所有 mutation 在锁内 reload，degraded source scan 禁止 destructive action。
+- 回收事务在触碰 source 前持久化 pending journal，使用 trusted-root、regular non-symlink、fingerprint 与 no-clobber 校验。
+- 自动维护不写 tombstone。Claude Recycled/PurgedLocal 对相同 remote fingerprint 做 pull suppression；changed revision 延迟到单文件成功落地后 CAS 清 suppression。
+- `purged_local` 只表示本机回收副本已清除。跨设备永久删除只允许显式 `session delete` 或手动 `push --prune`。
+- Session index cache 当前为 v4，新增 `has_custom_title`，旧 v3 必须失效重建，避免 custom-title 硬保护被旧 cache 绕过。
 
 ### 6. 自动同步 (`handlers/automate.rs`, `hooks.rs`, `wrapper.rs`)
 
@@ -642,6 +667,11 @@ RUST_LOG=trace ccs sync
 - `sync/discovery.rs`: 测试项目名提取和匹配
 - `merge.rs`: 测试对话合并逻辑
 - `codex.rs` / `omp.rs`: 测试 `from_file` 解析、`display_messages`、`title` 回退链、`project_name` 跨平台/非 ASCII、坏行跳过、session_id 从文件名回退
+- `session_maintenance/classifier.rs`: 纯分类、阈值、reason codes、custom-title/keep/长会话硬保护与 injected temporary roots
+- `session_maintenance/state.rs` / `recycle.rs`: 生命周期时间线、source-qualified registry、pending journal、no-clobber、symlink/fingerprint、reconcile 与 suppression CAS
+- `tests/session_maintenance_cli_tests.rs`: 三来源 query visibility、restore/fallback、ambiguity、malformed/degraded fail-safe
+- `tests/session_maintenance_concurrency_tests.rs`: 双 writer、restore/recycle race、至少 200 次 atomic JSON reader；真实子进程必须带 timeout 与 cleanup
+- `sync/pull.rs` / `sync/push.rs`: same/changed Claude revision suppression、Protect/PruneUnlock/PruneManual 与 tombstone 分离
 
 ### 新功能测试覆盖（重要）
 
@@ -655,6 +685,8 @@ RUST_LOG=trace ccs sync
 - 创建临时目录和 Git 仓库
 - 模拟多设备同步场景
 - 验证中文项目名处理
+- maintenance/suppression/restore 测试必须注入临时三来源 root；禁止读取真实用户 session
+- 任何修改环境变量的测试必须使用 `CLAUDE_CODE_SYNC_CONFIG_DIR`、`#[serial]` 与 RAII 恢复；优先只通过 `Command.env` 注入 child
 
 ### 测试用例示例
 
@@ -688,4 +720,4 @@ fn test_skip_snapshot_files() {
 
 ---
 
-*最后更新: 2026-02-05*
+*最后更新: 2026-08-09*

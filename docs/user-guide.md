@@ -375,17 +375,17 @@ sync-repo/
 
 ## 会话管理
 
-`ccs` 提供交互式会话管理功能，默认可展示 Claude Code、Codex 和 OMP 三个来源的会话。来源能力不同：Claude Code 支持完整的打开、重命名、删除和同步；Codex 与 OMP 是只读来源，只有 OMP 可以从交互菜单打开原始会话。
+`ccs` 提供交互式会话管理功能，默认可展示 Claude Code、Codex 和 OMP 三个来源的会话。Claude Code 支持完整管理和同步；Codex/OMP 的普通 rename/delete 能力只读，但三种来源都可参与本机 test-session maintenance。
 
 ### 来源能力矩阵
 
-| 来源 | 查询 | 打开 | 重命名 | 删除 | 参与同步 |
-|------|------|------|--------|------|----------|
-| Claude Code | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Codex | ✅ | ❌ | ❌ | ❌ | ❌ |
-| OMP | ✅ | ✅ | ❌ | ❌ | ❌ |
+| 来源 | 查询 | 打开 | 重命名 | 显式删除 | 本地维护 | 参与同步 |
+|------|------|------|--------|----------|----------|----------|
+| Claude Code | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Codex | ✅ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| OMP | ✅ | ✅ | ❌ | ❌ | ✅ | ❌ |
 
-Codex 和 OMP 不参与同步，也不能通过 `ccs` Rename/Delete；Rename/Delete 只对 Claude Code 会话生效。交互菜单会按来源能力隐藏不适用的操作，非交互命令也会拒绝对只读来源执行写操作。
+Codex 和 OMP 不参与同步，也不能通过普通 Rename/Delete 删除会话；本地维护只允许隐藏、回收和恢复被保守分类为测试噪声的副本，不授予通用删除能力。交互菜单会按来源能力隐藏不适用的操作。
 
 ### 交互模式（推荐）
 
@@ -442,12 +442,43 @@ ccs session delete <session-id>
 # 强制删除（跳过确认）
 ccs session delete <session-id> --force
 
-# 恢复意外删除的会话
-# （当使用 rm 命令意外删除了本地文件，但同步仓库中还存在时，可以使用此命令进行恢复）
+# 恢复本地 maintenance 回收副本；Claude 无本地副本时可回退同步仓库
 ccs session restore <session-id>
+
+# 维护默认关闭：开启、查看、预演
+ccs session maintain --enable
+ccs session maintain --status
+ccs session maintain --dry-run
+
+# 查看隐藏/回收会话，或只搜索 active
+ccs session list --include-hidden
+ccs session search "关键词" --active-only
+
+# 查看分类原因、永久保护当前会话
+ccs session explain <session-id> --json
+ccs session keep <session-id>
 ```
 
-`--source` 支持 `all`、`claude`、`codex`、`omp`，默认是 `all`。当同一个 session ID 出现在多个来源时，`show` 会列出候选并要求使用 `--source` 消歧；`rename` 和 `delete` 也不会静默选择错误来源。
+`--source` 支持 `all`、`claude`、`codex`、`omp`，默认是 `all`。当同一个 session ID 出现在多个来源时，`show`、maintenance marker 和 restore 会要求使用 `--source` 消歧；`rename` 和 `delete` 也不会静默选择错误来源。
+
+### 测试会话维护
+
+Session maintenance 默认关闭。执行 `ccs session maintain --enable` 后，维护会在 session 查询/管理流程中惰性运行，不安装后台进程。默认采用保守分类器，宁可漏判也不根据单一弱信号误伤：
+
+1. 会话最后活动满 **24 小时**后，满足分类阈值才进入 `hidden`；
+2. 从首次隐藏起满 **7 天**后移动到本机 recycle store，进入 `recycled`；
+3. 从首次隐藏起满 **30 天**后清除本机回收副本，进入 `purged_local`；
+4. 每次运行最多执行 **50** 个文件动作，剩余工作留到后续惰性运行。
+
+自定义标题、显式 `keep`、消息较多或持续时间较长的会话会受到硬保护。可用 `explain` 查看 score/reason codes，用 `mark-test`/`unmark-test` 添加或移除显式测试标记；`unkeep` 和 `unmark-test` 不会在同一命令中立即隐藏会话。
+
+可见性规则：
+
+- `list`、`projects`、`overview` 和交互列表默认只显示 active；加 `--include-hidden` 才包含 hidden/recycled；
+- `search` 默认包含 active、hidden 和 recycled；加 `--active-only` 排除后两者；
+- `show`、`explain` 和 `restore` 使用 `(source, session_id)` 消歧；JSON 的 `visibility` 字段为增量字段，`schema_version` 仍为 `1`。
+
+`purged_local` 只表示本机 maintenance 副本已清除。自动 hide/recycle/purge 不生成 tombstone：Claude 同 fingerprint 的远端副本通过本地 suppression 避免 pull 反复复活，远端内容变化则作为新 revision 恢复。跨设备永久删除仍只能由显式 `ccs session delete` 或手动 `ccs push --prune` 发起；限时 `unlock-delete` 自动路径也不会删除 maintenance-suppressed 会话。
 
 ### 扫描诊断与 JSON 输出
 
@@ -482,7 +513,7 @@ ccs session restore <session-id>
 | `suppressed_warnings` | 超过 warning 保留上限、只计数而未放入 JSON `warnings` 的条数。 |
 | `degraded` | 始终输出的 computed boolean；`malformed_files`、`io_errors`、`cache_errors` 或 `suppressed_warnings` 任一大于 0 时为 `true`，否则为 `false`。 |
 
-部分 malformed JSONL 文件仍会保留有效行对应的 summary，但会记录一次 data/parse warning，并且不会写入 session index cache；如果已有 clean cache entry，也会在 partial 或 parser error 分支中删除，避免后续 warm scan 错误命中。当前 cache version 为 3，旧版本会失效；每个候选文件的命中还必须同时满足 size、mtime 和流式 BLAKE3 内容 fingerprint，fingerprint 读取耗时与字节数分别记录在 `fingerprint_ms`、`fingerprinted_bytes`，不混入 parser metrics。fingerprint I/O 失败时只跳过该候选并记录受控 I/O warning。warning 及日志只保留受控类别、操作、稳定 `path_hash` 和安全摘要，不包含完整路径、会话内容、原始错误文本或凭据。cache 的缺失是正常冷启动；不可读、非法 JSON 或版本不匹配只产生 `cache_errors` 与受控的 `cache read failed`、`cache data invalid` 或 `cache version mismatch` 摘要。cache 原始路径和底层错误不会进入 stderr 或文件日志，详细诊断仍只通过安全摘要和 `path_hash` 表达。Claude/Codex/OMP 的 legacy discovery 遇到 WalkDir error 会记录受控 I/O warning 并继续扫描其他 entry，不再静默丢弃错误。DualLogger 的 console/file sink 统一脱敏 home 外 Unix/Windows（含盘符正斜杠、反斜杠和 UNC）绝对路径、任意 host 的 `file://` URI path，以及支持 escaped quote/控制字符/换行的完整引号凭据；文件 logger 初始化失败时 stderr 只输出固定安全 warning，不泄露日志路径或底层错误。轮转在锁内使用 staging/transaction rollback，拒绝 current、lock、generation 的 symlink；sink write/flush/poison 失败只发一次安全 stderr fallback，并在内部保留失败计数。warning detail 达到 `MAX_SCAN_WARNINGS` 后不再逐条写 file log，只写一次固定的 suppressed 记录，但 JSON `suppressed_warnings` 仍按实际条数计数。`session list --json` 与 `session doctor` 尚未提供；当前应使用 overview/search/show 的 JSON `diagnostics` 和日志 invocation 做排查。
+部分 malformed JSONL 文件仍会保留有效行对应的 summary，但会记录一次 data/parse warning，并且不会写入 session index cache；如果已有 clean cache entry，也会在 partial 或 parser error 分支中删除，避免后续 warm scan 错误命中。当前 cache version 为 4，旧版本会失效；v4 增加 `has_custom_title` 保护位，确保 warm cache 也不会绕过 maintenance 的自定义标题硬保护；每个候选文件的命中还必须同时满足 size、mtime 和流式 BLAKE3 内容 fingerprint，fingerprint 读取耗时与字节数分别记录在 `fingerprint_ms`、`fingerprinted_bytes`，不混入 parser metrics。fingerprint I/O 失败时只跳过该候选并记录受控 I/O warning。warning 及日志只保留受控类别、操作、稳定 `path_hash` 和安全摘要，不包含完整路径、会话内容、原始错误文本或凭据。cache 的缺失是正常冷启动；不可读、非法 JSON 或版本不匹配只产生 `cache_errors` 与受控的 `cache read failed`、`cache data invalid` 或 `cache version mismatch` 摘要。cache 原始路径和底层错误不会进入 stderr 或文件日志，详细诊断仍只通过安全摘要和 `path_hash` 表达。Claude/Codex/OMP 的 legacy discovery 遇到 WalkDir error 会记录受控 I/O warning 并继续扫描其他 entry，不再静默丢弃错误。DualLogger 的 console/file sink 统一脱敏 home 外 Unix/Windows（含盘符正斜杠、反斜杠和 UNC）绝对路径、任意 host 的 `file://` URI path，以及支持 escaped quote/控制字符/换行的完整引号凭据；文件 logger 初始化失败时 stderr 只输出固定安全 warning，不泄露日志路径或底层错误。轮转在锁内使用 staging/transaction rollback，拒绝 current、lock、generation 的 symlink；sink write/flush/poison 失败只发一次安全 stderr fallback，并在内部保留失败计数。warning detail 达到 `MAX_SCAN_WARNINGS` 后不再逐条写 file log，只写一次固定的 suppressed 记录，但 JSON `suppressed_warnings` 仍按实际条数计数。`session list --json` 与 `session doctor` 尚未提供；当前应使用 overview/search/show 的 JSON `diagnostics` 和日志 invocation 做排查。
 
 #### Cache retention 与并发边界
 
@@ -551,7 +582,10 @@ ccs unlock-delete --off           # 提前关闭
 | `ccs session show <id>` | 查看会话详情 |
 | `ccs session rename <id> <title>` | 重命名会话 |
 | `ccs session delete <id>` | 删除会话 |
-| `ccs session restore` | 恢复意外丢失的会话 |
+| `ccs session restore <id>` | 恢复本地回收或同步仓库中的会话 |
+| `ccs session maintain` | 开启、关闭、查看、预演或执行测试会话维护 |
+| `ccs session explain <id>` | 查看 lifecycle、score、reason codes 与下一次转换 |
+| `ccs session keep <id>` | 恢复并保护会话，避免自动维护 |
 | `ccs config-sync push` | 推送配置到远程 |
 | `ccs config-sync list` | 列出远程设备配置 |
 | `ccs config-sync apply <device>` | 应用其他设备配置 |
