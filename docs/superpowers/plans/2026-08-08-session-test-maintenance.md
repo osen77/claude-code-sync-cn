@@ -177,15 +177,14 @@ impl SessionSummary {
 
 Set Claude from `session.has_custom_title()` and Codex/OMP to `false`.
 
-Register modules in `src/lib.rs`:
+Register the modules created by this task in `src/lib.rs`:
 
 ```rust
 pub mod session_model;
 pub mod session_maintenance;
-pub(crate) mod atomic_file;
 ```
 
-Create an empty compilable `src/session_maintenance/mod.rs` containing only module documentation until Task 3.
+Create an empty compilable `src/session_maintenance/mod.rs` containing only module documentation until Task 3. Task 2 registers `pub(crate) mod atomic_file;` only after `src/atomic_file.rs` exists.
 
 - [ ] **Step 4: Add `ConversationSession::has_custom_title`**
 
@@ -264,6 +263,7 @@ git commit -m "refactor(session): extract domain model"
 
 **Files:**
 - Create: `src/atomic_file.rs`
+- Modify: `src/lib.rs`
 - Modify: `src/session_cache.rs:214-248,533-567,772-786`
 - Modify: `src/config.rs:58-105`
 - Modify: `src/filter.rs:181-275`
@@ -326,7 +326,7 @@ Expected: compile failure because `FileLock` and `persist_json_atomic` are not d
 
 - [ ] **Step 3: Implement reusable lock and atomic JSON writer**
 
-Implement in `src/atomic_file.rs`:
+Register `pub(crate) mod atomic_file;` in `src/lib.rs`, then implement `src/atomic_file.rs`:
 
 ```rust
 use anyhow::{Context, Result};
@@ -479,7 +479,7 @@ Expected: all PASS.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add src/atomic_file.rs src/session_cache.rs src/filter.rs src/config.rs
+git add src/lib.rs src/atomic_file.rs src/session_cache.rs src/filter.rs src/config.rs
 git commit -m "refactor: share atomic state persistence"
 ```
 
@@ -662,7 +662,8 @@ git commit -m "feat(session): add conservative maintenance classifier"
 
 **Interfaces:**
 - Produces: `MaintenanceState`, `MaintenanceEntry`, `LifecycleState`, `PendingOperation`, `StateStore`.
-- Produces: `StateStore::update<F, T>(&self, update: F) -> Result<T>` with lock/reload/save.
+- Produces: `StateStore::update<F, T>(&self, update: F) -> Result<T>` for one-save mutations.
+- Produces: `StateStore::transaction<F, T>(&self, transaction: F) -> Result<T>` with a `LockedState::persist()` intermediate-save API for journaled file operations.
 - Produces: `next_lifecycle(entry, decision, now, settings) -> LifecycleTransition`.
 
 - [ ] **Step 1: Write lifecycle tests with injected time**
@@ -768,6 +769,7 @@ pub struct PendingOperation {
     pub identity: SessionIdentity,
     pub operation: PendingOperationKind,
     pub source_relative_path: PathBuf,
+    pub staging_relative_path: PathBuf,
     pub recycle_relative_path: PathBuf,
     pub expected_fingerprint: String,
 }
@@ -808,16 +810,30 @@ pub(crate) struct StateStore {
     lock_path: PathBuf,
 }
 
+pub(crate) struct LockedState<'a> {
+    store: &'a StateStore,
+    pub state: MaintenanceState,
+}
+
+impl LockedState<'_> {
+    pub(crate) fn persist(&self) -> Result<()> {
+        persist_json_atomic(&self.store.state_path, &self.state)
+    }
+}
+
 impl StateStore {
     pub(crate) fn from_config_dir(config_dir: &Path) -> Self;
     pub(crate) fn load(&self) -> Result<MaintenanceState>;
+    pub(crate) fn transaction<F, T>(&self, transaction: F) -> Result<T>
+    where
+        F: FnOnce(&mut LockedState<'_>) -> Result<T>;
     pub(crate) fn update<F, T>(&self, update: F) -> Result<T>
     where
         F: FnOnce(&mut MaintenanceState) -> Result<T>;
 }
 ```
 
-`update` must acquire `FileLock`, load latest state inside the lock, run closure, then `persist_json_atomic`. Missing state returns `MaintenanceState::default()`. Invalid JSON or version mismatch returns Err and performs zero writes.
+`transaction` acquires `FileLock`, loads latest state inside the lock, and passes `LockedState` to the closure; the caller invokes `persist()` at each durability boundary. `update` is a wrapper that mutates `locked.state` and persists exactly once after the closure succeeds. Missing state returns `MaintenanceState::default()`. Invalid JSON or version mismatch returns Err and performs zero writes.
 
 - [ ] **Step 5: Add state writer merge and invalid-state tests**
 
@@ -879,7 +895,7 @@ fn pending_with_missing_source_and_existing_target_finalizes_recycled() {
 }
 ```
 
-Also cover source-only, both-same, both-different, neither-existing states.
+Also cover source-only, staging-only, final-only, source+final same, source+final different, and source/staging/final all-missing states. A staging-only state must be promoted to final before marking Recycled.
 
 - [ ] **Step 2: Run tests and verify RED**
 
@@ -922,13 +938,13 @@ Validate `session_id` as one safe component before using it. If it contains sepa
 
 `recycle_session` must perform exactly:
 
-1. `StateStore::update` acquires the maintenance lock.
+1. `StateStore::transaction` acquires the maintenance lock and loads latest state.
 2. Rebuild source from trusted root + `original_relative_path` using `safe_join_within_root`.
 3. `validate_regular_candidate` and fingerprint revalidation.
-4. Persist `pending_recycle`.
-5. Attempt `fs::rename` to a validated staging path under recycle root.
-6. On cross-device error, copy to `NamedTempFile` under target parent, flush, sync, fingerprint, persist, revalidate source, then remove source.
-7. Set lifecycle/recycled timestamp; clear pending in one atomic state save.
+4. Set `pending_recycle` with source/staging/final relative paths and call `locked.persist()` before touching the source file.
+5. Attempt `fs::rename(source, staging)` under the recycle root, then `fs::rename(staging, final)`.
+6. On cross-device error from the first rename, copy to `NamedTempFile` under target parent, flush, sync, fingerprint, persist as final, revalidate source, then remove source.
+7. Set lifecycle/recycled timestamp, clear pending, and call `locked.persist()` again before releasing the lock.
 
 Use a test-only thread-local force flag for copy fallback because CI cannot reliably create two filesystems:
 
@@ -1340,7 +1356,8 @@ git commit -m "feat(session): query and restore recycled sessions"
 **Files:**
 - Modify: `src/session_maintenance/mod.rs`
 - Modify: `src/session_maintenance/state.rs`
-- Modify: `src/sync/pull.rs:241-323,674-780`
+- Modify: `src/session_model.rs`
+- Modify: `src/sync/pull.rs:49-123,241-323,674-780`
 - Modify: `src/sync/push.rs:180-240,820-929`
 - Test: `src/sync/pull.rs`
 - Test: `src/sync/push.rs`
@@ -1348,7 +1365,7 @@ git commit -m "feat(session): query and restore recycled sessions"
 
 **Interfaces:**
 - Produces: `suppression_for_remote(identity, fingerprint) -> SuppressionDecision`.
-- Produces: `is_suppressed_missing_path(relative: &Path) -> bool`.
+- Produces: `is_suppressed_missing_session(relative: &Path) -> bool`.
 - Consumes: maintenance state and remote file fingerprints.
 
 - [ ] **Step 1: Write pull suppression tests**
@@ -1414,13 +1431,32 @@ Do not modify tombstone propagation.
 
 - [ ] **Step 6: Partition push missing sessions by explicit policy**
 
-After `collect_missing_repo_sessions`, partition with maintenance state:
+Add a shared Claude filename helper in `src/session_model.rs` and use it from both pull tombstone propagation and push suppression:
+
+```rust
+pub(crate) fn claude_session_id_from_path(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_str()?;
+    Some(
+        name.strip_suffix(".jsonl")?
+            .trim_start_matches("session-")
+            .to_string(),
+    )
+}
+```
+
+After `collect_missing_repo_sessions`, partition by source-qualified identity rather than relative path layout:
 
 ```rust
 let (suppressed_missing, ordinary_missing): (Vec<_>, Vec<_>) = missing_in_repo
     .into_iter()
-    .partition(|relative| maintenance.is_suppressed_missing_path(relative));
+    .partition(|relative| {
+        claude_session_id_from_path(relative)
+            .map(|session_id| maintenance.is_suppressed_missing_session(&session_id))
+            .unwrap_or(false)
+    });
 ```
+
+This works for both encoded local-project layout and `use_project_name_only` sync layout because it depends only on the Claude filename ID.
 
 Use:
 
@@ -1445,7 +1481,7 @@ Expected: PASS.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add src/session_maintenance/mod.rs src/session_maintenance/state.rs src/sync/pull.rs src/sync/push.rs tests/integration_sync_tests.rs
+git add src/session_maintenance/mod.rs src/session_maintenance/state.rs src/session_model.rs src/sync/pull.rs src/sync/push.rs tests/integration_sync_tests.rs
 git commit -m "feat(session): suppress recycled Claude revisions"
 ```
 
