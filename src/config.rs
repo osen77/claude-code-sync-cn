@@ -101,6 +101,24 @@ impl ConfigManager {
         Ok(Self::config_dir()?.join("delete-unlock.json"))
     }
 
+    /// Get the session maintenance settings file path.
+    #[allow(dead_code)]
+    pub fn session_maintenance_path() -> Result<PathBuf> {
+        Ok(Self::config_dir()?.join("session-maintenance.json"))
+    }
+
+    /// Get the session maintenance lock file path.
+    #[allow(dead_code)]
+    pub fn session_maintenance_lock_path() -> Result<PathBuf> {
+        Ok(Self::config_dir()?.join("session-maintenance.lock"))
+    }
+
+    /// Get the session recycle directory path.
+    #[allow(dead_code)]
+    pub fn session_recycle_dir() -> Result<PathBuf> {
+        Ok(Self::config_dir()?.join("session-recycle"))
+    }
+
     /// Ensure the configuration directory exists
     pub fn ensure_config_dir() -> Result<PathBuf> {
         let config_dir = Self::config_dir()?;
@@ -166,6 +184,19 @@ mod tests {
 
         let unlock = ConfigManager::delete_unlock_path().unwrap();
         assert!(unlock.to_string_lossy().contains("delete-unlock.json"));
+
+        let maintenance = ConfigManager::session_maintenance_path().unwrap();
+        assert!(maintenance
+            .to_string_lossy()
+            .contains("session-maintenance.json"));
+
+        let maintenance_lock = ConfigManager::session_maintenance_lock_path().unwrap();
+        assert!(maintenance_lock
+            .to_string_lossy()
+            .contains("session-maintenance.lock"));
+
+        let recycle = ConfigManager::session_recycle_dir().unwrap();
+        assert!(recycle.to_string_lossy().contains("session-recycle"));
     }
 
     #[test]

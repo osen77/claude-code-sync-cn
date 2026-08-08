@@ -6,21 +6,20 @@
 //! `insert` wrappers intentionally preserve their old size+mtime-only, no-I/O behavior;
 //! scanner code should use the fingerprint-aware APIs instead.
 
+use crate::atomic_file::{persist_json_atomic, FileLock};
 use crate::path_security::canonical_utf8_key;
 use crate::session_diagnostics::{error_kind_from_error, ChangedDuringRead, ScanWarningErrorKind};
 use crate::session_model::SessionSummary;
 use anyhow::{anyhow, Context, Result};
-use fs4::FileExt;
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::File;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-use tempfile::NamedTempFile;
 
 const CACHE_VERSION: u32 = 4;
 const KNOWN_CACHE_SOURCES: [&str; 3] = ["claude", "codex", "omp"];
@@ -213,42 +212,6 @@ fn canonicalize_known_source_entries(cache: &mut SessionIndexCache) {
     cache.entries = retained;
 }
 
-struct SessionCacheLock {
-    file: File,
-}
-
-impl SessionCacheLock {
-    fn acquire(config_dir: &Path) -> Result<Self> {
-        std::fs::create_dir_all(config_dir).with_context(|| {
-            format!(
-                "Cannot create session cache config dir {}",
-                config_dir.display()
-            )
-        })?;
-
-        let lock_path = config_dir.join("session_index.json.lock");
-        let mut options = OpenOptions::new();
-        options.create(true).read(true).write(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let file = options.open(&lock_path).with_context(|| {
-            format!("Failed to open session cache lock {}", lock_path.display())
-        })?;
-        set_private_permissions(&lock_path)?;
-        FileExt::lock(&file).context("Failed to acquire session cache lock")?;
-        Ok(Self { file })
-    }
-}
-
-impl Drop for SessionCacheLock {
-    fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.file);
-    }
-}
-
 impl CachedEntry {
     #[allow(dead_code)]
     pub(crate) fn file_state(&self) -> CacheFileState {
@@ -326,8 +289,20 @@ impl SessionIndexCache {
     /// Creates `config_dir` if it does not exist. The cache format and retention
     /// behavior are unchanged; this method only makes failures observable.
     pub fn save_with_result(&self, config_dir: &Path) -> Result<()> {
-        let _lock = SessionCacheLock::acquire(config_dir)?;
-        persist_atomic_unlocked(config_dir, self)?;
+        let lock_path = cache_lock_path(config_dir);
+        let _lock = FileLock::acquire(&lock_path).with_context(|| {
+            format!(
+                "Failed to acquire session cache lock {}",
+                lock_path.display()
+            )
+        })?;
+        let target = cache_path(config_dir);
+        persist_json_atomic(&target, self).with_context(|| {
+            format!(
+                "Failed to atomically replace session cache {}",
+                target.display()
+            )
+        })?;
 
         debug!("Saved session cache ({} entries)", self.entries.len());
         Ok(())
@@ -535,42 +510,6 @@ fn load_unlocked_with_kind(config_dir: &Path) -> CacheLoadKind {
     }
 }
 
-fn persist_atomic_unlocked(config_dir: &Path, cache: &SessionIndexCache) -> Result<()> {
-    std::fs::create_dir_all(config_dir).with_context(|| {
-        format!(
-            "Cannot create session cache config dir {}",
-            config_dir.display()
-        )
-    })?;
-
-    let json = serde_json::to_vec(cache).context("Failed to serialize session cache")?;
-    let mut temp = NamedTempFile::new_in(config_dir).with_context(|| {
-        format!(
-            "Failed to create temporary session cache in {}",
-            config_dir.display()
-        )
-    })?;
-    set_private_permissions(temp.path())?;
-    temp.write_all(&json)
-        .context("Failed to write temporary session cache")?;
-    temp.flush()
-        .context("Failed to flush temporary session cache")?;
-    temp.as_file()
-        .sync_all()
-        .context("Failed to sync temporary session cache")?;
-
-    let target = cache_path(config_dir);
-    temp.persist(&target)
-        .map_err(|error| error.error)
-        .with_context(|| {
-            format!(
-                "Failed to atomically replace session cache {}",
-                target.display()
-            )
-        })?;
-    Ok(())
-}
-
 #[cfg(test)]
 thread_local! {
     static TEST_FINGERPRINT_ERROR_PATH: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
@@ -683,7 +622,7 @@ pub(crate) fn merge_scan_with_report(
     delta: &CacheDelta,
     retention: &CacheRetention,
 ) -> Result<CacheMergeReport> {
-    let _lock = SessionCacheLock::acquire(config_dir)?;
+    let _lock = FileLock::acquire(&cache_lock_path(config_dir))?;
     validate_retention(retention)?;
     let mut report = CacheMergeReport::default();
     let mut cache = match load_unlocked_with_kind(config_dir) {
@@ -761,7 +700,7 @@ pub(crate) fn merge_scan_with_report(
     }
     cache.retain_existing_by_source(retention, &confirmed_missing);
 
-    persist_atomic_unlocked(config_dir, &cache)?;
+    persist_json_atomic(&cache_path(config_dir), &cache)?;
     Ok(report)
 }
 
@@ -771,19 +710,6 @@ fn report_revalidation_issue(report: &mut CacheMergeReport, key: &str, error: an
         error_kind: error_kind_from_error(&error),
         detail: format!("{error:#}"),
     });
-}
-
-#[cfg(unix)]
-fn set_private_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("Failed to set private permissions {}", path.display()))?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn set_private_permissions(_path: &Path) -> Result<()> {
-    Ok(())
 }
 
 /// Extract the last-modified time from file metadata as seconds since UNIX epoch.
@@ -799,6 +725,10 @@ pub fn mtime_secs(meta: &std::fs::Metadata) -> Option<i64> {
 
 fn cache_path(config_dir: &Path) -> PathBuf {
     config_dir.join("session_index.json")
+}
+
+fn cache_lock_path(config_dir: &Path) -> PathBuf {
+    config_dir.join("session_index.json.lock")
 }
 
 // ---------------------------------------------------------------------------

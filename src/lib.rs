@@ -41,6 +41,8 @@ pub enum VerbosityLevel {
 /// The CLI binary name, used for user-facing messages, hook commands, etc.
 pub const BINARY_NAME: &str = "ccs";
 
+pub(crate) mod atomic_file;
+
 /// Platform-agnostic configuration directory management for claude-code-sync.
 ///
 /// Provides utilities for locating and managing configuration files and directories

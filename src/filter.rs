@@ -102,6 +102,67 @@ impl Default for AutoMemorySettings {
     }
 }
 
+/// Safety controls for automatic session maintenance.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionMaintenanceSettings {
+    /// Enable automatic maintenance actions.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Classifier policy used to decide whether a session is eligible.
+    #[serde(default = "default_maintenance_classifier")]
+    pub classifier: String,
+
+    /// Hide sessions after this many hours without activity.
+    #[serde(default = "default_hide_after_hours")]
+    pub hide_after_hours: u64,
+
+    /// Move hidden sessions to recycle storage after this many days.
+    #[serde(default = "default_recycle_after_days")]
+    pub recycle_after_days: u64,
+
+    /// Permanently purge recycled sessions after this many days.
+    #[serde(default = "default_purge_after_days")]
+    pub purge_after_days: u64,
+
+    /// Maximum number of maintenance actions allowed in one run.
+    #[serde(default = "default_max_maintenance_actions")]
+    pub max_actions_per_run: usize,
+}
+
+fn default_maintenance_classifier() -> String {
+    "conservative".to_string()
+}
+
+fn default_hide_after_hours() -> u64 {
+    24
+}
+
+fn default_recycle_after_days() -> u64 {
+    7
+}
+
+fn default_purge_after_days() -> u64 {
+    30
+}
+
+fn default_max_maintenance_actions() -> usize {
+    50
+}
+
+impl Default for SessionMaintenanceSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            classifier: default_maintenance_classifier(),
+            hide_after_hours: default_hide_after_hours(),
+            recycle_after_days: default_recycle_after_days(),
+            purge_after_days: default_purge_after_days(),
+            max_actions_per_run: default_max_maintenance_actions(),
+        }
+    }
+}
+
 /// Sanitize device name: replace non-ASCII and special characters with `-`
 fn sanitize_device_name(name: &str) -> String {
     let sanitized: String = name
@@ -235,6 +296,10 @@ pub struct FilterConfig {
     /// Auto memory sync settings (memory/ directory)
     #[serde(default)]
     pub auto_memory: AutoMemorySettings,
+
+    /// Automatic session maintenance safety settings.
+    #[serde(default)]
+    pub session_maintenance: SessionMaintenanceSettings,
 }
 
 fn default_lfs_patterns() -> Vec<String> {
@@ -272,6 +337,7 @@ impl Default for FilterConfig {
             use_project_name_only: true, // Default to multi-device mode
             config_sync: ConfigSyncSettings::default(),
             auto_memory: AutoMemorySettings::default(),
+            session_maintenance: SessionMaintenanceSettings::default(),
         }
     }
 }
@@ -799,6 +865,17 @@ mod tests {
         assert!(config.include_patterns.is_empty());
         assert!(config.exclude_patterns.is_empty());
         assert!(!config.exclude_attachments);
+    }
+
+    #[test]
+    fn maintenance_defaults_are_safe_and_disabled() {
+        let config = FilterConfig::default();
+        assert!(!config.session_maintenance.enabled);
+        assert_eq!(config.session_maintenance.classifier, "conservative");
+        assert_eq!(config.session_maintenance.hide_after_hours, 24);
+        assert_eq!(config.session_maintenance.recycle_after_days, 7);
+        assert_eq!(config.session_maintenance.purge_after_days, 30);
+        assert_eq!(config.session_maintenance.max_actions_per_run, 50);
     }
 
     #[test]

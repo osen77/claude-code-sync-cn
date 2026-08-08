@@ -1,3 +1,4 @@
+mod atomic_file;
 mod codex;
 mod config;
 mod conflict;
