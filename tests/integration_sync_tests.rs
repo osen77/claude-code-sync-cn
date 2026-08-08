@@ -26,6 +26,18 @@ impl Drop for ConfigEnvGuard {
     }
 }
 
+struct HomeEnvGuard(Option<std::ffi::OsString>);
+
+impl Drop for HomeEnvGuard {
+    fn drop(&mut self) {
+        if let Some(home) = self.0.take() {
+            std::env::set_var("HOME", home);
+        } else {
+            std::env::remove_var("HOME");
+        }
+    }
+}
+
 /// Helper function to copy test data to a destination directory
 fn copy_test_data(dest_projects_dir: &Path) -> anyhow::Result<()> {
     let test_data = Path::new(TEST_DATA_DIR);
@@ -312,6 +324,101 @@ fn test_full_push_pull_cycle() {
             "Modified session should have more messages"
         );
     }
+}
+
+#[test]
+#[serial]
+fn test_recycled_claude_revision_is_suppressed_until_remote_changes() {
+    let home_dir = TempDir::new().unwrap();
+    let config_dir = TempDir::new().unwrap();
+    let repo_dir = TempDir::new().unwrap();
+    let previous_home = std::env::var_os("HOME");
+    let _home_guard = HomeEnvGuard(previous_home);
+    std::env::set_var("HOME", home_dir.path());
+    std::env::set_var(CONFIG_DIR_ENV, config_dir.path());
+
+    let local_projects = home_dir.path().join(".claude/projects");
+    let remote_projects = repo_dir.path().join("projects/project");
+    fs::create_dir_all(local_projects.join("project")).unwrap();
+    fs::create_dir_all(&remote_projects).unwrap();
+
+    let session_id = "session-suppressed";
+    let original = format!(
+        "{{\"type\":\"user\",\"uuid\":\"u1\",\"sessionId\":\"{session_id}\",\"cwd\":\"/workspace/project\",\"timestamp\":\"2026-08-08T12:00:00Z\",\"message\":{{\"role\":\"user\",\"content\":\"unchanged remote revision\"}}}}\n{{\"type\":\"assistant\",\"uuid\":\"a1\",\"sessionId\":\"{session_id}\",\"timestamp\":\"2026-08-08T12:00:01Z\",\"message\":{{\"role\":\"assistant\",\"content\":\"reply\"}}}}\n"
+    );
+    let remote_file = remote_projects.join(format!("{session_id}.jsonl"));
+    fs::write(&remote_file, &original).unwrap();
+
+    let repo = scm::init(repo_dir.path()).unwrap();
+    repo.stage_all().unwrap();
+    repo.commit("remote base").unwrap();
+    create_test_sync_state(repo_dir.path(), config_dir.path()).unwrap();
+
+    let fingerprint = claude_code_sync::session_cache::fingerprint_file(&remote_file)
+        .unwrap()
+        .digest;
+    let state = serde_json::json!({
+        "version": 1,
+        "entries": {
+            format!("claude:{session_id}"): {
+                "identity": {"source": "claude", "session_id": session_id},
+                "original_relative_path": "project/session-suppressed.jsonl",
+                "project_name": "project",
+                "fingerprint": fingerprint,
+                "lifecycle": "recycled",
+                "classifier_version": 1,
+                "score": 100,
+                "reason_codes": [],
+                "hidden_since": null,
+                "recycled_at": null,
+                "purged_at": null,
+                "keep": false,
+                "explicit_test": false
+            }
+        },
+        "pending": null
+    });
+    fs::write(
+        config_dir.path().join("session-maintenance.json"),
+        serde_json::to_vec_pretty(&state).unwrap(),
+    )
+    .unwrap();
+
+    claude_code_sync::sync::pull_history(
+        false,
+        None,
+        false,
+        claude_code_sync::VerbosityLevel::Quiet,
+    )
+    .unwrap();
+    assert!(!local_projects
+        .join("project/session-suppressed.jsonl")
+        .exists());
+
+    let changed = format!(
+        "{original}{{\"type\":\"user\",\"sessionId\":\"{session_id}\",\"cwd\":\"/workspace/project\",\"timestamp\":\"2026-08-08T12:01:00Z\",\"message\":{{\"role\":\"user\",\"content\":\"new remote revision\"}}}}\n"
+    );
+    fs::write(&remote_file, &changed).unwrap();
+    repo.stage_all().unwrap();
+    repo.commit("remote revision").unwrap();
+
+    claude_code_sync::sync::pull_history(
+        false,
+        None,
+        false,
+        claude_code_sync::VerbosityLevel::Quiet,
+    )
+    .unwrap();
+    let restored =
+        fs::read_to_string(local_projects.join("project/session-suppressed.jsonl")).unwrap();
+    assert!(restored.contains("new remote revision"));
+    let saved_state: serde_json::Value = serde_json::from_slice(
+        &fs::read(config_dir.path().join("session-maintenance.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(saved_state["entries"]
+        .get(format!("claude:{session_id}"))
+        .is_none());
 }
 
 #[test]

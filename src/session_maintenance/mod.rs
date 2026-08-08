@@ -140,6 +140,45 @@ pub(crate) fn maintenance_state_for<'a>(
     state.entries.get(&identity_key(identity))
 }
 
+/// Pull-side outcome for a locally recycled or purged Claude revision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SuppressionDecision {
+    /// No applicable suppression record exists.
+    NotSuppressed,
+    /// The remote bytes are the same locally suppressed revision.
+    SkipSameRevision,
+    /// The remote bytes are a new revision and should be restored.
+    RestoreNewRevision,
+}
+
+/// Decide whether a remote session is suppressed by maintenance state.
+///
+/// Only Claude sessions in the Recycled or PurgedLocal lifecycle participate. Callers that
+/// cannot load state must use `NotSuppressed` so remote data is restored rather than lost.
+pub(crate) fn suppression_for_remote(
+    state: &state::MaintenanceState,
+    identity: &SessionIdentity,
+    fingerprint: &str,
+) -> SuppressionDecision {
+    if identity.source != SessionSource::Claude {
+        return SuppressionDecision::NotSuppressed;
+    }
+    let Some(entry) = maintenance_state_for(state, identity) else {
+        return SuppressionDecision::NotSuppressed;
+    };
+    if !matches!(
+        entry.lifecycle,
+        LifecycleState::Recycled | LifecycleState::PurgedLocal
+    ) {
+        return SuppressionDecision::NotSuppressed;
+    }
+    if entry.fingerprint == fingerprint {
+        SuppressionDecision::SkipSameRevision
+    } else {
+        SuppressionDecision::RestoreNewRevision
+    }
+}
+
 const MAX_RECYCLED_QUERY_WARNINGS: usize = 16;
 
 fn recycled_query_warning(count: &mut usize) {

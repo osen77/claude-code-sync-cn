@@ -1,7 +1,7 @@
 use crate::atomic_file::{persist_json_atomic, FileLock};
 use crate::filter::SessionMaintenanceSettings;
 use crate::session_maintenance::classifier::{Classification, ClassificationDecision, ReasonCode};
-use crate::session_model::SessionIdentity;
+use crate::session_model::{claude_session_id_from_path, SessionIdentity, SessionSource};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -79,6 +79,35 @@ impl Default for MaintenanceState {
             version: STATE_VERSION,
             entries: HashMap::new(),
             pending: None,
+        }
+    }
+}
+
+impl MaintenanceState {
+    /// Return whether a missing sync-repository path belongs to a locally suppressed Claude session.
+    pub(crate) fn is_suppressed_missing_session(&self, relative: &Path) -> bool {
+        let Some(session_id) = claude_session_id_from_path(relative) else {
+            return false;
+        };
+        let identity = SessionIdentity {
+            source: SessionSource::Claude,
+            session_id,
+        };
+        self.entries
+            .get(&identity_key(&identity))
+            .is_some_and(|entry| {
+                entry.identity.source == SessionSource::Claude
+                    && matches!(
+                        entry.lifecycle,
+                        LifecycleState::Recycled | LifecycleState::PurgedLocal
+                    )
+            })
+    }
+
+    /// Remove a Claude suppression entry after a new remote revision is accepted.
+    pub(crate) fn clear_suppression(&mut self, identity: &SessionIdentity) {
+        if identity.source == SessionSource::Claude {
+            self.entries.remove(&identity_key(identity));
         }
     }
 }

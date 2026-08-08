@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::config::ConfigManager;
 use crate::conflict::ConflictDetector;
 use crate::filter::FilterConfig;
 use crate::history::{
@@ -19,6 +20,9 @@ use crate::path_security::{
 };
 use crate::report::{save_conflict_report, ConflictReport};
 use crate::scm;
+use crate::session_cache::fingerprint_file;
+use crate::session_maintenance::{suppression_for_remote, SuppressionDecision};
+use crate::session_model::{SessionIdentity, SessionSource};
 use crate::sync::tombstone::TombstoneRegistry;
 use crate::undo::Snapshot;
 use crate::BINARY_NAME;
@@ -84,11 +88,12 @@ fn propagate_tombstones(local_projects_root: &Path, registry: &TombstoneRegistry
                 continue;
             }
 
-            let session_id = name
-                .strip_suffix(".jsonl")
-                .unwrap_or(name)
-                .trim_start_matches("session-");
-            if !registry.contains(session_id) {
+            let Some(session_id) =
+                crate::session_model::claude_session_id_from_path(Path::new(name))
+            else {
+                continue;
+            };
+            if !registry.contains(&session_id) {
                 continue;
             }
 
@@ -314,12 +319,85 @@ pub fn pull_history(
     let remote_projects_dir = state.sync_repo_path.join(&filter.sync_subdirectory);
     validate_sync_projects_root(&state.sync_repo_path, &remote_projects_dir)?;
     println!("  {} remote sessions...", "Discovering".cyan());
-    let remote_sessions = discover_sessions(&remote_projects_dir, &filter)?;
+    let discovered_remote_sessions = discover_sessions(&remote_projects_dir, &filter)?;
+    let maintenance_store = ConfigManager::config_dir().ok().map(|config_dir| {
+        crate::session_maintenance::state::StateStore::from_config_dir(&config_dir)
+    });
+    let maintenance_state = match maintenance_store.as_ref().map(|store| store.load()) {
+        Some(Ok(state)) => Some(state),
+        Some(Err(error)) => {
+            log::warn!(
+                "Failed to load session maintenance state; restoring remote sessions safely: {}",
+                error
+            );
+            None
+        }
+        None => {
+            log::warn!(
+                "Failed to locate session maintenance state; restoring remote sessions safely"
+            );
+            None
+        }
+    };
+    let mut suppressed_remote_count = 0usize;
+    let mut remote_sessions = Vec::with_capacity(discovered_remote_sessions.len());
+    for remote_session in discovered_remote_sessions {
+        let identity = SessionIdentity {
+            source: SessionSource::Claude,
+            session_id: remote_session.session_id.clone(),
+        };
+        let Some(state) = maintenance_state.as_ref() else {
+            remote_sessions.push(remote_session);
+            continue;
+        };
+        if crate::session_maintenance::maintenance_state_for(state, &identity).is_none() {
+            remote_sessions.push(remote_session);
+            continue;
+        }
+        let fingerprint = match fingerprint_file(Path::new(&remote_session.file_path)) {
+            Ok(fingerprint) => fingerprint.digest,
+            Err(error) => {
+                log::warn!(
+                    "Failed to fingerprint remote session safely; restoring it: {}",
+                    error
+                );
+                remote_sessions.push(remote_session);
+                continue;
+            }
+        };
+        match suppression_for_remote(state, &identity, &fingerprint) {
+            SuppressionDecision::SkipSameRevision => {
+                suppressed_remote_count += 1;
+            }
+            SuppressionDecision::RestoreNewRevision => {
+                if let Some(store) = maintenance_store.as_ref() {
+                    if let Err(error) = store.update(|state| {
+                        state.clear_suppression(&identity);
+                        Ok(())
+                    }) {
+                        log::warn!(
+                            "Failed to clear remote revision suppression safely: {}",
+                            error
+                        );
+                    }
+                }
+                remote_sessions.push(remote_session);
+            }
+            SuppressionDecision::NotSuppressed => remote_sessions.push(remote_session),
+        }
+    }
     println!(
         "  {} {} remote sessions",
         "Found".green(),
         remote_sessions.len()
     );
+    if suppressed_remote_count > 0 && verbosity != VerbosityLevel::Quiet {
+        println!(
+            "  {} Suppressed {} unchanged locally recycled session(s)",
+            "✓".green(),
+            suppressed_remote_count
+        );
+    }
 
     // ============================================================================
     // CONFLICT DETECTION (moved before snapshot for efficiency)
@@ -944,6 +1022,72 @@ pub fn pull_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suppression_decision_skips_same_revision_and_restores_changed_revision() {
+        use crate::session_maintenance::state::{
+            identity_key, LifecycleState, MaintenanceEntry, MaintenanceState,
+        };
+        use crate::session_model::{SessionIdentity, SessionSource};
+        use std::path::PathBuf;
+
+        let identity = SessionIdentity {
+            source: SessionSource::Claude,
+            session_id: "session-1".to_string(),
+        };
+        let mut state = MaintenanceState::default();
+        state.entries.insert(
+            identity_key(&identity),
+            MaintenanceEntry {
+                identity: identity.clone(),
+                original_relative_path: PathBuf::from("project/session-1.jsonl"),
+                project_name: "project".to_string(),
+                fingerprint: "same".to_string(),
+                lifecycle: LifecycleState::Recycled,
+                classifier_version: 1,
+                score: 0,
+                reason_codes: vec![],
+                hidden_since: None,
+                recycled_at: None,
+                purged_at: None,
+                keep: false,
+                explicit_test: false,
+            },
+        );
+
+        assert_eq!(
+            crate::session_maintenance::suppression_for_remote(&state, &identity, "same"),
+            crate::session_maintenance::SuppressionDecision::SkipSameRevision
+        );
+        assert_eq!(
+            crate::session_maintenance::suppression_for_remote(&state, &identity, "changed"),
+            crate::session_maintenance::SuppressionDecision::RestoreNewRevision
+        );
+
+        for source in [SessionSource::Codex, SessionSource::Omp] {
+            let other = SessionIdentity {
+                source,
+                session_id: "session-1".to_string(),
+            };
+            assert_eq!(
+                crate::session_maintenance::suppression_for_remote(&state, &other, "same"),
+                crate::session_maintenance::SuppressionDecision::NotSuppressed
+            );
+        }
+    }
+
+    #[test]
+    fn suppression_state_load_failure_is_not_suppressed() {
+        let identity = crate::session_model::SessionIdentity {
+            source: crate::session_model::SessionSource::Claude,
+            session_id: "session-1".to_string(),
+        };
+        let state = crate::session_maintenance::state::MaintenanceState::default();
+        assert_eq!(
+            crate::session_maintenance::suppression_for_remote(&state, &identity, "same"),
+            crate::session_maintenance::SuppressionDecision::NotSuppressed
+        );
+    }
 
     fn tombstone_record(session_id: &str) -> crate::sync::tombstone::DeletionRecord {
         crate::sync::tombstone::DeletionRecord {

@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::config::ConfigManager;
 use crate::filter::FilterConfig;
 use crate::history::{
     ConversationSummary, OperationHistory, OperationRecord, OperationType, SyncOperation,
@@ -16,6 +17,7 @@ use crate::path_security::{
     validate_regular_candidate, validate_sync_projects_root,
 };
 use crate::scm;
+use crate::session_maintenance::state::MaintenanceState;
 use crate::BINARY_NAME;
 
 use super::discovery::{
@@ -303,6 +305,28 @@ fn collect_missing_repo_sessions(
     }
 
     missing
+}
+
+fn partition_missing_repo_sessions(
+    missing: &[PathBuf],
+    maintenance: Option<&MaintenanceState>,
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    missing.iter().cloned().partition(|relative| {
+        maintenance.is_some_and(|state| state.is_suppressed_missing_session(relative))
+    })
+}
+
+fn missing_for_action(
+    missing: &[PathBuf],
+    maintenance: Option<&MaintenanceState>,
+    action: &MissingAction,
+) -> Vec<PathBuf> {
+    let (suppressed, ordinary) = partition_missing_repo_sessions(missing, maintenance);
+    match action {
+        MissingAction::Protect => Vec::new(),
+        MissingAction::PruneUnlock(_) => ordinary,
+        MissingAction::PruneManual => suppressed.into_iter().chain(ordinary).collect(),
+    }
 }
 
 fn prune_missing_repo_sessions(
@@ -855,27 +879,37 @@ pub fn push_history(
         collect_missing_repo_sessions(&projects_dir, &filter, &sessions, &local_files_by_project)
     };
 
-    // Delete-unlock window: when active, treat locally-missing sessions as
-    // intentional deletions (same as --prune, no tombstone). Fail-safe: any
-    // error resolves to None → protection.
+    // Delete-unlock window: when active, treat ordinary locally-missing sessions as
+    // intentional deletions (same as --prune, no tombstone). Maintenance-suppressed
+    // Claude sessions remain protected unless the user explicitly passes --prune.
     let unlock_remaining = crate::sync::delete_unlock::status().ok().flatten();
+    let maintenance_state = ConfigManager::config_dir().ok().and_then(|config_dir| {
+        crate::session_maintenance::state::StateStore::from_config_dir(&config_dir)
+            .load()
+            .ok()
+    });
+    let (_suppressed_missing, ordinary_missing) =
+        partition_missing_repo_sessions(&missing_in_repo, maintenance_state.as_ref());
 
     if missing_in_repo.is_empty() {
         // Nothing missing locally — no protection or pruning needed.
     } else {
-        match decide_missing_action(prune, unlock_remaining) {
+        let action = decide_missing_action(prune, unlock_remaining);
+        match action {
             MissingAction::PruneManual | MissingAction::PruneUnlock(_) => {
+                let actionable_missing =
+                    missing_for_action(&missing_in_repo, maintenance_state.as_ref(), &action);
                 // Physical sync of the deletion. No tombstone is written —
                 // prune/window are physical syncs, not intentional-delete
                 // registrations.
                 match prune_missing_repo_sessions(
                     &state.sync_repo_path,
                     &projects_dir,
-                    &missing_in_repo,
+                    &actionable_missing,
                 ) {
                     Ok(count) => {
                         deleted_from_repo = count;
-                        for relative in &missing_in_repo {
+                        for relative in &actionable_missing {
                             log::debug!("Pruned missing session: {}", relative.display());
                         }
                     }
@@ -884,7 +918,7 @@ pub fn push_history(
                     }
                 }
                 if verbosity != VerbosityLevel::Quiet {
-                    match decide_missing_action(prune, unlock_remaining) {
+                    match action {
                         MissingAction::PruneUnlock(mins) => {
                             println!(
                                 "  {} 删除放行窗口生效中，已同步删除 {} 个 session（剩余 {} 分钟）",
@@ -906,12 +940,13 @@ pub fn push_history(
             MissingAction::Protect => {
                 // Protection mode: refuse to propagate the local absence. The
                 // repo keeps these sessions so they survive as a recoverable
-                // backup.
-                if verbosity != VerbosityLevel::Quiet {
+                // backup. Suppressed maintenance sessions are intentionally
+                // omitted from this warning because their absence is expected.
+                if !ordinary_missing.is_empty() && verbosity != VerbosityLevel::Quiet {
                     println!(
                         "  {} Detected {} session(s) missing locally but present in sync repo — protected from deletion.",
                         "⚠".yellow(),
-                        missing_in_repo.len()
+                        ordinary_missing.len()
                     );
                     println!(
                         "    {} Use '{}' to recover them, or '{}' to force-delete.",
@@ -920,10 +955,12 @@ pub fn push_history(
                         format!("{} push --prune", BINARY_NAME).cyan()
                     );
                 }
-                log::info!(
-                    "Protected {} missing sessions from deletion (use --prune or unlock-delete to force)",
-                    missing_in_repo.len()
-                );
+                if !ordinary_missing.is_empty() {
+                    log::info!(
+                        "Protected {} missing sessions from deletion (use --prune or unlock-delete to force)",
+                        ordinary_missing.len()
+                    );
+                }
             }
         }
     }
@@ -1187,7 +1224,7 @@ pub fn push_history(
 }
 
 #[cfg(test)]
-mod push_auto_heal_tests {
+mod tests {
     use super::*;
 
     #[test]
@@ -1519,5 +1556,66 @@ mod push_auto_heal_tests {
             decide_missing_action(false, Some(59)),
             MissingAction::PruneUnlock(0)
         );
+    }
+
+    #[test]
+    fn suppressed_missing_sessions_follow_protection_policy() {
+        use crate::session_maintenance::state::{
+            identity_key, LifecycleState, MaintenanceEntry, MaintenanceState,
+        };
+        use crate::session_model::{SessionIdentity, SessionSource};
+        use std::path::PathBuf;
+
+        let identity = SessionIdentity {
+            source: SessionSource::Claude,
+            session_id: "suppressed".to_string(),
+        };
+        let mut state = MaintenanceState::default();
+        state.entries.insert(
+            identity_key(&identity),
+            MaintenanceEntry {
+                identity,
+                original_relative_path: PathBuf::from("project/session-suppressed.jsonl"),
+                project_name: "project".to_string(),
+                fingerprint: "fingerprint".to_string(),
+                lifecycle: LifecycleState::PurgedLocal,
+                classifier_version: 1,
+                score: 0,
+                reason_codes: vec![],
+                hidden_since: None,
+                recycled_at: None,
+                purged_at: None,
+                keep: false,
+                explicit_test: false,
+            },
+        );
+        let missing = vec![
+            PathBuf::from("project/session-suppressed.jsonl"),
+            PathBuf::from("project/session-ordinary.jsonl"),
+        ];
+
+        let (suppressed, ordinary) = partition_missing_repo_sessions(&missing, Some(&state));
+        assert_eq!(
+            suppressed,
+            vec![PathBuf::from("project/session-suppressed.jsonl")]
+        );
+        assert_eq!(
+            ordinary,
+            vec![PathBuf::from("project/session-ordinary.jsonl")]
+        );
+        assert!(missing_for_action(&missing, Some(&state), &MissingAction::Protect).is_empty());
+        assert_eq!(
+            missing_for_action(&missing, Some(&state), &MissingAction::PruneUnlock(5)),
+            ordinary
+        );
+        assert_eq!(
+            missing_for_action(&missing, Some(&state), &MissingAction::PruneManual),
+            missing
+        );
+
+        let (suppressed_on_error, ordinary_on_error) =
+            partition_missing_repo_sessions(&missing, None);
+        assert!(suppressed_on_error.is_empty());
+        assert_eq!(ordinary_on_error, missing);
     }
 }
