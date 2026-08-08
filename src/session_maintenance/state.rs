@@ -5,7 +5,7 @@ use crate::session_model::SessionIdentity;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -155,7 +155,6 @@ fn validate_state(state: &MaintenanceState) -> Result<()> {
         );
     }
 
-    let mut identities = HashSet::with_capacity(state.entries.len());
     for (key, entry) in &state.entries {
         let expected_key = identity_key(&entry.identity);
         if key != &expected_key {
@@ -163,9 +162,7 @@ fn validate_state(state: &MaintenanceState) -> Result<()> {
                 "maintenance entry key {key:?} does not match identity key {expected_key:?}"
             );
         }
-        if !identities.insert(entry.identity.clone()) {
-            anyhow::bail!("duplicate maintenance entry identity {expected_key:?}");
-        }
+        validate_relative_path("original_relative_path", &entry.original_relative_path)?;
     }
 
     if let Some(pending) = &state.pending {
@@ -186,25 +183,28 @@ fn validate_state(state: &MaintenanceState) -> Result<()> {
                 entry.lifecycle
             );
         }
-        validate_pending_path("source_relative_path", &pending.source_relative_path)?;
-        validate_pending_path("staging_relative_path", &pending.staging_relative_path)?;
-        validate_pending_path("recycle_relative_path", &pending.recycle_relative_path)?;
+        if pending.expected_fingerprint != entry.fingerprint {
+            anyhow::bail!("pending fingerprint does not match entry fingerprint for {key:?}");
+        }
+        validate_relative_path("source_relative_path", &pending.source_relative_path)?;
+        validate_relative_path("staging_relative_path", &pending.staging_relative_path)?;
+        validate_relative_path("recycle_relative_path", &pending.recycle_relative_path)?;
     }
     Ok(())
 }
 
-fn validate_pending_path(name: &str, path: &Path) -> Result<()> {
+fn validate_relative_path(name: &str, path: &Path) -> Result<()> {
     if path.as_os_str().is_empty() || path.is_absolute() {
-        anyhow::bail!("pending {name} must be a non-empty relative path");
+        anyhow::bail!("relative path {name} must be non-empty and relative");
     }
 
     let raw = path.to_string_lossy();
     if raw.starts_with('\\') || raw.as_bytes().get(1).is_some_and(|byte| *byte == b':') {
-        anyhow::bail!("pending {name} must be a relative path");
+        anyhow::bail!("relative path {name} must be relative");
     }
     for segment in raw.split(['/', '\\']) {
         if segment == "." || segment == ".." {
-            anyhow::bail!("pending {name} cannot contain '.' or '..' components");
+            anyhow::bail!("relative path {name} cannot contain '.' or '..' components");
         }
     }
     for component in path.components() {
@@ -212,7 +212,7 @@ fn validate_pending_path(name: &str, path: &Path) -> Result<()> {
             component,
             Component::CurDir | Component::ParentDir | Component::RootDir
         ) {
-            anyhow::bail!("pending {name} contains an unsafe path component");
+            anyhow::bail!("relative path {name} contains an unsafe path component");
         }
         #[cfg(windows)]
         if matches!(component, Component::Prefix(_)) {
@@ -494,17 +494,6 @@ mod tests {
     }
 
     #[test]
-    fn state_rejects_duplicate_identities() {
-        let first = hidden_entry(now());
-        let mut duplicate = first.clone();
-        duplicate.original_relative_path = PathBuf::from("project/other.jsonl");
-        let mut state = MaintenanceState::default();
-        state.entries.insert(identity_key(&first.identity), first);
-        state.entries.insert("duplicate-key".to_string(), duplicate);
-        assert_invalid_state_is_rejected(state);
-    }
-
-    #[test]
     fn state_rejects_pending_identity_without_entry() {
         let entry = hidden_entry(now());
         let mut state = MaintenanceState::default();
@@ -517,6 +506,38 @@ mod tests {
             PendingOperationKind::Recycle,
         ));
         assert_invalid_state_is_rejected(state);
+    }
+
+    #[test]
+    fn state_rejects_pending_fingerprint_mismatch() {
+        let entry = hidden_entry(now());
+        let mut state = MaintenanceState::default();
+        state
+            .entries
+            .insert(identity_key(&entry.identity), entry.clone());
+        let mut operation = pending(entry.identity, PendingOperationKind::Recycle);
+        operation.expected_fingerprint = "different".to_string();
+        state.pending = Some(operation);
+        assert_invalid_state_is_rejected(state);
+    }
+
+    #[test]
+    fn state_rejects_dangerous_entry_paths() {
+        let entry = hidden_entry(now());
+        for path in [
+            PathBuf::from("/absolute/session.jsonl"),
+            PathBuf::from("./project/session.jsonl"),
+            PathBuf::from("project/../session.jsonl"),
+            PathBuf::from(r"C:drive/session.jsonl"),
+        ] {
+            let mut invalid = MaintenanceState::default();
+            let mut invalid_entry = entry.clone();
+            invalid_entry.original_relative_path = path;
+            invalid
+                .entries
+                .insert(identity_key(&invalid_entry.identity), invalid_entry);
+            assert_invalid_state_is_rejected(invalid);
+        }
     }
 
     #[test]
@@ -590,6 +611,49 @@ mod tests {
                 .state
                 .entries
                 .insert("wrong-key".to_string(), entry.clone());
+            locked.persist()
+        });
+        assert!(result.is_err());
+        assert!(!dir.path().join("session-maintenance.json").exists());
+    }
+
+    #[test]
+    fn locked_persist_rejects_pending_fingerprint_without_rewriting() {
+        let dir = tempdir().unwrap();
+        let store = StateStore::from_config_dir(dir.path());
+        let entry = hidden_entry(now());
+        store
+            .update(|state| {
+                state
+                    .entries
+                    .insert(identity_key(&entry.identity), entry.clone());
+                Ok(())
+            })
+            .unwrap();
+        let path = dir.path().join("session-maintenance.json");
+        let original = std::fs::read(&path).unwrap();
+
+        let result = store.transaction(|locked| {
+            let mut operation = pending(entry.identity.clone(), PendingOperationKind::Recycle);
+            operation.expected_fingerprint = "different".to_string();
+            locked.state.pending = Some(operation);
+            locked.persist()
+        });
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+
+    #[test]
+    fn locked_persist_rejects_dangerous_entry_path_without_writing() {
+        let dir = tempdir().unwrap();
+        let store = StateStore::from_config_dir(dir.path());
+        let mut entry = hidden_entry(now());
+        entry.original_relative_path = PathBuf::from("../outside/session.jsonl");
+        let result = store.transaction(|locked| {
+            locked
+                .state
+                .entries
+                .insert(identity_key(&entry.identity), entry.clone());
             locked.persist()
         });
         assert!(result.is_err());
