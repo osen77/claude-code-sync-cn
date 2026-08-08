@@ -467,14 +467,28 @@ fn run_gated_children(
 }
 
 fn wait_child(child: &mut Option<Child>, label: &str) -> Result<ExitStatus, String> {
-    let process = child
-        .as_mut()
-        .ok_or_else(|| format!("{label} child was already reaped"))?;
-    let status = process
-        .wait()
-        .map_err(|error| format!("wait {label} failed: {error}"))?;
-    *child = None;
-    Ok(status)
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let process = child
+            .as_mut()
+            .ok_or_else(|| format!("{label} child was already reaped"))?;
+        match process
+            .try_wait()
+            .map_err(|error| format!("poll {label} failed: {error}"))?
+        {
+            Some(status) => {
+                *child = None;
+                return Ok(status);
+            }
+            None if Instant::now() < deadline => thread::sleep(Duration::from_millis(5)),
+            None => {
+                let _ = process.kill();
+                let _ = process.wait();
+                *child = None;
+                return Err(format!("timed out waiting for {label}"));
+            }
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -759,7 +773,11 @@ fn atomic_reader_stress_observes_only_old_or_new_complete_cache() {
         serde_json::from_slice(&fs::read(fixture.cache_path()).expect("final cache"))
             .expect("final cache remains parseable");
     assert!(final_value == old_value || final_value == new_value);
-    let _: SessionIndexCache = serde_json::from_value(final_value).expect("final cache object");
+    let parsed: SessionIndexCache =
+        serde_json::from_value(final_value).expect("final cache object");
+    assert_eq!(parsed.version, 4);
+    let entry = parsed.entries.values().next().expect("cache entry");
+    assert_eq!(entry.has_custom_title, entry.title == "new");
 }
 
 fn cache_variant(title: &str) -> SessionIndexCache {
@@ -770,7 +788,7 @@ fn cache_variant(title: &str) -> SessionIndexCache {
         source: "claude".to_string(),
         session_id: format!("session-{title}"),
         title: title.to_string(),
-        has_custom_title: false,
+        has_custom_title: title == "new",
         project_name: "cache-task4".to_string(),
         project_dir: "/tmp/cache-task4".to_string(),
         message_count: 1,
@@ -780,7 +798,7 @@ fn cache_variant(title: &str) -> SessionIndexCache {
         last_activity: None,
     };
     SessionIndexCache {
-        version: 3,
+        version: 4,
         entries: HashMap::from([(format!("/tmp/{title}.jsonl"), entry)]),
     }
 }
@@ -839,12 +857,17 @@ fn lock_holder_child_blocks_writer_until_marker_release_then_writer_succeeds() {
     );
 
     fs::write(&release, b"release").expect("release lock holder");
-    let writer_output = writer.wait_with_output().expect("wait writer");
-    assert_success(&writer_output);
-    let holder_output = holder.wait_with_output().expect("wait lock holder");
+    let mut writer = Some(writer);
+    let writer_status = wait_child(&mut writer, "lock writer").expect("wait lock writer");
     assert!(
-        holder_output.status.success(),
-        "lock holder failed: {holder_output:?}"
+        writer_status.success(),
+        "lock writer failed: {writer_status}"
+    );
+    let mut holder = Some(holder);
+    let holder_status = wait_child(&mut holder, "lock holder").expect("wait lock holder");
+    assert!(
+        holder_status.success(),
+        "lock holder failed: {holder_status}"
     );
     assert!(
         child_log.exists(),

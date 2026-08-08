@@ -14,6 +14,7 @@ pub(crate) fn validate_project_component(component: &str) -> Result<()> {
         || component.starts_with('\\')
         || component.contains('/')
         || component.contains('\\')
+        || component.contains(':')
         || is_windows_absolute(component)
     {
         return Err(anyhow!("invalid project path component: {component:?}"));
@@ -335,6 +336,8 @@ mod tests {
             "project\\name",
             "C:\\tmp",
             "C:/tmp",
+            "C:tmp",
+            "project:alternate",
         ] {
             assert!(
                 validate_project_component(value).is_err(),

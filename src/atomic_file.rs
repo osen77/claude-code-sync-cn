@@ -27,7 +27,7 @@ impl FileLock {
         }
         let file = options.open(lock_path)?;
         validate_open_lock_path(lock_path)?;
-        set_private_permissions(lock_path)?;
+        set_private_file_permissions(&file)?;
         FileExt::lock(&file)?;
         Ok(Self { file })
     }
@@ -83,7 +83,7 @@ pub(crate) fn persist_json_atomic<T: Serialize>(target: &Path, value: &T) -> Res
     std::fs::create_dir_all(parent)?;
     let bytes = serde_json::to_vec(value)?;
     let mut temp = NamedTempFile::new_in(parent)?;
-    set_private_permissions(temp.path())?;
+    set_private_file_permissions(temp.as_file())?;
     temp.write_all(&bytes)?;
     temp.flush()?;
     temp.as_file().sync_all()?;
@@ -141,14 +141,14 @@ pub(crate) fn test_force_parent_sync_failure(enabled: bool) {
 }
 
 #[cfg(unix)]
-fn set_private_permissions(path: &Path) -> Result<()> {
+fn set_private_file_permissions(file: &File) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn set_private_permissions(_path: &Path) -> Result<()> {
+fn set_private_file_permissions(_file: &File) -> Result<()> {
     Ok(())
 }
 

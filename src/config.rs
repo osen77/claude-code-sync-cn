@@ -150,6 +150,28 @@ mod tests {
     use super::*;
     use serial_test::serial;
 
+    struct EnvGuard {
+        key: &'static str,
+        original: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.original.take() {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     #[test]
     #[serial]
     fn test_config_paths() {
@@ -202,13 +224,11 @@ mod tests {
     #[serial]
     #[cfg(target_os = "linux")]
     fn test_xdg_config_home_respected() {
-        // Set XDG_CONFIG_HOME and verify it's used
-        std::env::set_var("XDG_CONFIG_HOME", "/tmp/test-xdg-config");
+        let _guard = EnvGuard::set("XDG_CONFIG_HOME", "/tmp/test-xdg-config");
         let config_dir = ConfigManager::config_dir().unwrap();
         assert!(config_dir
             .to_string_lossy()
             .contains("/tmp/test-xdg-config/claude-code-sync"));
-        std::env::remove_var("XDG_CONFIG_HOME");
     }
 
     #[test]
@@ -224,14 +244,8 @@ mod tests {
     #[test]
     #[serial]
     fn test_config_dir_override() {
-        // Save and restore to avoid polluting parallel tests
-        let saved = std::env::var(CONFIG_DIR_ENV).ok();
-        std::env::set_var(CONFIG_DIR_ENV, "/tmp/test-override");
+        let _guard = EnvGuard::set(CONFIG_DIR_ENV, "/tmp/test-override");
         let config_dir = ConfigManager::config_dir().unwrap();
         assert_eq!(config_dir, PathBuf::from("/tmp/test-override"));
-        match saved {
-            Some(v) => std::env::set_var(CONFIG_DIR_ENV, v),
-            None => std::env::remove_var(CONFIG_DIR_ENV),
-        }
     }
 }

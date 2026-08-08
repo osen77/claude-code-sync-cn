@@ -1436,6 +1436,10 @@ mod tests {
         )
         .unwrap();
 
+        let cold = SessionIndexCache::load_with_status(temp.path());
+        assert!(cold.cache.entries.is_empty());
+        assert_eq!(cold.warning.as_deref(), Some("cache version mismatch"));
+
         let state = file_state_for_test(&path);
         let delta = CacheDelta {
             upserts: vec![CacheUpsert {

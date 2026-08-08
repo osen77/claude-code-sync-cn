@@ -1374,6 +1374,7 @@ fn scan_claude_summaries_cached(
                     let malformed_lines = outcome.malformed_lines;
                     let session = outcome.value;
                     if malformed_lines > 0 {
+                        tracker.mark_incomplete("claude");
                         if let Some(key) = candidate.path_key.clone() {
                             delta.removals.push(CacheRemoval {
                                 key,
@@ -1536,6 +1537,7 @@ fn scan_codex_summaries_cached(
                 let mut summary = SessionSummary::from_codex_session(&session, project_name, title);
                 summary.file_size = candidate.file_size;
                 if malformed_lines > 0 {
+                    tracker.mark_incomplete("codex");
                     if let Some(key) = candidate.path_key.clone() {
                         delta.removals.push(CacheRemoval {
                             key,
@@ -1656,6 +1658,7 @@ fn scan_omp_summaries_cached(
                     let mut summary = SessionSummary::from_omp_session(&session, &project_name);
                     summary.file_size = candidate.file_size;
                     if malformed_lines > 0 {
+                        tracker.mark_incomplete("omp");
                         if let Some(key) = candidate.path_key.clone() {
                             delta.removals.push(CacheRemoval {
                                 key,
@@ -7897,6 +7900,10 @@ mod tests {
         assert_eq!(first.diagnostics.cache_hits, 0);
         assert_eq!(first.diagnostics.cache_misses, 3);
         assert!(first.diagnostics.degraded());
+        assert!(
+            first.completed_sources.is_empty(),
+            "partial parses must block maintenance for every affected source"
+        );
         let cache = SessionIndexCache::load(&config);
         assert!(cache.entries.is_empty());
 
@@ -7908,6 +7915,7 @@ mod tests {
         assert_eq!(second.diagnostics.malformed_files, 3);
         assert_eq!(second.diagnostics.cache_hits, 0);
         assert_eq!(second.diagnostics.cache_misses, 3);
+        assert!(second.completed_sources.is_empty());
         assert!(SessionIndexCache::load(&config).entries.is_empty());
     }
 
@@ -8280,8 +8288,14 @@ mod tests {
         )
         .unwrap();
 
-        scan_all_session_summaries_with_roots(None, SessionSourceFilter::Claude, &roots, &config)
-            .unwrap();
+        let partial = scan_all_session_summaries_with_roots(
+            None,
+            SessionSourceFilter::Claude,
+            &roots,
+            &config,
+        )
+        .unwrap();
+        assert!(!partial.completed_sources.contains(&SessionSource::Claude));
 
         let cache = SessionIndexCache::load(&config);
         assert!(!cache
