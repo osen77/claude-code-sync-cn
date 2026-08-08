@@ -232,6 +232,14 @@ impl SessionSummary {
         }
     }
 
+    /// Return whether this summary contains a usable conversation and title.
+    ///
+    /// This semantic check is shared by active filesystem scans and recycled-file
+    /// queries so parseable metadata-only or title-less sessions are never exposed.
+    pub(crate) fn is_valid(&self) -> bool {
+        self.message_count > 0 && !self.title.trim().is_empty() && self.title != "(No title)"
+    }
+
     /// Get a truncated title for display (Unicode-safe).
     pub fn display_title(&self, max_chars: usize) -> String {
         let title = self.title.replace('\n', " ");
@@ -416,5 +424,33 @@ mod tests {
 
         assert!(!SessionSummary::from_session(&plain, "project", Path::new(".")).has_custom_title);
         assert!(SessionSummary::from_session(&renamed, "project", Path::new(".")).has_custom_title);
+    }
+
+    #[test]
+    fn is_valid_requires_messages_and_a_real_title() {
+        let mut summary = SessionSummary {
+            source: "claude".to_string(),
+            session_id: "s1".to_string(),
+            title: "A real title".to_string(),
+            project_name: "project".to_string(),
+            project_dir: PathBuf::from("."),
+            file_path: PathBuf::from("s1.jsonl"),
+            message_count: 1,
+            user_message_count: 1,
+            assistant_message_count: 0,
+            first_timestamp: None,
+            last_activity: None,
+            file_size: 1,
+            has_custom_title: false,
+        };
+        assert!(summary.is_valid());
+
+        summary.message_count = 0;
+        assert!(!summary.is_valid());
+        summary.message_count = 1;
+        summary.title = "(No title)".to_string();
+        assert!(!summary.is_valid());
+        summary.title.clear();
+        assert!(!summary.is_valid());
     }
 }

@@ -370,7 +370,7 @@ enum Commands {
         #[arg(short, long, global = true, default_value = "all")]
         source: SessionSourceArg,
 
-        /// Include hidden, recycled, and purged maintenance entries
+        /// Include hidden and recycled maintenance entries
         #[arg(long, global = true)]
         include_hidden: bool,
     },

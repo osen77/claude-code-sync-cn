@@ -278,9 +278,6 @@ pub(crate) fn validate_regular_candidate(root: &Path, path: &Path) -> Result<()>
 fn validate_existing_components(root: &Path, path: &Path) -> Result<()> {
     let mut current = path.to_path_buf();
     while let Some(_name) = current.file_name() {
-        let Some(parent) = current.parent() else {
-            break;
-        };
         match fs::symlink_metadata(&current) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 return Err(anyhow!(
@@ -292,10 +289,13 @@ fn validate_existing_components(root: &Path, path: &Path) -> Result<()> {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(anyhow!(error)),
         }
-        current = parent.to_path_buf();
         if current == root {
             break;
         }
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        current = parent.to_path_buf();
     }
     Ok(())
 }

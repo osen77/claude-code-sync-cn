@@ -325,9 +325,9 @@ fn is_valid_session(session: &ConversationSession) -> bool {
     session.message_count() > 0 && session.title().is_some()
 }
 
-/// Check if a SessionSummary is valid (has messages and a real title)
+/// Compatibility wrapper for the shared SessionSummary semantic validation.
 fn is_valid_session_summary(summary: &SessionSummary) -> bool {
-    summary.message_count > 0 && summary.title != "(No title)"
+    summary.is_valid()
 }
 
 #[cfg(test)]
@@ -5344,6 +5344,25 @@ pub fn handle_session_delete(session_id: &str, force: bool) -> Result<()> {
     handle_session_delete_with_source(session_id, force, SessionSourceFilter::All)
 }
 
+fn validate_hidden_restore_candidate(
+    entry: &MaintenanceEntry,
+    summary: Option<&SessionSummary>,
+    roots: &MaintenanceRoots,
+) -> Result<()> {
+    let summary = summary.context("cannot restore hidden session: no scanned local summary")?;
+    if !summary.is_valid() {
+        anyhow::bail!("cannot restore hidden session: local summary is not valid")
+    }
+    let source_root = roots.source_root(entry.identity.source);
+    validate_directory_root(source_root)?;
+    let expected_path = safe_join_within_root(source_root, &entry.original_relative_path)?;
+    if summary.file_path != expected_path {
+        anyhow::bail!("cannot restore hidden session: scanned local path does not match state")
+    }
+    validate_regular_candidate(source_root, &summary.file_path)
+        .context("cannot restore hidden session: local copy is unavailable")
+}
+
 /// Restore a session that exists in the sync repo but is missing locally.
 pub fn handle_session_restore_with_source(
     session_id: Option<&str>,
@@ -5372,9 +5391,15 @@ pub fn handle_session_restore_with_source(
                         scan.diagnostics.summary_line()
                     );
                 }
+                let identity = resolved.identity.clone();
                 if let Some(entry) = resolved.entry {
                     match entry.lifecycle {
                         LifecycleState::Hidden => {
+                            validate_hidden_restore_candidate(
+                                &entry,
+                                resolved.summary.as_ref(),
+                                &maintenance_roots,
+                            )?;
                             store.update(|state| {
                                 let key = identity_key(&entry.identity);
                                 let current = state
@@ -5394,12 +5419,47 @@ pub fn handle_session_restore_with_source(
                             return Ok(());
                         }
                         LifecycleState::Recycled => {
-                            restore_session(
+                            if identity.source != SessionSource::Claude {
+                                let available = load_recycled_summaries(
+                                    &maintenance_roots,
+                                    &maintenance_state,
+                                    source,
+                                )?
+                                .iter()
+                                .any(|summary| {
+                                    summary.source == identity.source.as_str()
+                                        && summary.session_id == identity.session_id
+                                });
+                                if !available {
+                                    anyhow::bail!(
+                                        "No local recycled copy is available for {} session {}",
+                                        identity.source.label(),
+                                        target_id
+                                    );
+                                }
+                            }
+                            if let Err(error) = restore_session(
                                 &store,
                                 &maintenance_roots,
                                 &entry,
                                 chrono::Utc::now(),
-                            )?;
+                            ) {
+                                let final_path = safe_join_within_root(
+                                    &maintenance_roots.recycle,
+                                    &crate::session_maintenance::recycle::recycle_relative_path(
+                                        &entry,
+                                    ),
+                                )?;
+                                if identity.source != SessionSource::Claude && !final_path.exists()
+                                {
+                                    anyhow::bail!(
+                                        "No local recycled copy is available for {} session {}",
+                                        identity.source.label(),
+                                        target_id
+                                    );
+                                }
+                                return Err(error);
+                            }
                             store.update(|state| {
                                 let key = identity_key(&entry.identity);
                                 if let Some(current) = state.entries.get_mut(&key) {
@@ -5415,7 +5475,10 @@ pub fn handle_session_restore_with_source(
                             return Ok(());
                         }
                         LifecycleState::Visible => {
-                            if resolved.summary.is_some() {
+                            if let Some(summary) = resolved.summary.as_ref() {
+                                if !summary.is_valid() {
+                                    anyhow::bail!("local session summary is not valid")
+                                }
                                 store.update(|state| {
                                     let key = identity_key(&entry.identity);
                                     if let Some(current) = state.entries.get_mut(&key) {
@@ -5434,15 +5497,22 @@ pub fn handle_session_restore_with_source(
                         LifecycleState::PurgedLocal => {}
                     }
                 }
+                if identity.source != SessionSource::Claude {
+                    anyhow::bail!(
+                        "No local recycled copy is available for {} session {}",
+                        identity.source.label(),
+                        target_id
+                    );
+                }
             }
             Err(_) if !source.includes_claude() => {
                 anyhow::bail!(
                     "No local recycled copy is available for {} session {}",
-                    source_label(match source {
-                        SessionSourceFilter::Codex => "codex",
-                        SessionSourceFilter::Omp => "omp",
-                        _ => "claude",
-                    }),
+                    match source {
+                        SessionSourceFilter::Codex => "CX",
+                        SessionSourceFilter::Omp => "OM",
+                        _ => "CC",
+                    },
                     target_id
                 );
             }
@@ -5452,11 +5522,11 @@ pub fn handle_session_restore_with_source(
         if !source.includes_claude() {
             anyhow::bail!(
                 "No local recycled copy is available for {} session {}",
-                source_label(match source {
-                    SessionSourceFilter::Codex => "codex",
-                    SessionSourceFilter::Omp => "omp",
-                    _ => "claude",
-                }),
+                match source {
+                    SessionSourceFilter::Codex => "CX",
+                    SessionSourceFilter::Omp => "OM",
+                    _ => "CC",
+                },
                 target_id
             );
         }
@@ -6748,6 +6818,42 @@ mod tests {
             fs::read_to_string(target.file_path).unwrap(),
             "remote-session\n"
         );
+    }
+
+    #[test]
+    fn hidden_restore_requires_a_scanned_valid_local_summary() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = MaintenanceRoots {
+            claude: temp.path().join("claude"),
+            codex: temp.path().join("codex"),
+            omp: temp.path().join("omp"),
+            recycle: temp.path().join("recycle"),
+        };
+        fs::create_dir_all(&roots.claude).unwrap();
+        let entry = MaintenanceEntry {
+            identity: SessionIdentity {
+                source: SessionSource::Claude,
+                session_id: "hidden-id".to_string(),
+            },
+            original_relative_path: PathBuf::from("project/hidden-id.jsonl"),
+            project_name: "project".to_string(),
+            fingerprint: "unused".to_string(),
+            lifecycle: LifecycleState::Hidden,
+            classifier_version: CLASSIFIER_VERSION,
+            score: 100,
+            reason_codes: vec![],
+            hidden_since: None,
+            recycled_at: None,
+            purged_at: None,
+            keep: false,
+            explicit_test: true,
+        };
+
+        let error = validate_hidden_restore_candidate(&entry, None, &roots)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("local summary") || error.contains("local copy"));
+        assert!(!roots.claude.join("project/hidden-id.jsonl").exists());
     }
 
     #[test]

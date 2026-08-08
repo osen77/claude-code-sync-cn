@@ -220,6 +220,9 @@ pub(crate) fn load_recycled_summaries(
                     SessionSummary::from_omp_session(&session, &entry.project_name)
                 }
             };
+            if !summary.is_valid() {
+                anyhow::bail!("recycled session summary is not semantically valid")
+            }
             summary.source = entry.identity.source.as_str().to_string();
             summary.session_id = entry.identity.session_id.clone();
             summary.project_name = entry.project_name.clone();
@@ -1131,6 +1134,89 @@ mod tests {
         .unwrap_err();
         assert!(error.to_string().contains("load session maintenance state"));
         assert!(fixture.source_file.exists());
+    }
+
+    #[test]
+    fn load_recycled_summaries_skips_semantically_invalid_entries_for_all_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let roots = recycle::MaintenanceRoots {
+            claude: root.join("claude"),
+            codex: root.join("codex"),
+            omp: root.join("omp"),
+            recycle: root.join("recycle"),
+        };
+        let config = root.join("config");
+        for path in [
+            &roots.claude,
+            &roots.codex,
+            &roots.omp,
+            &roots.recycle,
+            &config,
+        ] {
+            fs::create_dir_all(path).unwrap();
+        }
+        let store = state::StateStore::from_config_dir(&config);
+        let fixtures = [
+            (
+                SessionSource::Claude,
+                "cc-invalid",
+                PathBuf::from("cc-invalid.jsonl"),
+                r#"{"type":"user","sessionId":"cc-invalid","cwd":"/tmp/project","timestamp":"2026-08-08T12:00:00Z","message":{"role":"user","content":[]}}
+"#,
+            ),
+            (
+                SessionSource::Codex,
+                "cx-invalid",
+                PathBuf::from("cx-invalid.jsonl"),
+                r#"{"type":"session_meta","payload":{"id":"cx-invalid","cwd":"/tmp/project"},"timestamp":"2026-08-08T12:00:00Z"}
+"#,
+            ),
+            (
+                SessionSource::Omp,
+                "om-invalid",
+                PathBuf::from("om-invalid.jsonl"),
+                r#"{"type":"session","id":"om-invalid","cwd":"/tmp/project","timestamp":"2026-08-08T12:00:00Z"}
+"#,
+            ),
+        ];
+        for (source, session_id, relative, content) in fixtures {
+            let source_file = roots.source_root(source).join(&relative);
+            fs::write(&source_file, content).unwrap();
+            let fingerprint = fingerprint_file(&source_file).unwrap().digest;
+            let identity = SessionIdentity {
+                source,
+                session_id: session_id.to_string(),
+            };
+            let entry = state::MaintenanceEntry {
+                identity: identity.clone(),
+                original_relative_path: relative,
+                project_name: "project".to_string(),
+                fingerprint,
+                lifecycle: LifecycleState::Recycled,
+                classifier_version: classifier::CLASSIFIER_VERSION,
+                score: 100,
+                reason_codes: vec![],
+                hidden_since: None,
+                recycled_at: Some(Utc::now()),
+                purged_at: None,
+                keep: false,
+                explicit_test: true,
+            };
+            let final_path = roots.recycle.join(recycle::recycle_relative_path(&entry));
+            fs::create_dir_all(final_path.parent().unwrap()).unwrap();
+            fs::rename(source_file, final_path).unwrap();
+            store
+                .update(|state| {
+                    state.entries.insert(identity_key(&identity), entry);
+                    Ok(())
+                })
+                .unwrap();
+        }
+
+        let state = store.load().unwrap();
+        let summaries = load_recycled_summaries(&roots, &state, SessionSourceFilter::All).unwrap();
+        assert!(summaries.is_empty());
     }
 
     #[test]
