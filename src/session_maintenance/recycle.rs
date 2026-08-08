@@ -12,7 +12,7 @@ use crate::session_model::SessionSource;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
 use tempfile::NamedTempFile;
 
@@ -49,8 +49,7 @@ fn verify_recycle_file(roots: &MaintenanceRoots, entry: &MaintenanceEntry) -> Re
     ensure_recycle_root(&roots.recycle)?;
     let relative = recycle_relative_path(entry);
     let path = safe_join_within_root(&roots.recycle, &relative)?;
-    validate_regular_candidate(&roots.recycle, &path)?;
-    verify_fingerprint(&path, &entry.fingerprint)
+    verify_regular_fingerprint_within_root(&roots.recycle, &path, &entry.fingerprint)
 }
 
 /// Move a verified source session into the recycle store transactionally.
@@ -122,7 +121,11 @@ pub(crate) fn recycle_session(
         locked.persist()?;
 
         if path_is_regular(&final_path)? {
-            verify_fingerprint(&final_path, &entry.fingerprint)?;
+            verify_regular_fingerprint_within_root(
+                &roots.recycle,
+                &final_path,
+                &entry.fingerprint,
+            )?;
             if path_is_regular(&staging_path)? {
                 remove_verified(&roots.recycle, &staging_path, &entry.fingerprint)?;
             }
@@ -177,8 +180,7 @@ pub(crate) fn restore_session(
             let source_root = roots.source_root(entry.identity.source);
             validate_directory_root(source_root)?;
             let destination = safe_join_within_root(source_root, &entry.original_relative_path)?;
-            validate_regular_candidate(source_root, &destination)?;
-            verify_fingerprint(&destination, &entry.fingerprint)?;
+            verify_regular_fingerprint_within_root(source_root, &destination, &entry.fingerprint)?;
             ensure_recycle_root(&roots.recycle)?;
             let final_relative = recycle_relative_path(&entry);
             let final_path = safe_join_within_root(&roots.recycle, &final_relative)?;
@@ -205,12 +207,10 @@ pub(crate) fn restore_session(
         ensure_recycle_root(&roots.recycle)?;
         let final_relative = recycle_relative_path(&entry);
         let final_path = safe_join_within_root(&roots.recycle, &final_relative)?;
-        validate_regular_candidate(&roots.recycle, &final_path)?;
-        verify_fingerprint(&final_path, &entry.fingerprint)?;
+        verify_regular_fingerprint_within_root(&roots.recycle, &final_path, &entry.fingerprint)?;
         let destination = safe_join_within_root(source_root, &entry.original_relative_path)?;
         if path_is_regular(&destination)? {
-            validate_regular_candidate(source_root, &destination)?;
-            verify_fingerprint(&destination, &entry.fingerprint)
+            verify_regular_fingerprint_within_root(source_root, &destination, &entry.fingerprint)
                 .with_context(|| format!("restore conflict: destination differs for {key}"))?;
         } else {
             prepare_regular_file_destination(source_root, &entry.original_relative_path)?;
@@ -234,16 +234,15 @@ pub(crate) fn restore_session(
                 source_root,
                 &entry.original_relative_path,
                 &entry.fingerprint,
+                maybe_create_restore_destination_target_for_test,
             )?;
         }
-        validate_regular_candidate(source_root, &destination)?;
-        verify_fingerprint(&destination, &entry.fingerprint)?;
+        verify_regular_fingerprint_within_root(source_root, &destination, &entry.fingerprint)?;
         maybe_replace_restore_destination_for_test(&destination)?;
         // The recycle copy is the only remaining durable source. Revalidate the
         // destination immediately before deleting it, including the preexisting
         // destination path and the freshly copied path.
-        validate_regular_candidate(source_root, &destination)?;
-        verify_fingerprint(&destination, &entry.fingerprint)?;
+        verify_regular_fingerprint_within_root(source_root, &destination, &entry.fingerprint)?;
         remove_verified(&roots.recycle, &final_path, &entry.fingerprint)?;
 
         let current = locked
@@ -305,8 +304,7 @@ pub(crate) fn purge_session(
         ensure_recycle_root(&roots.recycle)?;
         let final_relative = recycle_relative_path(&entry);
         let final_path = safe_join_within_root(&roots.recycle, &final_relative)?;
-        validate_regular_candidate(&roots.recycle, &final_path)?;
-        verify_fingerprint(&final_path, &entry.fingerprint)?;
+        verify_regular_fingerprint_within_root(&roots.recycle, &final_path, &entry.fingerprint)?;
         locked.state.pending = Some(PendingOperation {
             identity: entry.identity.clone(),
             operation: PendingOperationKind::Purge,
@@ -397,13 +395,22 @@ fn reconcile_recycle(
     }
 
     if staging_state.is_some() && final_state.is_none() {
-        prepare_regular_file_destination(&roots.recycle, &pending.recycle_relative_path)?;
-        fs::rename(&staging, &final_path).context("failed to promote recycle staging file")?;
-        sync_parent_directory(staging.parent().context("staging has no parent")?)?;
-        sync_parent_directory(final_path.parent().context("final has no parent")?)?;
+        let final_path =
+            prepare_regular_file_destination(&roots.recycle, &pending.recycle_relative_path)?;
+        promote_noclobber(
+            &roots.recycle,
+            &staging,
+            &roots.recycle,
+            &final_path,
+            &pending.expected_fingerprint,
+            maybe_create_staging_to_final_target_for_test,
+        )?;
         maybe_replace_reconcile_final_for_test(&final_path)?;
-        validate_regular_candidate(&roots.recycle, &final_path)?;
-        verify_fingerprint(&final_path, &pending.expected_fingerprint)?;
+        verify_regular_fingerprint_within_root(
+            &roots.recycle,
+            &final_path,
+            &pending.expected_fingerprint,
+        )?;
         staging_state = None;
         final_state = Some(pending.expected_fingerprint.clone());
     } else if staging_state.is_some() && final_state.is_some() {
@@ -481,10 +488,14 @@ fn reconcile_restore(
     }
     if source_state.is_none() {
         if staging_state.is_some() && final_state.is_none() {
-            prepare_regular_file_destination(&roots.recycle, &pending.recycle_relative_path)?;
-            fs::rename(&staging, &final_path).context("failed to promote restore staging file")?;
-            sync_parent_directory(staging.parent().context("staging has no parent")?)?;
-            sync_parent_directory(final_path.parent().context("final has no parent")?)?;
+            promote_noclobber(
+                &roots.recycle,
+                &staging,
+                &roots.recycle,
+                &final_path,
+                &pending.expected_fingerprint,
+                noop_no_clobber_hook,
+            )?;
         }
         copy_verified_file(
             &final_path,
@@ -492,9 +503,21 @@ fn reconcile_restore(
             source_root,
             &pending.source_relative_path,
             &pending.expected_fingerprint,
+            noop_no_clobber_hook,
         )?;
     }
     if path_is_regular(&final_path)? {
+        maybe_replace_restore_destination_for_test(&destination)?;
+        verify_regular_fingerprint_within_root(
+            source_root,
+            &destination,
+            &pending.expected_fingerprint,
+        )?;
+        verify_regular_fingerprint_within_root(
+            &roots.recycle,
+            &final_path,
+            &pending.expected_fingerprint,
+        )?;
         remove_verified(&roots.recycle, &final_path, &pending.expected_fingerprint)?;
     }
     if path_is_regular(&staging)? {
@@ -569,8 +592,7 @@ fn inspect_file(root: &Path, path: &Path, expected: &str) -> Result<Option<Strin
             )
         }
         Ok(_) => {
-            validate_regular_candidate(root, path)?;
-            verify_fingerprint(path, expected)?;
+            verify_regular_fingerprint_within_root(root, path, expected)?;
             Ok(Some(expected.to_string()))
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -606,9 +628,13 @@ fn verify_fingerprint(path: &Path, expected: &str) -> Result<()> {
     Ok(())
 }
 
-fn remove_verified(root: &Path, path: &Path, expected: &str) -> Result<()> {
+fn verify_regular_fingerprint_within_root(root: &Path, path: &Path, expected: &str) -> Result<()> {
     validate_regular_candidate(root, path)?;
-    verify_fingerprint(path, expected)?;
+    verify_fingerprint(path, expected)
+}
+
+fn remove_verified(root: &Path, path: &Path, expected: &str) -> Result<()> {
+    verify_regular_fingerprint_within_root(root, path, expected)?;
     fs::remove_file(path).with_context(|| format!("failed to remove {}", path.display()))?;
     sync_parent_directory(path.parent().context("removed file has no parent")?)?;
     Ok(())
@@ -637,27 +663,28 @@ fn move_source_to_recycle(
         copy_source_to_final(source_root, source, recycle_root, final_path, expected)?;
         return Ok(());
     }
-    if let Err(error) = fs::rename(source, staging) {
-        if is_cross_device_error(&error) {
-            copy_source_to_final(source_root, source, recycle_root, final_path, expected)?;
-            return Ok(());
-        }
-        return Err(error).context("failed to stage session for recycle");
-    }
-    sync_parent_directory(source.parent().context("source has no parent")?)?;
-    sync_parent_directory(staging.parent().context("staging has no parent")?)?;
+
+    move_noclobber(
+        source_root,
+        source,
+        recycle_root,
+        staging,
+        expected,
+        maybe_create_source_to_staging_target_for_test,
+    )?;
     if path_is_regular(final_path)? {
-        verify_fingerprint(final_path, expected)?;
+        verify_regular_fingerprint_within_root(recycle_root, final_path, expected)?;
         remove_verified(recycle_root, staging, expected)?;
         return Ok(());
     }
-    if let Err(error) = fs::rename(staging, final_path) {
-        return Err(error).context("failed to promote recycled session");
-    }
-    sync_parent_directory(staging.parent().context("staging has no parent")?)?;
-    sync_parent_directory(final_path.parent().context("final has no parent")?)?;
-    validate_regular_candidate(recycle_root, final_path)?;
-    verify_fingerprint(final_path, expected)
+    promote_noclobber(
+        recycle_root,
+        staging,
+        recycle_root,
+        final_path,
+        expected,
+        maybe_create_staging_to_final_target_for_test,
+    )
 }
 
 fn copy_source_to_final(
@@ -667,32 +694,19 @@ fn copy_source_to_final(
     final_path: &Path,
     expected: &str,
 ) -> Result<()> {
-    validate_regular_candidate(source_root, source)?;
-    verify_fingerprint(source, expected)?;
     let final_relative = final_path
         .strip_prefix(recycle_root)
         .context("recycle target is outside recycle root")?;
     let final_path = prepare_regular_file_destination(recycle_root, final_relative)?;
-    let parent = final_path
-        .parent()
-        .context("recycle target has no parent")?;
-    let mut temp = NamedTempFile::new_in(parent)?;
-    let mut input = File::open(source)?;
-    std::io::copy(&mut input, temp.as_file_mut())?;
-    temp.as_file_mut().flush()?;
-    temp.as_file().sync_all()?;
-    verify_fingerprint(temp.path(), expected)?;
-    if path_is_regular(&final_path)? {
-        verify_fingerprint(&final_path, expected)?;
-        remove_verified(source_root, source, expected)?;
-        return Ok(());
-    }
-    temp.persist(&final_path).map_err(|error| error.error)?;
-    sync_parent_directory(parent)?;
-    validate_regular_candidate(recycle_root, &final_path)?;
-    verify_fingerprint(&final_path, expected)?;
-    remove_verified(source_root, source, expected)?;
-    Ok(())
+    copy_verified_noclobber(
+        source,
+        source_root,
+        recycle_root,
+        &final_path,
+        expected,
+        true,
+        maybe_create_copy_final_target_for_test,
+    )
 }
 
 fn copy_verified_file(
@@ -701,27 +715,146 @@ fn copy_verified_file(
     destination_root: &Path,
     destination_relative: &Path,
     expected: &str,
+    before_commit: NoClobberHook,
+) -> Result<()> {
+    let destination = prepare_regular_file_destination(destination_root, destination_relative)?;
+    copy_verified_noclobber(
+        source,
+        source_root,
+        destination_root,
+        &destination,
+        expected,
+        false,
+        before_commit,
+    )
+}
+
+type NoClobberHook = fn(&Path, &Path) -> Result<()>;
+
+fn move_noclobber(
+    source_root: &Path,
+    source: &Path,
+    destination_root: &Path,
+    destination: &Path,
+    expected: &str,
+    before_commit: NoClobberHook,
 ) -> Result<()> {
     validate_regular_candidate(source_root, source)?;
     verify_fingerprint(source, expected)?;
-    let destination = prepare_regular_file_destination(destination_root, destination_relative)?;
+    let relative = destination
+        .strip_prefix(destination_root)
+        .context("destination is outside trusted root")?;
+    let destination = prepare_regular_file_destination(destination_root, relative)?;
+
     if path_is_regular(&destination)? {
-        verify_fingerprint(&destination, expected)?;
+        verify_regular_fingerprint_within_root(destination_root, &destination, expected)?;
+        remove_verified(source_root, source, expected)?;
         return Ok(());
     }
+
+    before_commit(source, &destination)?;
+    match fs::hard_link(source, &destination) {
+        Ok(()) => {
+            sync_parent_directory(
+                destination
+                    .parent()
+                    .context("no parent for no-clobber destination")?,
+            )?;
+            verify_regular_fingerprint_within_root(destination_root, &destination, expected)?;
+            remove_verified(source_root, source, expected)
+        }
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {
+            verify_regular_fingerprint_within_root(destination_root, &destination, expected)?;
+            remove_verified(source_root, source, expected)
+        }
+        Err(error) if is_link_fallback_error(&error) => copy_verified_noclobber(
+            source,
+            source_root,
+            destination_root,
+            &destination,
+            expected,
+            true,
+            noop_no_clobber_hook,
+        ),
+        Err(error) => Err(error).context("failed to create no-clobber hard link"),
+    }
+}
+
+fn promote_noclobber(
+    source_root: &Path,
+    staging: &Path,
+    destination_root: &Path,
+    final_path: &Path,
+    expected: &str,
+    before_commit: NoClobberHook,
+) -> Result<()> {
+    move_noclobber(
+        source_root,
+        staging,
+        destination_root,
+        final_path,
+        expected,
+        before_commit,
+    )
+}
+
+fn copy_verified_noclobber(
+    source: &Path,
+    source_root: &Path,
+    destination_root: &Path,
+    destination: &Path,
+    expected: &str,
+    remove_source: bool,
+    before_commit: NoClobberHook,
+) -> Result<()> {
+    validate_regular_candidate(source_root, source)?;
+    verify_fingerprint(source, expected)?;
+    let relative = destination
+        .strip_prefix(destination_root)
+        .context("destination is outside trusted root")?;
+    let destination = prepare_regular_file_destination(destination_root, relative)?;
+
+    if path_is_regular(&destination)? {
+        verify_regular_fingerprint_within_root(destination_root, &destination, expected)?;
+        if remove_source {
+            remove_verified(source_root, source, expected)?;
+        }
+        return Ok(());
+    }
+
     let parent = destination
         .parent()
-        .context("restore target has no parent")?;
+        .context("no parent for no-clobber destination")?;
     let mut temp = NamedTempFile::new_in(parent)?;
     let mut input = File::open(source)?;
     std::io::copy(&mut input, temp.as_file_mut())?;
     temp.as_file_mut().flush()?;
     temp.as_file().sync_all()?;
     verify_fingerprint(temp.path(), expected)?;
-    temp.persist(&destination).map_err(|error| error.error)?;
+    before_commit(source, &destination)?;
+
+    match temp.persist_noclobber(&destination) {
+        Ok(_) => {}
+        Err(error) if error.error.kind() == ErrorKind::AlreadyExists => {
+            verify_regular_fingerprint_within_root(destination_root, &destination, expected)?;
+            if remove_source {
+                remove_verified(source_root, source, expected)?;
+            }
+            return Ok(());
+        }
+        Err(error) => return Err(error.error.into()),
+    }
+
     sync_parent_directory(parent)?;
-    validate_regular_candidate(destination_root, &destination)?;
-    verify_fingerprint(&destination, expected)
+    verify_regular_fingerprint_within_root(destination_root, &destination, expected)?;
+    if remove_source {
+        remove_verified(source_root, source, expected)?;
+    }
+    Ok(())
+}
+
+fn is_link_fallback_error(error: &std::io::Error) -> bool {
+    error.kind() == ErrorKind::Unsupported || is_cross_device_error(error)
 }
 
 fn ensure_recycle_root(root: &Path) -> Result<()> {
@@ -803,6 +936,95 @@ thread_local! {
     static FORCE_RESTORE_DESTINATION_REPLACEMENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FORCE_RECONCILE_FINAL_REGULAR_REPLACEMENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FORCE_RECONCILE_FINAL_SYMLINK_REPLACEMENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FORCE_SOURCE_TO_STAGING_TARGET: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    static FORCE_STAGING_TO_FINAL_TARGET: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    static FORCE_COPY_FINAL_TARGET: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    static FORCE_RESTORE_DESTINATION_TARGET: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
+    static FORCE_SOURCE_TO_STAGING_SYMLINK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FORCE_COPY_FINAL_SYMLINK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FORCE_RESTORE_DESTINATION_SYMLINK: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+fn noop_no_clobber_hook(_source: &Path, _destination: &Path) -> Result<()> {
+    Ok(())
+}
+
+fn create_race_target_for_test(
+    source: &Path,
+    destination: &Path,
+    same_fingerprint: bool,
+) -> Result<()> {
+    if same_fingerprint {
+        fs::copy(source, destination)?;
+    } else {
+        fs::write(destination, b"different target")?;
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn create_symlink_race_target_for_test(destination: &Path) -> Result<()> {
+    let target = destination.with_file_name("race-target-outside.jsonl");
+    fs::write(&target, b"outside target")?;
+    std::os::unix::fs::symlink(target, destination)?;
+    Ok(())
+}
+
+fn maybe_create_source_to_staging_target_for_test(source: &Path, destination: &Path) -> Result<()> {
+    #[cfg(test)]
+    {
+        #[cfg(unix)]
+        if FORCE_SOURCE_TO_STAGING_SYMLINK.with(std::cell::Cell::get) {
+            return create_symlink_race_target_for_test(destination);
+        }
+        if let Some(same) = FORCE_SOURCE_TO_STAGING_TARGET.with(std::cell::Cell::get) {
+            create_race_target_for_test(source, destination, same)?;
+        }
+    }
+    let _ = (source, destination);
+    Ok(())
+}
+
+fn maybe_create_staging_to_final_target_for_test(source: &Path, destination: &Path) -> Result<()> {
+    #[cfg(test)]
+    if let Some(same) = FORCE_STAGING_TO_FINAL_TARGET.with(std::cell::Cell::get) {
+        create_race_target_for_test(source, destination, same)?;
+    }
+    let _ = (source, destination);
+    Ok(())
+}
+
+fn maybe_create_copy_final_target_for_test(source: &Path, destination: &Path) -> Result<()> {
+    #[cfg(test)]
+    {
+        #[cfg(unix)]
+        if FORCE_COPY_FINAL_SYMLINK.with(std::cell::Cell::get) {
+            return create_symlink_race_target_for_test(destination);
+        }
+        if let Some(same) = FORCE_COPY_FINAL_TARGET.with(std::cell::Cell::get) {
+            create_race_target_for_test(source, destination, same)?;
+        }
+    }
+    let _ = (source, destination);
+    Ok(())
+}
+
+fn maybe_create_restore_destination_target_for_test(
+    source: &Path,
+    destination: &Path,
+) -> Result<()> {
+    #[cfg(test)]
+    {
+        #[cfg(unix)]
+        if FORCE_RESTORE_DESTINATION_SYMLINK.with(std::cell::Cell::get) {
+            return create_symlink_race_target_for_test(destination);
+        }
+        if let Some(same) = FORCE_RESTORE_DESTINATION_TARGET.with(std::cell::Cell::get) {
+            create_race_target_for_test(source, destination, same)?;
+        }
+    }
+    let _ = (source, destination);
+    Ok(())
 }
 
 fn maybe_replace_reconcile_final_for_test(path: &Path) -> Result<()> {
@@ -948,6 +1170,23 @@ mod tests {
             self.roots
                 .recycle
                 .join(staging_relative_path(&recycle_relative_path(&self.entry)))
+        }
+
+        fn set_pending_restore(&self) {
+            let final_relative = recycle_relative_path(&self.entry);
+            self.store
+                .update(|state| {
+                    state.pending = Some(PendingOperation {
+                        identity: self.entry.identity.clone(),
+                        operation: PendingOperationKind::Restore,
+                        source_relative_path: self.entry.original_relative_path.clone(),
+                        staging_relative_path: staging_relative_path(&final_relative),
+                        recycle_relative_path: final_relative,
+                        expected_fingerprint: self.entry.fingerprint.clone(),
+                    });
+                    Ok(())
+                })
+                .unwrap();
         }
     }
 
@@ -1101,6 +1340,184 @@ mod tests {
         let mut same = fixture.entry.clone();
         same.identity.session_id = "abc".to_string();
         assert_eq!(recycle_relative_path(&same), paths[0]);
+    }
+
+    #[test]
+    fn recycle_source_to_staging_race_different_never_clobbers_target() {
+        let fixture = RecycleFixture::new(SessionSource::Claude);
+        FORCE_SOURCE_TO_STAGING_TARGET.with(|mode| mode.set(Some(false)));
+        let result = recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now);
+        FORCE_SOURCE_TO_STAGING_TARGET.with(|mode| mode.set(None));
+        assert!(result.is_err());
+        assert!(fixture.source_file.exists());
+        assert!(fixture.staging_file().exists());
+        assert_eq!(
+            fs::read(fixture.staging_file()).unwrap(),
+            b"different target"
+        );
+        assert!(fixture.store.load().unwrap().pending.is_some());
+    }
+
+    #[test]
+    fn recycle_source_to_staging_race_same_fingerprint_is_idempotent() {
+        let fixture = RecycleFixture::new(SessionSource::Codex);
+        FORCE_SOURCE_TO_STAGING_TARGET.with(|mode| mode.set(Some(true)));
+        let result = recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now);
+        FORCE_SOURCE_TO_STAGING_TARGET.with(|mode| mode.set(None));
+        result.unwrap();
+        assert!(!fixture.source_file.exists());
+        assert!(fixture.recycle_file().exists());
+        assert!(fixture.store.load().unwrap().pending.is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn recycle_source_to_staging_race_symlink_never_removes_source() {
+        let fixture = RecycleFixture::new(SessionSource::Claude);
+        FORCE_SOURCE_TO_STAGING_SYMLINK.with(|flag| flag.set(true));
+        let result = recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now);
+        FORCE_SOURCE_TO_STAGING_SYMLINK.with(|flag| flag.set(false));
+        assert!(result.is_err());
+        assert!(fixture.source_file.exists());
+        assert!(fixture.staging_file().is_symlink());
+        assert!(fixture.store.load().unwrap().pending.is_some());
+    }
+
+    #[test]
+    fn reconcile_staging_to_final_race_different_never_clobbers_target() {
+        let fixture = RecycleFixture::new(SessionSource::Omp);
+        fs::create_dir_all(fixture.staging_file().parent().unwrap()).unwrap();
+        fs::copy(&fixture.source_file, fixture.staging_file()).unwrap();
+        fixture.set_pending_recycle();
+        FORCE_STAGING_TO_FINAL_TARGET.with(|mode| mode.set(Some(false)));
+        let result = reconcile_pending(&fixture.store, &fixture.roots, fixture.now);
+        FORCE_STAGING_TO_FINAL_TARGET.with(|mode| mode.set(None));
+        assert!(result.is_err());
+        assert!(fixture.source_file.exists());
+        assert!(fixture.staging_file().exists());
+        assert_eq!(
+            fs::read(fixture.recycle_file()).unwrap(),
+            b"different target"
+        );
+        assert!(fixture.store.load().unwrap().pending.is_some());
+    }
+
+    #[test]
+    fn reconcile_staging_to_final_race_same_fingerprint_is_idempotent() {
+        let fixture = RecycleFixture::new(SessionSource::Claude);
+        fs::create_dir_all(fixture.staging_file().parent().unwrap()).unwrap();
+        fs::copy(&fixture.source_file, fixture.staging_file()).unwrap();
+        fixture.set_pending_recycle();
+        FORCE_STAGING_TO_FINAL_TARGET.with(|mode| mode.set(Some(true)));
+        let result = reconcile_pending(&fixture.store, &fixture.roots, fixture.now);
+        FORCE_STAGING_TO_FINAL_TARGET.with(|mode| mode.set(None));
+        result.unwrap();
+        assert!(!fixture.source_file.exists());
+        assert!(!fixture.staging_file().exists());
+        assert!(fixture.recycle_file().exists());
+        assert!(fixture.store.load().unwrap().pending.is_none());
+    }
+
+    #[test]
+    fn copy_final_race_different_never_clobbers_target() {
+        let fixture = RecycleFixture::new(SessionSource::Codex);
+        FORCE_COPY_FALLBACK.with(|flag| flag.set(true));
+        FORCE_COPY_FINAL_TARGET.with(|mode| mode.set(Some(false)));
+        let result = recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now);
+        FORCE_COPY_FINAL_TARGET.with(|mode| mode.set(None));
+        FORCE_COPY_FALLBACK.with(|flag| flag.set(false));
+        assert!(result.is_err());
+        assert!(fixture.source_file.exists());
+        assert_eq!(
+            fs::read(fixture.recycle_file()).unwrap(),
+            b"different target"
+        );
+        assert!(fixture.store.load().unwrap().pending.is_some());
+    }
+
+    #[test]
+    fn copy_final_race_same_fingerprint_is_idempotent() {
+        let fixture = RecycleFixture::new(SessionSource::Claude);
+        FORCE_COPY_FALLBACK.with(|flag| flag.set(true));
+        FORCE_COPY_FINAL_TARGET.with(|mode| mode.set(Some(true)));
+        let result = recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now);
+        FORCE_COPY_FINAL_TARGET.with(|mode| mode.set(None));
+        FORCE_COPY_FALLBACK.with(|flag| flag.set(false));
+        result.unwrap();
+        assert!(!fixture.source_file.exists());
+        assert!(fixture.recycle_file().exists());
+        assert!(fixture.store.load().unwrap().pending.is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn copy_final_race_symlink_never_removes_source() {
+        let fixture = RecycleFixture::new(SessionSource::Codex);
+        FORCE_COPY_FALLBACK.with(|flag| flag.set(true));
+        FORCE_COPY_FINAL_SYMLINK.with(|flag| flag.set(true));
+        let result = recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now);
+        FORCE_COPY_FINAL_SYMLINK.with(|flag| flag.set(false));
+        FORCE_COPY_FALLBACK.with(|flag| flag.set(false));
+        assert!(result.is_err());
+        assert!(fixture.source_file.exists());
+        assert!(fixture.recycle_file().is_symlink());
+        assert!(fixture.store.load().unwrap().pending.is_some());
+    }
+
+    #[test]
+    fn restore_destination_race_different_never_clobbers_target() {
+        let fixture = RecycleFixture::new(SessionSource::Omp);
+        recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now).unwrap();
+        FORCE_RESTORE_DESTINATION_TARGET.with(|mode| mode.set(Some(false)));
+        let result = restore_session(
+            &fixture.store,
+            &fixture.roots,
+            &fixture.load_entry(),
+            fixture.now,
+        );
+        FORCE_RESTORE_DESTINATION_TARGET.with(|mode| mode.set(None));
+        assert!(result.is_err());
+        assert!(fixture.source_file.exists());
+        assert_eq!(fs::read(&fixture.source_file).unwrap(), b"different target");
+        assert!(fixture.recycle_file().exists());
+        assert!(fixture.store.load().unwrap().pending.is_some());
+    }
+
+    #[test]
+    fn restore_destination_race_same_fingerprint_is_idempotent() {
+        let fixture = RecycleFixture::new(SessionSource::Claude);
+        recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now).unwrap();
+        FORCE_RESTORE_DESTINATION_TARGET.with(|mode| mode.set(Some(true)));
+        let result = restore_session(
+            &fixture.store,
+            &fixture.roots,
+            &fixture.load_entry(),
+            fixture.now,
+        );
+        FORCE_RESTORE_DESTINATION_TARGET.with(|mode| mode.set(None));
+        result.unwrap();
+        assert!(fixture.source_file.exists());
+        assert!(!fixture.recycle_file().exists());
+        assert_eq!(fixture.load_entry().lifecycle, LifecycleState::Visible);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn restore_destination_race_symlink_never_removes_recycle_source() {
+        let fixture = RecycleFixture::new(SessionSource::Omp);
+        recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now).unwrap();
+        FORCE_RESTORE_DESTINATION_SYMLINK.with(|flag| flag.set(true));
+        let result = restore_session(
+            &fixture.store,
+            &fixture.roots,
+            &fixture.load_entry(),
+            fixture.now,
+        );
+        FORCE_RESTORE_DESTINATION_SYMLINK.with(|flag| flag.set(false));
+        assert!(result.is_err());
+        assert!(fixture.source_file.is_symlink());
+        assert!(fixture.recycle_file().exists());
+        assert!(fixture.store.load().unwrap().pending.is_some());
     }
 
     #[test]
@@ -1276,6 +1693,23 @@ mod tests {
         assert!(fixture.source_file.exists());
         assert!(!fixture.recycle_file().exists());
         assert_eq!(fixture.load_entry().lifecycle, LifecycleState::Visible);
+    }
+
+    #[test]
+    fn reconcile_restore_revalidates_destination_before_removing_recycle_file() {
+        let fixture = RecycleFixture::new(SessionSource::Codex);
+        recycle_session(&fixture.store, &fixture.roots, &fixture.entry, fixture.now).unwrap();
+        fixture.set_pending_restore();
+        FORCE_RESTORE_DESTINATION_REPLACEMENT.with(|flag| flag.set(true));
+        let result = reconcile_pending(&fixture.store, &fixture.roots, fixture.now);
+        FORCE_RESTORE_DESTINATION_REPLACEMENT.with(|flag| flag.set(false));
+        assert!(result.is_err());
+        assert_eq!(
+            fs::read(&fixture.source_file).unwrap(),
+            b"changed during restore"
+        );
+        assert!(fixture.recycle_file().exists());
+        assert!(fixture.store.load().unwrap().pending.is_some());
     }
 
     #[test]
