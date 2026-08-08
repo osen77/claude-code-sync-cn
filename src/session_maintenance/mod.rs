@@ -56,7 +56,7 @@ pub(crate) struct MaintenanceInput<'a> {
 }
 
 /// Aggregate result of one maintenance run.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub struct MaintenanceReport {
     pub candidates: usize,
     pub hidden: usize,

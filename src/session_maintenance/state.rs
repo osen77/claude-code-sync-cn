@@ -11,7 +11,7 @@ use std::path::{Component, Path, PathBuf};
 
 const STATE_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum LifecycleState {
     Visible,

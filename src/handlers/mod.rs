@@ -36,10 +36,11 @@ pub use hooks::{
 pub use onboarding::{is_initialized, run_init_from_config, try_init_from_config};
 #[allow(deprecated, unused_imports)]
 pub use session::{
-    handle_session_delete, handle_session_delete_with_source, handle_session_interactive,
-    handle_session_list, handle_session_overview, handle_session_projects, handle_session_rename,
-    handle_session_rename_with_source, handle_session_restore, handle_session_restore_with_source,
-    handle_session_search, handle_session_show,
+    handle_session_delete, handle_session_delete_with_source, handle_session_explain,
+    handle_session_interactive, handle_session_keep, handle_session_list, handle_session_maintain,
+    handle_session_mark_test, handle_session_overview, handle_session_projects,
+    handle_session_rename, handle_session_rename_with_source, handle_session_restore,
+    handle_session_restore_with_source, handle_session_search, handle_session_show,
 };
 pub use setup::handle_setup;
 pub use undo::{handle_undo_pull, handle_undo_push};

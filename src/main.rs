@@ -369,6 +369,10 @@ enum Commands {
         /// Filter by session source (all, claude, codex, omp)
         #[arg(short, long, global = true, default_value = "all")]
         source: SessionSourceArg,
+
+        /// Include hidden, recycled, and purged maintenance entries
+        #[arg(long, global = true)]
+        include_hidden: bool,
     },
 
     /// Temporarily allow push to sync session deletions to the cloud
@@ -506,6 +510,51 @@ enum ConfigSyncAction {
 
 #[derive(Subcommand)]
 enum SessionAction {
+    /// Run or inspect automatic session maintenance
+    Maintain {
+        /// Enable automatic maintenance
+        #[arg(long, conflicts_with_all = ["disable", "status", "dry_run", "run"])]
+        enable: bool,
+
+        /// Disable automatic maintenance
+        #[arg(long, conflicts_with_all = ["enable", "status", "dry_run", "run"])]
+        disable: bool,
+
+        /// Show maintenance status without changing anything
+        #[arg(long, conflicts_with_all = ["enable", "disable", "dry_run", "run"])]
+        status: bool,
+
+        /// Preview maintenance without changing state or files
+        #[arg(long, conflicts_with_all = ["enable", "disable", "status", "run"])]
+        dry_run: bool,
+
+        /// Apply maintenance lifecycle and file actions now
+        #[arg(long, conflicts_with_all = ["enable", "disable", "status", "dry_run"])]
+        run: bool,
+    },
+
+    /// Explain maintenance lifecycle state for one session
+    Explain {
+        /// Session ID
+        session_id: String,
+
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Keep a session visible and protected from maintenance
+    Keep { session_id: String },
+
+    /// Remove the keep protection from a session
+    Unkeep { session_id: String },
+
+    /// Mark a session as an explicit test candidate
+    MarkTest { session_id: String },
+
+    /// Remove the explicit test marker from a session
+    UnmarkTest { session_id: String },
+
     /// List all sessions (non-interactive output)
     List {
         /// Filter by project name
@@ -545,6 +594,10 @@ enum SessionAction {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+
+        /// Search only sessions currently visible to maintenance
+        #[arg(long)]
+        active_only: bool,
     },
 
     /// Show session details (supports drill-down with --tail/--head/--around)
@@ -656,14 +709,8 @@ fn main() -> Result<()> {
 
     log::debug!("ccs started");
 
-    // Background update check (non-blocking)
-    // Only check if not running update command itself
-    let update_check_handle = std::thread::spawn(check_for_update_silent);
-
-    // Check if this is the update command (skip notification for update command)
+    // Local commands, including every session action, must not start a network update check.
     let is_update_command = matches!(cli.command, Some(Commands::Update { .. }));
-
-    // Commands that are local-only and shouldn't block on network update check
     let is_local_command = matches!(
         cli.command,
         Some(Commands::Session { .. })
@@ -672,9 +719,10 @@ fn main() -> Result<()> {
             | Some(Commands::Report { .. })
             | Some(Commands::History { .. })
     );
+    let update_check_handle = (!is_update_command && !is_local_command)
+        .then(|| std::thread::spawn(check_for_update_silent));
 
-    // Print update notification if available (and not running update/local commands)
-    if !is_update_command && !is_local_command {
+    if let Some(update_check_handle) = update_check_handle {
         if let Ok(Some(new_version)) = update_check_handle.join() {
             print_update_notification(&new_version);
         }
@@ -1102,11 +1150,36 @@ fn main() -> Result<()> {
             action,
             project,
             source,
+            include_hidden,
         } => {
             match action {
+                Some(SessionAction::Maintain {
+                    enable,
+                    disable,
+                    status,
+                    dry_run,
+                    run,
+                }) => {
+                    handle_session_maintain(enable, disable, status, dry_run, run, source.into())?;
+                }
+                Some(SessionAction::Explain { session_id, json }) => {
+                    handle_session_explain(&session_id, json, source.into())?;
+                }
+                Some(SessionAction::Keep { session_id }) => {
+                    handle_session_keep(&session_id, true, source.into())?;
+                }
+                Some(SessionAction::Unkeep { session_id }) => {
+                    handle_session_keep(&session_id, false, source.into())?;
+                }
+                Some(SessionAction::MarkTest { session_id }) => {
+                    handle_session_mark_test(&session_id, true, source.into())?;
+                }
+                Some(SessionAction::UnmarkTest { session_id }) => {
+                    handle_session_mark_test(&session_id, false, source.into())?;
+                }
                 None => {
                     // Interactive mode
-                    handle_session_interactive(project.as_deref(), source.into())?;
+                    handle_session_interactive(project.as_deref(), source.into(), include_hidden)?;
                 }
                 Some(SessionAction::List {
                     project: list_project,
@@ -1114,7 +1187,7 @@ fn main() -> Result<()> {
                 }) => {
                     // Use subcommand project filter if provided, otherwise use global
                     let filter = list_project.as_deref().or(project.as_deref());
-                    handle_session_list(filter, show_ids, source.into())?;
+                    handle_session_list(filter, show_ids, source.into(), include_hidden)?;
                 }
                 Some(SessionAction::Search {
                     keyword,
@@ -1124,6 +1197,7 @@ fn main() -> Result<()> {
                     limit,
                     user_only,
                     json,
+                    active_only,
                 }) => {
                     let filter = search_project.as_deref().or(project.as_deref());
                     let keywords: Vec<&str> = keyword.iter().map(|s| s.as_str()).collect();
@@ -1135,6 +1209,7 @@ fn main() -> Result<()> {
                         limit,
                         user_only,
                         json,
+                        active_only,
                         source.into(),
                     )?;
                 }
@@ -1168,14 +1243,20 @@ fn main() -> Result<()> {
                     handle_session_restore_with_source(session_id.as_deref(), source.into())?;
                 }
                 Some(SessionAction::Projects) => {
-                    handle_session_projects(source.into())?;
+                    handle_session_projects(source.into(), include_hidden)?;
                 }
                 Some(SessionAction::Overview {
                     recent,
                     since,
                     json,
                 }) => {
-                    handle_session_overview(recent, since.as_deref(), json, source.into())?;
+                    handle_session_overview(
+                        recent,
+                        since.as_deref(),
+                        json,
+                        source.into(),
+                        include_hidden,
+                    )?;
                 }
             }
         }
@@ -1289,6 +1370,7 @@ mod tests {
                 limit: _,
                 user_only: _,
                 json: _,
+                active_only: _,
             } => {}
             SessionAction::Show {
                 session_id: _,
@@ -1324,5 +1406,57 @@ mod tests {
             }
             _ => panic!("expected session list command"),
         }
+    }
+
+    #[test]
+    fn test_session_maintenance_actions_parse() {
+        for flag in ["--enable", "--disable", "--status", "--dry-run", "--run"] {
+            let cli = Cli::try_parse_from(["ccs", "session", "maintain", flag])
+                .expect("maintenance action should parse");
+            assert!(matches!(cli.command, Some(Commands::Session { .. })));
+        }
+    }
+
+    #[test]
+    fn test_session_maintenance_defaults_to_status() {
+        let cli = Cli::try_parse_from(["ccs", "session", "maintain"])
+            .expect("maintenance without action should parse");
+        assert!(matches!(cli.command, Some(Commands::Session { .. })));
+    }
+
+    #[test]
+    fn test_session_maintenance_actions_are_mutually_exclusive() {
+        let result = Cli::try_parse_from(["ccs", "session", "maintain", "--enable", "--run"]);
+        let error = match result {
+            Ok(_) => panic!("maintenance actions must conflict"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn test_session_maintenance_explain_keep_and_mark_parse() {
+        for args in [
+            vec!["ccs", "session", "explain", "abc", "--json"],
+            vec!["ccs", "session", "keep", "abc"],
+            vec!["ccs", "session", "unkeep", "abc"],
+            vec!["ccs", "session", "mark-test", "abc"],
+            vec!["ccs", "session", "unmark-test", "abc"],
+        ] {
+            Cli::try_parse_from(args).expect("maintenance session action should parse");
+        }
+    }
+
+    #[test]
+    fn test_session_visibility_and_search_flags_parse_before_or_after_actions() {
+        for args in [
+            vec!["ccs", "session", "--include-hidden", "list"],
+            vec!["ccs", "session", "list", "--include-hidden"],
+        ] {
+            Cli::try_parse_from(args).expect("include-hidden should parse globally");
+        }
+        let cli = Cli::try_parse_from(["ccs", "session", "search", "test", "--active-only"])
+            .expect("active-only should parse");
+        assert!(matches!(cli.command, Some(Commands::Session { .. })));
     }
 }
