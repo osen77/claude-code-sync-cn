@@ -2,4 +2,6 @@
 
 pub(crate) mod classifier;
 #[allow(dead_code)]
+pub(crate) mod recycle;
+#[allow(dead_code)]
 pub(crate) mod state;
