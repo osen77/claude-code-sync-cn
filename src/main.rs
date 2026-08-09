@@ -693,6 +693,15 @@ impl From<SessionSourceArg> for handlers::session::SessionSourceFilter {
     }
 }
 
+fn resolve_command(command: Option<Commands>) -> Commands {
+    command.unwrap_or(Commands::Session {
+        action: None,
+        project: None,
+        source: SessionSourceArg::All,
+        include_hidden: false,
+    })
+}
+
 fn main() -> Result<()> {
     // Parse CLI arguments before initializing logging so logger options are available.
     let cli = Cli::parse();
@@ -707,17 +716,19 @@ fn main() -> Result<()> {
         eprintln!("WARNING: {warning}");
     }
 
+    let command = resolve_command(cli.command);
+
     log::debug!("ccs started");
 
     // Local commands, including every session action, must not start a network update check.
-    let is_update_command = matches!(cli.command, Some(Commands::Update { .. }));
+    let is_update_command = matches!(command, Commands::Update { .. });
     let is_local_command = matches!(
-        cli.command,
-        Some(Commands::Session { .. })
-            | Some(Commands::Config { .. })
-            | Some(Commands::Status { .. })
-            | Some(Commands::Report { .. })
-            | Some(Commands::History { .. })
+        command,
+        Commands::Session { .. }
+            | Commands::Config { .. }
+            | Commands::Status { .. }
+            | Commands::Report { .. }
+            | Commands::History { .. }
     );
     let update_check_handle = (!is_update_command && !is_local_command)
         .then(|| std::thread::spawn(check_for_update_silent));
@@ -730,36 +741,6 @@ fn main() -> Result<()> {
 
     // Check if initialization is needed (before processing any command)
     let needs_onboarding = !is_initialized()?;
-
-    // Determine the actual command to run
-    let command = if let Some(cmd) = cli.command {
-        cmd
-    } else {
-        // No command provided
-        if needs_onboarding {
-            // Will trigger onboarding below, then default to sync
-            Commands::Sync {
-                message: None,
-                branch: None,
-                exclude_attachments: false,
-                prune: false,
-                interactive: false,
-                verbose: false,
-                quiet: false,
-            }
-        } else {
-            // Already initialized, default to sync
-            Commands::Sync {
-                message: None,
-                branch: None,
-                exclude_attachments: false,
-                prune: false,
-                interactive: false,
-                verbose: false,
-                quiet: false,
-            }
-        }
-    };
 
     // Check if this is a command that should skip auto-onboarding
     let is_init_command = matches!(command, Commands::Init { .. });
@@ -1268,6 +1249,26 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_default_command_is_interactive_session() {
+        let cli = Cli::try_parse_from(["ccs"]).expect("bare ccs should parse");
+
+        match resolve_command(cli.command) {
+            Commands::Session {
+                action,
+                project,
+                source,
+                include_hidden,
+            } => {
+                assert!(action.is_none());
+                assert!(project.is_none());
+                assert_eq!(source, SessionSourceArg::All);
+                assert!(!include_hidden);
+            }
+            _ => panic!("bare ccs should default to interactive session mode"),
+        }
+    }
 
     fn parse_session_source(args: &[&str]) -> SessionSourceArg {
         let cli = Cli::try_parse_from(args).expect("CLI should parse");
