@@ -375,7 +375,7 @@ fn cache_read_failure_is_degraded_and_redacted_in_cli_json() {
 }
 
 #[test]
-fn cache_version_mismatch_is_one_degraded_error_and_redacted_in_cli_json() {
+fn cache_version_mismatch_rebuilds_quietly_without_degrading_the_scan() {
     let (home, config, log_dir) = make_fixture(false);
     fs::write(
         config.path().join("session_index.json"),
@@ -394,19 +394,41 @@ fn cache_version_mismatch_is_one_degraded_error_and_redacted_in_cli_json() {
     let payload: Value = serde_json::from_slice(&output.stdout).expect("version mismatch JSON");
     let diagnostic_id = assert_json_contract(&payload);
     assert_log_contains_invocation(&log_path, &diagnostic_id);
-    assert_eq!(payload["diagnostics"]["cache_errors"], 1);
-    assert_safe_cache_diagnostic(
-        &output,
-        &log_path,
-        home.path(),
-        config.path(),
-        &[
-            "session_index.json",
-            r#""version":999"#,
-            "os error",
-            "not-json",
-        ],
+
+    // A version bump rebuilds the whole cache and loses nothing, so it is a routine
+    // upgrade step rather than a defect: no error count, no degradation, no warning.
+    assert_eq!(payload["diagnostics"]["cache_errors"], 0);
+    assert_eq!(payload["diagnostics"]["degraded"], false);
+    assert_eq!(payload["total_projects"], 1);
+    // The rebuild is traceable in the log but never reaches the terminal, so a routine
+    // upgrade costs the user nothing to read.
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("Session scan incomplete"),
+        "routine rebuild must not warn: {stderr}"
     );
+    assert!(
+        !stderr.contains("rebuilding"),
+        "routine rebuild must stay off the terminal: {stderr}"
+    );
+
+    assert_no_path_leak(&output, &log_path, home.path(), config.path());
+    let log = fs::read_to_string(&log_path).expect("read version mismatch log");
+    assert!(
+        log.contains("rebuilding the index"),
+        "the rebuild should still be traceable in the log: {log}"
+    );
+    for marker in [
+        "session_index.json",
+        r#""version":999"#,
+        "os error",
+        "not-json",
+    ] {
+        assert!(
+            !log.contains(marker),
+            "raw cache detail leaked to log: {log}"
+        );
+    }
 }
 
 #[test]

@@ -799,13 +799,26 @@ fn scan_all_session_summaries_with_roots_mode(
     let cache_warning = cache_status.warning;
     let cache = cache_status.cache;
     if let Some(warning) = cache_warning.as_deref() {
-        diagnostics.record_warning(
-            None,
-            "load",
-            ScanWarningCategory::Cache,
-            Some(config_dir),
-            warning,
-        );
+        if cache_status.routine_rebuild {
+            // An upgrade that changed the cache format rebuilds the index in full and
+            // loses nothing, so it stays out of the diagnostics: counting it as an
+            // error tells the user to investigate a scan that was never incomplete.
+            // The scan-diagnostics target keeps this in the log file without printing
+            // to the terminal, so the rebuild stays traceable but invisible. The
+            // message is a fixed string and carries no path or user data.
+            log::info!(
+                target: crate::logger::SCAN_DIAGNOSTICS_TARGET,
+                "session index cache format changed; rebuilding the index"
+            );
+        } else {
+            diagnostics.record_warning(
+                None,
+                "load",
+                ScanWarningCategory::Cache,
+                Some(config_dir),
+                warning,
+            );
+        }
     }
 
     let mut delta = CacheDelta::default();

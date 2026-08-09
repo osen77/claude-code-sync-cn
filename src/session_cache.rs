@@ -87,6 +87,14 @@ pub struct CacheLoadStatus {
     pub cache: SessionIndexCache,
     /// A diagnostic warning for non-missing load failures.
     pub warning: Option<String>,
+    /// Whether the warning describes a routine rebuild rather than a defect.
+    ///
+    /// A version mismatch is the expected path after an upgrade that changed
+    /// [`CACHE_VERSION`]: the index is rebuilt in full from the sources and nothing
+    /// is lost, so it must not be reported as a scan degradation. Invalid or
+    /// unreadable cache files stay defects — they can mean corruption or a
+    /// permission problem the user needs to know about.
+    pub routine_rebuild: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -241,7 +249,8 @@ impl SessionIndexCache {
     /// Load the cache from `{config_dir}/session_index.json` with diagnostics.
     ///
     /// A missing cache is the normal cold-start case and has no warning. Other
-    /// read, parse, and version errors return an empty cache with a warning.
+    /// read, parse, and version errors return an empty cache with a warning;
+    /// see [`CacheLoadStatus::routine_rebuild`] for which of those are defects.
     pub fn load_with_status(config_dir: &Path) -> CacheLoadStatus {
         match load_unlocked_with_kind(config_dir) {
             CacheLoadKind::Missing => {
@@ -249,6 +258,7 @@ impl SessionIndexCache {
                 CacheLoadStatus {
                     cache: Self::empty(),
                     warning: None,
+                    routine_rebuild: false,
                 }
             }
             CacheLoadKind::Loaded(mut cache) => {
@@ -257,19 +267,23 @@ impl SessionIndexCache {
                 CacheLoadStatus {
                     cache,
                     warning: None,
+                    routine_rebuild: false,
                 }
             }
             CacheLoadKind::Invalid => CacheLoadStatus {
                 cache: Self::empty(),
                 warning: Some("cache data invalid".to_string()),
+                routine_rebuild: false,
             },
             CacheLoadKind::VersionMismatch(_) => CacheLoadStatus {
                 cache: Self::empty(),
                 warning: Some("cache version mismatch".to_string()),
+                routine_rebuild: true,
             },
             CacheLoadKind::ReadFailed => CacheLoadStatus {
                 cache: Self::empty(),
                 warning: Some("cache read failed".to_string()),
+                routine_rebuild: false,
             },
         }
     }
@@ -950,6 +964,28 @@ mod tests {
 
         assert_eq!(status.warning.as_deref(), Some("cache version mismatch"));
         assert!(status.cache.entries.is_empty());
+    }
+
+    #[test]
+    fn only_a_version_mismatch_counts_as_a_routine_rebuild() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_file = cache_path(temp.path());
+
+        assert!(!SessionIndexCache::load_with_status(temp.path()).routine_rebuild);
+
+        std::fs::write(
+            &cache_file,
+            serde_json::to_vec(&serde_json::json!({"version": 999, "entries": {}})).unwrap(),
+        )
+        .unwrap();
+        assert!(SessionIndexCache::load_with_status(temp.path()).routine_rebuild);
+
+        std::fs::write(&cache_file, b"not-json").unwrap();
+        assert!(!SessionIndexCache::load_with_status(temp.path()).routine_rebuild);
+
+        std::fs::remove_file(&cache_file).unwrap();
+        std::fs::create_dir(&cache_file).unwrap();
+        assert!(!SessionIndexCache::load_with_status(temp.path()).routine_rebuild);
     }
 
     #[test]
