@@ -390,12 +390,17 @@ Codex 和 OMP 不参与同步，也不能通过普通 Rename/Delete 删除会话
 ### 交互模式（推荐）
 
 ```bash
-# 进入交互式界面，默认展示三个来源
+# 最常用：直接进入交互式会话选择，默认展示三个来源
+ccs
+
+# 等价的显式写法
 ccs session
 
 # 只展示 Codex
 ccs session --source codex
 ```
+
+双向同步不再是裸命令的默认行为，需要显式运行 `ccs sync`。
 
 **在项目目录中运行：**
 - 自动识别当前目录对应的项目
@@ -571,6 +576,7 @@ ccs unlock-delete --off           # 提前关闭
 
 | 命令 | 说明 |
 |------|------|
+| `ccs` | 进入交互式会话选择（等价于 `ccs session`） |
 | `ccs setup` | 交互式配置向导 |
 | `ccs sync` | 双向同步 |
 | `ccs pull` | 拉取远程更新 |

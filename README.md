@@ -118,6 +118,7 @@ RUST_LOG=error ccs session list
 
 | 命令 | 说明 |
 |------|------|
+| `ccs` | 进入交互式会话选择（等价于 `ccs session`） |
 | `ccs setup` | 交互式配置向导 |
 | `ccs sync` | 双向同步 |
 | `ccs automate` | 配置自动同步 |
