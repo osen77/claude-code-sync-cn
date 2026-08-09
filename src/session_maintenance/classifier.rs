@@ -3,6 +3,7 @@ use crate::session_model::SessionIdentity;
 use chrono::{DateTime, Duration, Utc};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -10,6 +11,24 @@ use std::sync::OnceLock;
 #[allow(dead_code)]
 pub(crate) const CLASSIFIER_VERSION: u32 = 1;
 pub(crate) const DEFAULT_THRESHOLD: u16 = 70;
+/// Weight of a session that ran inside a temporary root. Set so that a temporary
+/// cwd plus one other weak signal still stays below the threshold, while the
+/// usual throwaway shape (few messages, short duration) crosses it.
+const TEMPORARY_CWD_SCORE: u16 = 40;
+/// Weight of an opening message that repeats verbatim in a tight burst.
+const REPEATED_TITLE_SCORE: u16 = 30;
+/// How many verbatim repeats inside the window make a burst.
+const REPEATED_TITLE_BURST_MIN: usize = 3;
+/// Window that separates a person re-running the same probe from a schedule.
+///
+/// Measured against real data: manual re-runs land three copies within minutes,
+/// while the tightest realistic schedule (hourly) needs two hours for three runs.
+/// Only a sub-half-hourly job with a completely fixed prompt would be caught, and
+/// such a job produces enough sessions to be noticed on its own.
+const REPEATED_TITLE_WINDOW_MINUTES: i64 = 60;
+/// Placeholder used when a session has no extractable opening message. It is not a
+/// real title, so it must never group sessions together.
+const MISSING_TITLE_PLACEHOLDER: &str = "(No title)";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassifierPolicy {
@@ -75,6 +94,7 @@ pub enum ReasonCode {
     FewTotalMessages,
     ShortDuration,
     TemporaryCwd,
+    RepeatedTitleBurst,
     RecentActivityProtection,
     CustomTitleProtection,
     LongConversationProtection,
@@ -88,7 +108,15 @@ pub struct MaintenanceCandidate {
     pub original_relative_path: PathBuf,
     #[allow(dead_code)]
     pub project_name: String,
+    /// Encoded storage directory of the session. Never use this for temporary-root
+    /// checks: for Claude it is `~/.claude/projects/<encoded>`, not the real cwd.
+    #[allow(dead_code)]
     pub project_dir: PathBuf,
+    /// Real working directory the session ran in, when the source records one.
+    pub cwd: Option<PathBuf>,
+    /// Whether this session's opening message repeats verbatim in a tight burst.
+    /// Computed across the whole candidate set by [`repeated_title_bursts`].
+    pub repeated_title_burst: bool,
     pub title: String,
     pub has_custom_title: bool,
     pub user_message_count: usize,
@@ -149,10 +177,7 @@ pub(crate) fn classify(
     }
 
     let normalized_title = candidate.title.trim().to_lowercase();
-    if matches!(
-        normalized_title.as_str(),
-        "测试" | "test" | "hello" | "hi" | "试一下"
-    ) {
+    if is_trivial_probe_title(&normalized_title) {
         score = score.saturating_add(35);
         reasons.push(ReasonCode::ExactTestTitle);
     }
@@ -180,10 +205,15 @@ pub(crate) fn classify(
         reasons.push(ReasonCode::ShortDuration);
     }
 
-    if is_temporary_cwd(&candidate.project_dir, &policy.temporary_roots) {
-        score = score.saturating_add(20);
+    if candidate.repeated_title_burst {
+        score = score.saturating_add(REPEATED_TITLE_SCORE);
+        reasons.push(ReasonCode::RepeatedTitleBurst);
+    }
+
+    if is_temporary_cwd(candidate.cwd.as_deref(), &policy.temporary_roots) {
+        score = score.saturating_add(TEMPORARY_CWD_SCORE);
         if is_fixture_session_id(&candidate.identity.session_id)
-            && is_fixture_cwd(&candidate.project_dir)
+            && candidate.cwd.as_deref().is_some_and(is_fixture_cwd)
         {
             reasons.push(ReasonCode::FixtureTemporaryCwd);
         } else {
@@ -241,14 +271,99 @@ fn is_fixture_session_id(session_id: &str) -> bool {
         .is_match(session_id)
 }
 
-fn is_temporary_cwd(project_dir: &Path, temporary_roots: &[PathBuf]) -> bool {
-    temporary_roots
-        .iter()
-        .any(|root| !root.as_os_str().is_empty() && project_dir.starts_with(root))
+/// Flag each session whose opening message repeats verbatim at least
+/// [`REPEATED_TITLE_BURST_MIN`] times inside [`REPEATED_TITLE_WINDOW_MINUTES`].
+///
+/// A person debugging re-runs the same prompt back to back; a scheduled job repeats
+/// on a cadence measured in hours or days. The window is what separates them, so
+/// grouping is exact and a job whose prompt embeds per-run content never groups at all.
+///
+/// Input is `(title, first_activity)` per session, in any order. Output is a
+/// same-length, same-order flag vector. Sessions without a timestamp or with the
+/// missing-title placeholder are never flagged.
+pub(crate) fn repeated_title_bursts(sessions: &[(String, Option<DateTime<Utc>>)]) -> Vec<bool> {
+    let mut by_title: HashMap<&str, Vec<(DateTime<Utc>, usize)>> = HashMap::new();
+    for (index, (title, first_activity)) in sessions.iter().enumerate() {
+        let trimmed = title.trim();
+        if trimmed.is_empty() || trimmed == MISSING_TITLE_PLACEHOLDER {
+            continue;
+        }
+        if let Some(started_at) = first_activity {
+            by_title
+                .entry(trimmed)
+                .or_default()
+                .push((*started_at, index));
+        }
+    }
+
+    let window = Duration::minutes(REPEATED_TITLE_WINDOW_MINUTES);
+    let mut flags = vec![false; sessions.len()];
+    for occurrences in by_title.values_mut() {
+        if occurrences.len() < REPEATED_TITLE_BURST_MIN {
+            continue;
+        }
+        occurrences.sort_by_key(|(started_at, _)| *started_at);
+        let mut start = 0usize;
+        for end in 0..occurrences.len() {
+            while occurrences[end]
+                .0
+                .signed_duration_since(occurrences[start].0)
+                > window
+            {
+                start += 1;
+            }
+            if end - start + 1 >= REPEATED_TITLE_BURST_MIN {
+                for (_, index) in &occurrences[start..=end] {
+                    flags[*index] = true;
+                }
+            }
+        }
+    }
+    flags
 }
 
-fn is_fixture_cwd(project_dir: &Path) -> bool {
-    let Some(name) = project_dir.file_name().and_then(|name| name.to_str()) else {
+/// Opening messages that carry no task on their own, so the whole session is a probe.
+///
+/// Matching is exact after trimming trailing punctuation. Substring matching is
+/// deliberately avoided: short genuine questions ("茅台现在多少钱？") share the same
+/// message-count and duration shape as a probe, so the title is the only signal
+/// separating them and it has to be precise.
+const TRIVIAL_PROBE_TITLES: [&str; 11] = [
+    "测试",
+    "test",
+    "hello",
+    "hi",
+    "试一下",
+    "ok",
+    "好",
+    "你好",
+    "在吗",
+    "说一句话",
+    "随便说点什么",
+];
+
+fn is_trivial_probe_title(normalized_title: &str) -> bool {
+    let trimmed = normalized_title.trim_end_matches(|character: char| {
+        character.is_whitespace()
+            || matches!(
+                character,
+                '。' | '．' | '.' | '！' | '!' | '？' | '?' | '~' | '～' | '、' | '，' | ','
+            )
+    });
+    TRIVIAL_PROBE_TITLES.contains(&trimmed)
+}
+
+fn is_temporary_cwd(cwd: Option<&Path>, temporary_roots: &[PathBuf]) -> bool {
+    let Some(cwd) = cwd else {
+        return false;
+    };
+    temporary_roots
+        .iter()
+        .any(|root| !root.as_os_str().is_empty() && cwd.starts_with(root))
+}
+
+fn is_fixture_cwd(cwd: &Path) -> bool {
+    let Some(name) = cwd.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
     let Some(task_prefix) = name.strip_prefix("task") else {
@@ -298,6 +413,8 @@ mod tests {
             original_relative_path: PathBuf::from("project/session.jsonl"),
             project_name: "project".to_string(),
             project_dir: PathBuf::from("/Users/example/project"),
+            cwd: Some(PathBuf::from("/Users/example/project")),
+            repeated_title_burst: false,
             title: title.to_string(),
             has_custom_title: false,
             user_message_count,
@@ -403,7 +520,7 @@ mod tests {
     #[test]
     fn fixture_temporary_cwd_has_dedicated_reason() {
         let mut candidate = candidate("ordinary", 5, 3, 60, "cc-task4");
-        candidate.project_dir = PathBuf::from("/tmp/task3-project");
+        candidate.cwd = Some(PathBuf::from("/tmp/task3-project"));
         let decision = classify(&candidate, &policy(), now());
         assert!(decision.reasons.contains(&ReasonCode::FixtureTemporaryCwd));
     }
@@ -429,10 +546,170 @@ mod tests {
         assert_eq!(decision.reasons, vec![ReasonCode::ExplicitTestMarker]);
     }
 
+    fn burst_input(entries: &[(&str, i64)]) -> Vec<(String, Option<DateTime<Utc>>)> {
+        entries
+            .iter()
+            .map(|(title, offset_minutes)| {
+                (
+                    (*title).to_string(),
+                    Some(now() + Duration::minutes(*offset_minutes)),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn three_identical_titles_within_the_window_are_a_burst() {
+        let sessions = burst_input(&[("列出工具名", 0), ("列出工具名", 2), ("列出工具名", 33)]);
+        assert_eq!(repeated_title_bursts(&sessions), vec![true, true, true]);
+    }
+
+    #[test]
+    fn daily_scheduled_repeats_are_not_a_burst() {
+        // A job firing once a day repeats verbatim but never lands three runs
+        // inside the window, so it must stay untouched.
+        let day = 24 * 60;
+        let sessions = burst_input(&[("每日巡检", 0), ("每日巡检", day), ("每日巡检", 2 * day)]);
+        assert_eq!(repeated_title_bursts(&sessions), vec![false, false, false]);
+    }
+
+    #[test]
+    fn hourly_scheduled_repeats_are_not_a_burst() {
+        let sessions = burst_input(&[("每小时巡检", 0), ("每小时巡检", 60), ("每小时巡检", 120)]);
+        assert_eq!(repeated_title_bursts(&sessions), vec![false, false, false]);
+    }
+
+    #[test]
+    fn only_the_clustered_members_of_a_group_are_flagged() {
+        let sessions = burst_input(&[
+            ("同一提示词", 0),
+            ("同一提示词", 1),
+            ("同一提示词", 2),
+            ("同一提示词", 10_000),
+        ]);
+        assert_eq!(
+            repeated_title_bursts(&sessions),
+            vec![true, true, true, false]
+        );
+    }
+
+    #[test]
+    fn two_repeats_are_never_a_burst() {
+        let sessions = burst_input(&[("茅台现在多少钱？", 0), ("茅台现在多少钱？", 9)]);
+        assert_eq!(repeated_title_bursts(&sessions), vec![false, false]);
+    }
+
+    #[test]
+    fn placeholder_and_untimed_sessions_are_never_a_burst() {
+        let sessions = vec![
+            ("(No title)".to_string(), Some(now())),
+            ("(No title)".to_string(), Some(now() + Duration::minutes(1))),
+            ("(No title)".to_string(), Some(now() + Duration::minutes(2))),
+            ("未知时间".to_string(), None),
+            ("未知时间".to_string(), None),
+            ("未知时间".to_string(), None),
+        ];
+        assert_eq!(
+            repeated_title_bursts(&sessions),
+            vec![false, false, false, false, false, false]
+        );
+    }
+
+    #[test]
+    fn repeated_title_burst_crosses_threshold_only_with_the_throwaway_shape() {
+        let mut probe = candidate(
+            "列出工具名",
+            1,
+            2,
+            1,
+            "550e8400-e29b-41d4-a716-446655440000",
+        );
+        probe.repeated_title_burst = true;
+        let decision = classify(&probe, &policy(), now());
+        assert!(decision.reasons.contains(&ReasonCode::RepeatedTitleBurst));
+        assert_eq!(decision.classification, Classification::TestCandidate);
+
+        // A substantial conversation that happens to repeat stays below the line.
+        let mut substantial = candidate(
+            "列出工具名",
+            5,
+            12,
+            90,
+            "550e8400-e29b-41d4-a716-446655440000",
+        );
+        substantial.repeated_title_burst = true;
+        let decision = classify(&substantial, &policy(), now());
+        assert_eq!(decision.classification, Classification::Keep);
+    }
+
+    #[test]
+    fn trivial_probe_titles_ignore_trailing_punctuation() {
+        for title in ["ok", "OK", "说一句话。", "你好！", "在吗?", "好"] {
+            let candidate = candidate(title, 1, 2, 1, "550e8400-e29b-41d4-a716-446655440000");
+            let decision = classify(&candidate, &policy(), now());
+            assert!(
+                decision.reasons.contains(&ReasonCode::ExactTestTitle),
+                "expected {title:?} to be a trivial probe"
+            );
+            assert_eq!(decision.classification, Classification::TestCandidate);
+        }
+    }
+
+    #[test]
+    fn real_questions_that_merely_start_with_a_probe_word_are_kept() {
+        // Short genuine questions share the throwaway shape, so only an exact
+        // match may contribute the title score.
+        for title in [
+            "茅台现在多少钱？",
+            "ok 了吗，部署完成没有",
+            "你好，帮我看下这个报错",
+        ] {
+            let candidate = candidate(title, 1, 2, 1, "550e8400-e29b-41d4-a716-446655440000");
+            let decision = classify(&candidate, &policy(), now());
+            assert!(
+                !decision.reasons.contains(&ReasonCode::ExactTestTitle),
+                "expected {title:?} to keep its title score at zero"
+            );
+            assert_eq!(decision.classification, Classification::Keep);
+        }
+    }
+
+    #[test]
+    fn temporary_detection_uses_real_cwd_not_encoded_project_dir() {
+        // Production shape: a Claude session started in /tmp is stored under an
+        // encoded projects directory that never starts with a temporary root.
+        let mut candidate = candidate(
+            "只回答一行",
+            1,
+            2,
+            1,
+            "550e8400-e29b-41d4-a716-446655440000",
+        );
+        candidate.project_dir = PathBuf::from("/Users/example/.claude/projects/-tmp");
+        candidate.cwd = Some(PathBuf::from("/tmp"));
+
+        let decision = classify(&candidate, &policy(), now());
+
+        assert!(decision.reasons.contains(&ReasonCode::TemporaryCwd));
+        assert_eq!(decision.classification, Classification::TestCandidate);
+    }
+
+    #[test]
+    fn missing_cwd_never_counts_as_temporary() {
+        let mut candidate = candidate("ordinary", 1, 2, 1, "550e8400-e29b-41d4-a716-446655440000");
+        candidate.project_dir = PathBuf::from("/tmp/project");
+        candidate.cwd = None;
+
+        let decision = classify(&candidate, &policy(), now());
+
+        assert!(!decision.reasons.contains(&ReasonCode::TemporaryCwd));
+        assert_eq!(decision.classification, Classification::Keep);
+    }
+
     #[test]
     fn temporary_detection_uses_only_explicit_policy_roots() {
         let mut candidate = candidate("ordinary", 5, 3, 60, "ordinary-session");
-        candidate.project_dir = PathBuf::from("/tmp/project");
+        candidate.cwd = Some(PathBuf::from("/tmp/project"));
         let policy =
             ClassifierPolicy::with_temporary_roots(24, vec![PathBuf::from("/var/explicit")]);
 

@@ -160,7 +160,13 @@ pub struct SessionSummary {
     /// Name of the project associated with the session.
     pub project_name: String,
     /// Filesystem directory associated with the project.
+    ///
+    /// For Claude this is the encoded `~/.claude/projects/<encoded>` storage
+    /// directory, not the directory the session ran in. Use [`SessionSummary::cwd`]
+    /// when the real working directory matters.
     pub project_dir: PathBuf,
+    /// Real working directory the session ran in, when the source records one.
+    pub cwd: Option<String>,
     /// Filesystem path of the source session file.
     pub file_path: PathBuf,
     /// Total number of user and assistant turns.
@@ -221,6 +227,7 @@ impl SessionSummary {
             title: session.title().unwrap_or_else(|| "(No title)".to_string()),
             project_name: project_name.to_string(),
             project_dir: project_dir.to_path_buf(),
+            cwd: session.cwd().map(str::to_string),
             file_path: PathBuf::from(&session.file_path),
             message_count: user_count + assistant_count,
             user_message_count: user_count,
@@ -297,6 +304,7 @@ impl SessionSummary {
                         .map(Path::to_path_buf)
                         .unwrap_or_default()
                 }),
+            cwd: session.cwd.clone(),
             file_path: session.file_path.clone(),
             message_count: user_count + assistant_count,
             user_message_count: user_count,
@@ -335,6 +343,7 @@ impl SessionSummary {
                         .map(Path::to_path_buf)
                         .unwrap_or_default()
                 }),
+            cwd: session.cwd.clone(),
             file_path: session.file_path.clone(),
             message_count: user_count + assistant_count,
             user_message_count: user_count,
@@ -458,6 +467,7 @@ mod tests {
             title: "A real title".to_string(),
             project_name: "project".to_string(),
             project_dir: PathBuf::from("."),
+            cwd: None,
             file_path: PathBuf::from("s1.jsonl"),
             message_count: 1,
             user_message_count: 1,

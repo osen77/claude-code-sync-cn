@@ -791,6 +791,7 @@ fn cache_variant(title: &str) -> SessionIndexCache {
         has_custom_title: title == "new",
         project_name: "cache-task4".to_string(),
         project_dir: "/tmp/cache-task4".to_string(),
+        cwd: Some("/tmp/cache-task4".to_string()),
         message_count: 1,
         user_message_count: 1,
         assistant_message_count: 0,

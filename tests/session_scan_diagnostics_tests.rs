@@ -10,6 +10,14 @@ fn make_fixture(with_malformed_file: bool) -> (TempDir, TempDir, PathBuf) {
     let home = tempfile::tempdir().expect("home tempdir");
     let config = tempfile::tempdir().expect("config tempdir");
     let log_dir = tempfile::tempdir().expect("log tempdir");
+    // These fixtures use the exact shape the classifier targets (fixture session IDs
+    // under a temporary cwd). Maintenance is on by default, so leave it off here or
+    // the sessions get hidden mid-test and the scan diagnostics have nothing to report.
+    fs::write(
+        config.path().join("config.toml"),
+        "[session_maintenance]\nenabled = false\n",
+    )
+    .expect("write filter config fixture");
     let project_dir = home
         .path()
         .join(".claude")

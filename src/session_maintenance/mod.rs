@@ -109,6 +109,9 @@ pub(crate) fn candidate_from_summary(
         original_relative_path,
         project_name: summary.project_name.clone(),
         project_dir: summary.project_dir.clone(),
+        cwd: summary.cwd.as_deref().map(PathBuf::from),
+        // Set by the caller once the whole candidate set is known.
+        repeated_title_burst: false,
         title: summary.title.clone(),
         has_custom_title: summary.has_custom_title,
         user_message_count: summary.user_message_count,
@@ -351,6 +354,19 @@ pub(crate) fn run_maintenance(
         identity_key(&left.0.identity).cmp(&identity_key(&right.0.identity))
     });
     report.candidates = candidates.len();
+
+    // Repeat detection needs the whole candidate set, so it runs once here and the
+    // per-session classifier stays a pure function of its candidate.
+    let burst_inputs: Vec<(String, Option<DateTime<Utc>>)> = candidates
+        .iter()
+        .map(|(candidate, _)| (candidate.title.clone(), candidate.first_activity))
+        .collect();
+    for (burst, (candidate, _)) in classifier::repeated_title_bursts(&burst_inputs)
+        .into_iter()
+        .zip(candidates.iter_mut())
+    {
+        candidate.repeated_title_burst = burst;
+    }
 
     // A pending transaction is recoverable only when its source scan completed. DryRun must
     // remain entirely read-only, so it intentionally skips reconciliation.
@@ -737,6 +753,7 @@ mod tests {
                 title: "test".to_string(),
                 project_name: "project".to_string(),
                 project_dir: PathBuf::from("/tmp/task-6-project"),
+                cwd: Some("/tmp/task-6-project".to_string()),
                 file_path: file_path.to_path_buf(),
                 message_count: 1,
                 user_message_count: 1,

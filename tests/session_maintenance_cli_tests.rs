@@ -26,6 +26,19 @@ impl Fixture {
         }
     }
 
+    /// Pin maintenance off for tests that assert how a lifecycle state renders.
+    ///
+    /// Maintenance is on by default, so `session list` would otherwise advance the
+    /// fixture's states while the test is reading them and the assertion would
+    /// depend on how long ago the fixture's hardcoded timestamps were.
+    fn disable_maintenance(&self) {
+        fs::write(
+            self.config.path().join("config.toml"),
+            "[session_maintenance]\nenabled = false\n",
+        )
+        .expect("filter config");
+    }
+
     fn write_sessions(&self) {
         let claude = self.home.path().join(".claude/projects/-tmp-task8-project");
         fs::create_dir_all(&claude).expect("Claude project root");
@@ -249,6 +262,7 @@ fn source_qualified_show_resolves_ambiguous_ids_and_text_search_has_source_rows(
 #[serial]
 fn recycled_sessions_appear_in_search_show_and_include_hidden_list_only() {
     let fixture = Fixture::empty();
+    fixture.disable_maintenance();
     let recycled_content = concat!(
         r#"{"type":"user","sessionId":"recycled","cwd":"/tmp/recycled-project","timestamp":"2026-08-02T00:00:00Z","message":{"role":"user","content":"recycled-keyword"}}"#,
         "\n",

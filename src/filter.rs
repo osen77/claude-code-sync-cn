@@ -106,7 +106,11 @@ impl Default for AutoMemorySettings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionMaintenanceSettings {
     /// Enable automatic maintenance actions.
-    #[serde(default)]
+    ///
+    /// Defaults to on. The explicit `default` function matters for configs written
+    /// before this section existed: plain `#[serde(default)]` would resolve a missing
+    /// field to `false` and silently keep maintenance off for every upgrading user.
+    #[serde(default = "default_maintenance_enabled")]
     pub enabled: bool,
 
     /// Classifier policy used to decide whether a session is eligible.
@@ -128,6 +132,10 @@ pub struct SessionMaintenanceSettings {
     /// Maximum number of maintenance actions allowed in one run.
     #[serde(default = "default_max_maintenance_actions")]
     pub max_actions_per_run: usize,
+}
+
+fn default_maintenance_enabled() -> bool {
+    true
 }
 
 fn default_maintenance_classifier() -> String {
@@ -153,7 +161,7 @@ fn default_max_maintenance_actions() -> usize {
 impl Default for SessionMaintenanceSettings {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: default_maintenance_enabled(),
             classifier: default_maintenance_classifier(),
             hide_after_hours: default_hide_after_hours(),
             recycle_after_days: default_recycle_after_days(),
@@ -868,9 +876,9 @@ mod tests {
     }
 
     #[test]
-    fn maintenance_defaults_are_safe_and_disabled() {
+    fn maintenance_is_enabled_by_default_with_conservative_timings() {
         let config = FilterConfig::default();
-        assert!(!config.session_maintenance.enabled);
+        assert!(config.session_maintenance.enabled);
         assert_eq!(config.session_maintenance.classifier, "conservative");
         assert_eq!(config.session_maintenance.hide_after_hours, 24);
         assert_eq!(config.session_maintenance.recycle_after_days, 7);
@@ -885,6 +893,14 @@ mod tests {
             config.session_maintenance,
             SessionMaintenanceSettings::default()
         );
+    }
+
+    #[test]
+    fn explicitly_disabled_maintenance_survives_the_new_default() {
+        // An existing config that opted out must not be re-enabled on upgrade.
+        let config: FilterConfig =
+            toml::from_str("[session_maintenance]\nenabled = false\n").unwrap();
+        assert!(!config.session_maintenance.enabled);
     }
 
     #[test]

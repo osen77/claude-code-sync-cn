@@ -21,7 +21,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-const CACHE_VERSION: u32 = 4;
+const CACHE_VERSION: u32 = 5;
 const KNOWN_CACHE_SOURCES: [&str; 3] = ["claude", "codex", "omp"];
 const LEGACY_CONTENT_FINGERPRINT: &str = "";
 
@@ -100,6 +100,8 @@ pub struct CachedEntry {
     pub title: String,
     pub project_name: String,
     pub project_dir: String,
+    #[serde(default)]
+    pub cwd: Option<String>,
     pub message_count: usize,
     pub user_message_count: usize,
     pub assistant_message_count: usize,
@@ -345,6 +347,7 @@ impl SessionIndexCache {
             title: entry.title.clone(),
             project_name: entry.project_name.clone(),
             project_dir: PathBuf::from(&entry.project_dir),
+            cwd: entry.cwd.clone(),
             file_path: file_path.to_path_buf(),
             message_count: entry.message_count,
             user_message_count: entry.user_message_count,
@@ -379,6 +382,7 @@ impl SessionIndexCache {
             title: entry.title.clone(),
             project_name: entry.project_name.clone(),
             project_dir: PathBuf::from(&entry.project_dir),
+            cwd: entry.cwd.clone(),
             file_path: file_path.to_path_buf(),
             message_count: entry.message_count,
             user_message_count: entry.user_message_count,
@@ -430,6 +434,7 @@ impl SessionIndexCache {
                 title: summary.title.clone(),
                 project_name: summary.project_name.clone(),
                 project_dir: summary.project_dir.to_string_lossy().to_string(),
+                cwd: summary.cwd.clone(),
                 message_count: summary.message_count,
                 user_message_count: summary.user_message_count,
                 assistant_message_count: summary.assistant_message_count,
@@ -747,6 +752,7 @@ mod tests {
             title: "Test session title".to_string(),
             project_name: "my-project".to_string(),
             project_dir: project_dir.to_path_buf(),
+            cwd: Some("/Users/example/my-project".to_string()),
             file_path: file_path.to_path_buf(),
             message_count: 10,
             user_message_count: 5,
@@ -1183,6 +1189,7 @@ mod tests {
             title: "title".to_string(),
             project_name: "project".to_string(),
             project_dir: "/tmp/project".to_string(),
+            cwd: Some("/tmp/project".to_string()),
             message_count: 1,
             user_message_count: 1,
             assistant_message_count: 0,
@@ -1632,6 +1639,7 @@ mod tests {
             title: summary.title,
             project_name: summary.project_name,
             project_dir: summary.project_dir.to_string_lossy().to_string(),
+            cwd: summary.cwd.clone(),
             message_count: summary.message_count,
             user_message_count: summary.user_message_count,
             assistant_message_count: summary.assistant_message_count,
@@ -1660,6 +1668,7 @@ mod tests {
                     title: String::new(),
                     project_name: String::new(),
                     project_dir: String::new(),
+                    cwd: None,
                     message_count: 0,
                     user_message_count: 0,
                     assistant_message_count: 0,

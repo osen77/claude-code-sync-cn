@@ -158,14 +158,17 @@ Codex/OMP 的普通 rename/delete 仍为只读；本地维护只移动和恢复�
 
 ### 5.2 测试会话维护 (`session_maintenance/`, `handlers/session.rs`)
 
-- 默认关闭；`ccs session maintain --enable` 开启后由 list/projects/overview/interactive 惰性推进文件动作，无 daemon；search/show 使用 ObserveOnly。
+- **默认开启**（`SessionMaintenanceSettings::enabled` 默认 `true`，且 serde 缺省函数返回 `true`，老 config.toml 缺该字段时同样开启）；`ccs session maintain --disable` 可关闭，显式写入的 `enabled = false` 不会被升级覆盖。由 list/projects/overview/interactive 惰性推进文件动作，无 daemon；search/show 使用 ObserveOnly。
+- ⚠️ 测试注意：默认开启意味着任何用 fixture session id（`cc-taskN`）或临时目录 cwd 的测试 fixture，会在 list/overview 期间被自动隐藏。**非维护主题的测试必须在 config dir 写 `config.toml` 显式 `enabled = false`**（路径是 `{config_dir}/config.toml`，不是 `~/.claude/filter.toml`）。
 - 默认生命周期：活动满 24h 后允许 Hidden；首次隐藏满 7d 后 Recycled；首次隐藏满 30d 后 PurgedLocal；每次最多 50 个文件动作。
 - `list/projects/overview/interactive` 默认隐藏 Hidden/Recycled，`--include-hidden` 显示；`search` 默认包含它们，`--active-only` 排除。
 - `SessionIdentity` 必须始终使用 `(source, session_id)`；所有 mutation 在锁内 reload，degraded source scan 禁止 destructive action。
 - 回收事务在触碰 source 前持久化 pending journal，使用 trusted-root、regular non-symlink、fingerprint 与 no-clobber 校验。
 - 自动维护不写 tombstone。Claude Recycled/PurgedLocal 对相同 remote fingerprint 做 pull suppression；changed revision 延迟到单文件成功落地后 CAS 清 suppression。
 - `purged_local` 只表示本机回收副本已清除。跨设备永久删除只允许显式 `session delete` 或手动 `push --prune`。
-- Session index cache 当前为 v4，新增 `has_custom_title`，旧 v3 必须失效重建，避免 custom-title 硬保护被旧 cache 绕过。
+- 分类器信号中，`TemporaryCwd` 与 `FixtureTemporaryCwd` 必须读 `MaintenanceCandidate::cwd`（真实工作目录），**禁止**读 `project_dir`——Claude 的 `project_dir` 是 `~/.claude/projects/<encoded>` 编码目录，与 Codex/OMP 的语义不同。
+- `RepeatedTitleBurst` 是唯一的跨会话信号：同一逐字标题在 60 分钟内出现 ≥3 次才计分，由 `repeated_title_bursts()` 在候选集装配完成后一次性预扫描，classifier 本身保持纯函数。窗口用于区分手工连跑与定时任务；提示词内嵌每次不同内容的定时任务天然不成组。
+- Session index cache 当前为 v5，新增 `cwd`，旧 v4 必须失效重建，否则临时目录判定会因命中旧 entry 而静默跳过。
 
 ### 6. 自动同步 (`handlers/automate.rs`, `hooks.rs`, `wrapper.rs`)
 
