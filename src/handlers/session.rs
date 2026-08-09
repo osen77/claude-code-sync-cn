@@ -1818,8 +1818,14 @@ fn delete_session_file(file_path: &Path) -> Result<()> {
 }
 
 fn ensure_path_within_root(file_path: &Path, root: &Path) -> Result<()> {
-    let canonical_root = fs::canonicalize(root)
-        .with_context(|| format!("Failed to resolve Claude projects root: {}", root.display()))?;
+    // A root that cannot be resolved contains nothing, so deny instead of surfacing a
+    // resolution error. This is a security guard: its failure mode must be refusal.
+    let Ok(canonical_root) = fs::canonicalize(root) else {
+        anyhow::bail!(
+            "Raw session mutation is only allowed inside Claude projects: {}",
+            file_path.display()
+        );
+    };
     let canonical_file = fs::canonicalize(file_path)
         .with_context(|| format!("Failed to resolve session path: {}", file_path.display()))?;
 
@@ -7250,6 +7256,22 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("Raw session mutation is only allowed inside Claude projects"));
+    }
+
+    #[test]
+    fn test_raw_session_paths_reject_when_root_cannot_be_resolved() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let missing_root = temp_dir.path().join("no-such-projects");
+        let file = temp_dir.path().join("session.jsonl");
+        fs::write(&file, "session\n").unwrap();
+
+        let error = ensure_path_within_root(&file, &missing_root)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("Raw session mutation is only allowed inside Claude projects"),
+            "guard must deny, not report a resolution failure: {error}"
+        );
     }
 
     #[test]
